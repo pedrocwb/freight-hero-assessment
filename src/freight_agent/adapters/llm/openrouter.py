@@ -42,7 +42,6 @@ from freight_agent.adapters.llm.models_config import (
     ModelPricing,
     ModelsConfig,
     RoleConfig,
-    Settings,
     load_models_config,
 )
 from freight_agent.domain.actions import Plan
@@ -56,6 +55,7 @@ from freight_agent.ports.llm import (
     SchemaT,
     ToolSpec,
 )
+from freight_agent.settings import Settings
 
 ChatFactory = Callable[[RoleConfig, SecretStr], BaseChatModel]
 Timer = Callable[[], float]

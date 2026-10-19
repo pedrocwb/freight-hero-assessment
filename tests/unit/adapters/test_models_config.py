@@ -9,14 +9,12 @@ from freight_agent.adapters.llm.models_config import (
     ModelsConfig,
     ProviderRouting,
     RoleConfig,
-    Settings,
     load_models_config,
 )
 from freight_agent.ports.llm import ModelRole
 
 ROOT = Path(__file__).resolve().parents[3]
 SHIPPED = ROOT / "config" / "models.yaml"
-KEY = "sk-or-v1-unit-test-secret"
 
 
 def _config(**overrides: Any) -> dict[str, Any]:
@@ -38,12 +36,6 @@ def _write(tmp_path: Path, raw: dict[str, Any]) -> Path:
     path = tmp_path / "models.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
-
-
-def _settings(env_file: Path | None) -> Settings:
-    """`_env_file` is a pydantic-settings init option that type checkers cannot see."""
-    options: dict[str, Any] = {"_env_file": env_file}
-    return Settings(**options)
 
 
 @pytest.mark.unit
@@ -190,51 +182,6 @@ def test_provider_routing_is_sent_without_unset_preferences() -> None:
         "allow_fallbacks": False,
         "require_parameters": True,
     }
-
-
-@pytest.mark.unit
-def test_settings_read_the_key_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", KEY)
-
-    settings = _settings(None)
-
-    assert settings.require_openrouter_key().get_secret_value() == KEY
-
-
-@pytest.mark.unit
-def test_settings_read_the_key_from_a_dotenv_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    env_file = tmp_path / ".env"
-    env_file.write_text(f"OPENROUTER_API_KEY={KEY}\nDATABASE_URL=postgresql://x\n", "utf-8")
-
-    settings = _settings(env_file)
-
-    assert settings.require_openrouter_key().get_secret_value() == KEY
-
-
-@pytest.mark.unit
-def test_settings_never_show_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", KEY)
-
-    settings = _settings(None)
-
-    assert KEY not in repr(settings)
-    assert KEY not in str(settings)
-    assert KEY not in settings.model_dump_json()
-
-
-@pytest.mark.unit
-def test_a_missing_key_fails_only_when_a_live_model_needs_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-
-    settings = _settings(None)
-
-    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
-        settings.require_openrouter_key()
 
 
 @pytest.mark.unit

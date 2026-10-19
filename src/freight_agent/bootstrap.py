@@ -1,0 +1,283 @@
+"""The composition root: the only place that wires adapters to ports.
+
+The API, the worker, the CLI and the eval harness all build the agent here, from one
+`Settings`, so they run the same `AgentRuntime` and differ only in the adapters chosen.
+Nothing else imports adapters into the core, and `application`, `domain` and `ports`
+never import this module (the import-linter contracts forbid it).
+
+Local mode is the default and needs no secret and no network: in-memory storage,
+recording gateways (there are no real integrations), recorded model answers (`replay`)
+and no tracing. Each outside system is switched on by its setting.
+
+Adapters still being written by other cards (Postgres, the LangSmith tracer) are
+imported lazily, by name, through `LazyAdapter`: until one lands, choosing it is a clear
+error (Postgres) or a logged fallback (tracing), and nothing here has to change when it
+does, as long as it exposes the name below.
+"""
+
+import importlib
+import logging
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+from pydantic import SecretStr
+
+from freight_agent.adapters.channels.fakes.recording import RecordingGateways
+from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.llm.cassette import CassetteModel
+from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
+from freight_agent.adapters.llm.openrouter import models_for_role
+from freight_agent.adapters.llm.resilient import ResilientModel
+from freight_agent.adapters.llm.router import RoleRouter
+from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.observability.null import NullTracer
+from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
+from freight_agent.ports.clock import Clock
+from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.llm import LanguageModel, ModelRole
+from freight_agent.ports.repositories import UnitOfWorkFactory
+from freight_agent.ports.tracing import Tracer
+from freight_agent.settings import LlmMode, PersistenceKind, Settings, is_set
+
+logger = logging.getLogger(__name__)
+
+# One role's fallback chain as (model id, model) pairs, primary first: the seam where
+# tests replace OpenRouter.
+LiveChain = Callable[[ModelsConfig, ModelRole, SecretStr], Sequence[tuple[str, LanguageModel]]]
+PersistenceBuilder = Callable[[Settings], UnitOfWorkFactory]
+
+
+class BootstrapError(Exception):
+    """The settings ask for something that cannot be built. Says what to change."""
+
+
+@dataclass(frozen=True)
+class LazyAdapter:
+    """An adapter found by module and attribute name, imported only when chosen.
+
+    So the root can register an adapter whose card has not merged yet, and a heavy
+    dependency (a database driver, a tracing SDK) loads only for the runs that use it.
+    """
+
+    module: str
+    attribute: str
+
+    def load(self) -> Any | None:
+        """The attribute, or None while the module or the attribute does not exist.
+
+        A module that exists but fails on one of its own imports raises: that adapter
+        is installed and broken, which a fallback would hide.
+        """
+        try:
+            module = importlib.import_module(self.module)
+        except ModuleNotFoundError as exc:
+            missing = exc.name or ""
+            if self.module != missing and not self.module.startswith(f"{missing}."):
+                raise
+            return None
+        return getattr(module, self.attribute, None)
+
+
+# Both are being written by other cards. The names and signatures the root expects:
+# `unit_of_work_factory(database_url: SecretStr) -> UnitOfWorkFactory`
+POSTGRES = LazyAdapter("freight_agent.adapters.persistence.postgres", "unit_of_work_factory")
+# `LangSmithTracer(*, api_key: SecretStr, project: str)`, a `Tracer`
+LANGSMITH = LazyAdapter("freight_agent.adapters.observability.langsmith", "LangSmithTracer")
+
+
+# --- language model ------------------------------------------------------------
+
+
+def openrouter_chain(
+    config: ModelsConfig, role: ModelRole, key: SecretStr
+) -> tuple[tuple[str, LanguageModel], ...]:
+    """The production chain: one OpenRouter model per entry of the role's fallback list."""
+    return tuple((model.model_id, model) for model in models_for_role(config, role, key))
+
+
+def build_llm(
+    settings: Settings,
+    *,
+    mode: LlmMode | None = None,
+    clock: Clock,
+    live_chain: LiveChain = openrouter_chain,
+) -> LanguageModel:
+    """The model the runtime calls, for `mode` (default: `settings.llm_mode`).
+
+    - `scripted`: a `ScriptedModel`; tests and the scripted eval path push its outputs.
+    - `replay`: per role, the recorded answers of the role's primary model. No key.
+    - `live`: per role, the fallback chain behind circuit breakers on `clock`.
+    - `record`: per role, the primary model, its answers saved for `replay`.
+
+    Every role in `config/models.yaml` gets a model, so the eval judge and the simulated
+    driver are served by the same router as the gate and decide.
+    """
+    mode = mode or settings.llm_mode
+    if mode == "scripted":
+        return ScriptedModel()
+    config = _models_config(settings.models_config)
+    roles = tuple(config.roles)
+    if mode == "replay":
+        return RoleRouter(
+            {
+                role: CassetteModel(settings.cassettes_dir, config.role(role).model, "replay")
+                for role in roles
+            }
+        )
+    if mode not in ("live", "record"):
+        raise ValueError(f"unknown llm mode {mode!r}: use scripted, replay, live or record")
+    key = settings.require_openrouter_key()
+    if mode == "live":
+        return RoleRouter(
+            {role: ResilientModel(live_chain(config, role, key), clock) for role in roles}
+        )
+    return RoleRouter(
+        {
+            role: CassetteModel(
+                settings.cassettes_dir,
+                config.role(role).model,
+                "record",
+                inner=_primary(live_chain(config, role, key)),
+            )
+            for role in roles
+        }
+    )
+
+
+def _primary(chain: Sequence[tuple[str, LanguageModel]]) -> LanguageModel:
+    """Record from the primary alone. Cassettes are filed under the primary's id and
+    replayed as its answers, so a fallback's answer must never be recorded there: a
+    failed primary call fails the recording run, and the next run records it again."""
+    (_, model), *_ = chain
+    return model
+
+
+def _models_config(path: Path) -> ModelsConfig:
+    try:
+        return load_models_config(path)
+    except FileNotFoundError:
+        raise BootstrapError(
+            f"the models config {path} does not exist: set MODELS_CONFIG, or run from the "
+            "repository root"
+        ) from None
+
+
+# --- persistence ---------------------------------------------------------------
+
+
+def _memory(settings: Settings) -> UnitOfWorkFactory:
+    """One store per runtime, shared by every unit of work it opens."""
+    return MemoryStore().unit_of_work
+
+
+def _postgres(settings: Settings) -> UnitOfWorkFactory:
+    factory = POSTGRES.load()
+    if factory is None:
+        raise BootstrapError(
+            "PERSISTENCE=postgres, but the Postgres adapter is not available yet "
+            f"({POSTGRES.module}.{POSTGRES.attribute}): set PERSISTENCE=memory"
+        )
+    return factory(settings.require_database_url())
+
+
+PERSISTENCE: Mapping[PersistenceKind, PersistenceBuilder] = MappingProxyType(
+    {"memory": _memory, "postgres": _postgres}
+)
+
+
+def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
+    return PERSISTENCE[settings.persistence](settings)
+
+
+# --- tracing -------------------------------------------------------------------
+
+
+def build_tracer(settings: Settings) -> Tracer:
+    """LangSmith when `LANGSMITH_TRACING` is on and its key is set, otherwise no tracing.
+
+    Tracing is optional and must never stop the agent, so a missing key or a missing
+    adapter falls back to `NullTracer` with a warning (which names no secret).
+    """
+    if not settings.langsmith_tracing:
+        return NullTracer()
+    key = settings.langsmith_api_key
+    if not is_set(key):
+        logger.warning("LANGSMITH_TRACING is on but LANGSMITH_API_KEY is not set: no tracing")
+        return NullTracer()
+    tracer_class = LANGSMITH.load()
+    if tracer_class is None:
+        logger.warning("LANGSMITH_TRACING is on but the LangSmith tracer is not available yet")
+        return NullTracer()
+    return tracer_class(api_key=key, project=settings.langsmith_project)
+
+
+# --- runtime -------------------------------------------------------------------
+
+
+def build_runtime_deps(
+    settings: Settings,
+    *,
+    clock: Clock | None = None,
+    gateways: Gateways | None = None,
+    llm: LanguageModel | None = None,
+    persistence: UnitOfWorkFactory | None = None,
+) -> RuntimeDeps:
+    """Every port of the runtime, from the settings; what the caller passes wins.
+
+    `gateways` defaults to recording fakes: this build has no real integrations, so
+    deliveries are recorded, not sent.
+    """
+    clock = SystemClock() if clock is None else clock
+    return RuntimeDeps(
+        uow_factory=build_uow_factory(settings) if persistence is None else persistence,
+        clock=clock,
+        ids=UuidIdGenerator(),
+        llm=build_llm(settings, clock=clock) if llm is None else llm,
+        sop=FileSopRepository(settings.sops_dir),
+        gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
+        tracer=build_tracer(settings),
+        config=RuntimeConfig(),
+    )
+
+
+def build_runtime(
+    settings: Settings,
+    *,
+    clock: Clock | None = None,
+    gateways: Gateways | None = None,
+    llm: LanguageModel | None = None,
+    persistence: UnitOfWorkFactory | None = None,
+) -> AgentRuntime:
+    """The agent, wired from the settings (see `build_runtime_deps`)."""
+    return AgentRuntime(
+        build_runtime_deps(
+            settings, clock=clock, gateways=gateways, llm=llm, persistence=persistence
+        )
+    )
+
+
+@dataclass(frozen=True)
+class Simulation:
+    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform
+    and the CLI: they move `clock` and read what the agent sent from `gateways.log`."""
+
+    runtime: AgentRuntime
+    clock: VirtualClock
+    gateways: RecordingGateways
+
+
+def build_simulation(
+    settings: Settings, start: datetime, *, llm: LanguageModel | None = None
+) -> Simulation:
+    """A simulation starting at `start` (timezone-aware). Storage and model come from the
+    settings, as for the product; `llm` replaces the model (a scripted one, in tests)."""
+    clock = VirtualClock(start)
+    gateways = RecordingGateways()
+    runtime = build_runtime(settings, clock=clock, gateways=gateways.as_gateways(), llm=llm)
+    return Simulation(runtime=runtime, clock=clock, gateways=gateways)
