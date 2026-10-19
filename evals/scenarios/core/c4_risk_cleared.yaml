@@ -1,0 +1,92 @@
+# C4: the delay risk clears before the procedure is used up. The request is cancelled.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high (an upgrade needs one confirmation).
+#           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
+#                  follow-up timer due 07:31.
+#   step 1  07:10  ping, risk low. A downgrade needs 2 consecutive confirmations, so this
+#                  is the first one: the tracker holds it as pending and no event is
+#                  created. No run, no model call, nothing changes.
+#   step 2  07:20  ping, risk low again: second confirmation, transition high -> low.
+#           07:21  run: intent delay_risk_low from code, decide only. delay_risk_cleared:
+#                  close the open ETA request as cancelled, send no message. Closing
+#                  cancels the 07:31 timer.
+#   step 3  07:31  nothing fires: no reminder SMS.
+#   step 4  08:02  nothing fires either: no dispatcher email and no Hero task (the 08:01
+#                  escalation of the Client A procedure never starts).
+id: c4_risk_cleared
+title: Risk goes back to low before exhaustion; the request closes as cancelled
+suite: core
+tags: [regression, sop:delay_risk_high, sop:delay_risk_cleared]
+description: >
+  Two consecutive low pings confirm the downgrade (one is not enough, so flapping risk
+  does not open and close obligations). The open ETA request is cancelled, its timer is
+  cancelled, and nothing is sent or escalated afterwards.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      llm_calls: 1
+
+  - at: "07:10"
+    note: First low ping. Not confirmed yet, so no event and no run.
+    ping: {delay_risk: low}
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      llm_calls: 0
+
+  - at: "07:20"
+    note: Second consecutive low ping confirms the downgrade; the run at 07:21 cancels the request.
+    ping: {delay_risk: low}
+    script:
+      decide:
+        - actions:
+            - {type: close_obligation, kind: eta_request, status: cancelled}
+          rationale: delay_risk_cleared, risk is back to normal, so close the open ETA request as cancelled and send nothing.
+    expect:
+      obligations:
+        eta_request: {status: cancelled, attempts: 1}
+      timers: {pending: 0}
+      llm_calls: 1
+    forbid:
+      - {kind: sms}
+      - {kind: email}
+      - {kind: broker_slack}
+      - {kind: hero_task}
+
+  - at: "07:31"
+    note: The cancelled timer does not fire.
+    expect:
+      no_actions: true
+      timers: {pending: 0}
+      llm_calls: 0
+
+  - at: "08:02"
+    note: No escalation at 08:01 either.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: cancelled, attempts: 1}
+      timers: {pending: 0}
+      llm_calls: 0

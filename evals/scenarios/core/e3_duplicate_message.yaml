@@ -1,0 +1,59 @@
+# E3: the integration layer delivers the same SMS twice (same message_id). The second
+# delivery must not start a run, call a model or send anything.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:12  driver SMS "What's the PO number?", message_id e3-sms-7731.
+#           07:13  run: gate -> question, driver_questions: the PO number is in the load
+#                  instructions (PO 55821), so reply by SMS. One SMS.
+#   step 1  07:15  the same message_id again. Ingest dedupes on message_id: no event is
+#                  logged or queued, so there is no run and no model call, and nothing is
+#                  sent. (The prefilter's already_processed check is the second line of
+#                  defense, for a duplicate that reaches the queue; here it never does.)
+id: e3_duplicate_message
+title: The same message delivered twice is processed once
+suite: core
+tags: [regression, sop:driver_questions]
+description: >
+  At-least-once delivery from the integration layer must not become two replies. The
+  message_id is the dedupe key; a redelivery costs no model call.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "07:00"
+steps:
+  - at: "07:12"
+    note: The driver asks for the PO number; the agent answers from the load metadata.
+    message:
+      channel: sms
+      sender: drv_20931
+      body: What's the PO number?
+      message_id: e3-sms-7731
+    script:
+      gate:
+        - {intent: question, act: true, reason: The driver asks for the PO number.}
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: reply
+              text: The PO number is 55821. It is required at the gate.
+          rationale: driver_questions, the PO number is in the load instructions, so answer it.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, contains: ["55821"], count: 1}
+      obligations:
+        eta_request: null
+
+  - at: "07:15"
+    note: Redelivery of the same message. No run, no model call, no reply.
+    message:
+      channel: sms
+      sender: drv_20931
+      body: What's the PO number?
+      message_id: e3-sms-7731
+    expect:
+      no_actions: true
+      llm_calls: 0
+      obligations:
+        eta_request: null
+    forbid:
+      - {kind: sms}

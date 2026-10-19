@@ -1,0 +1,84 @@
+# G1: the driver defers ("I'll tell you in 5 minutes") one minute before the follow-up.
+# The old 07:31 timer still fires, but it is stale by the time its run starts.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
+#                  timer T1 due 07:31.
+#   step 1  07:30  driver SMS "I'll tell you in 5 minutes". The message run waits for
+#                  the 60 s latency, so it happens at 07:31, the same tick in which T1
+#                  comes due. A tick fires due timers first, then runs the queue in FIFO
+#                  order, so on the 07:31 tick:
+#                  1. T1 fires: it is marked fired and its timer_due event is queued
+#                     behind the message (queued at 07:30).
+#                  2. Message run: gate -> eta_deferred, decide -> defer_obligation
+#                     5 minutes. The deferral counts from the message time: until 07:35.
+#                     T1 is still the obligation's active timer, so the executor replaces
+#                     it with T2 due max(07:31, 07:35 + 2 min grace) = 07:37 and makes T2
+#                     the active timer. Nothing is sent. Status acted.
+#                  3. T1's run: the prefilter finds T1 stale (the obligation now waits on
+#                     T2): status skipped, stale_timer, no model call. No SMS at 07:31.
+#                  Runs of the step, in order: [acted, skipped]. Model calls: 2 (gate and
+#                  decide of the message run; the stale timer costs none).
+#   step 2  07:36  nothing fires before 07:37: the next pending timer is T2 at 07:37.
+id: g1_deferral_stale_timer
+title: A deferral at 07:30 makes the 07:31 follow-up stale; the next follow-up is 07:37
+suite: core
+tags: [regression, sop:delay_risk_high, sop:eta_deferred]
+description: >
+  The driver's promise moves the follow-up past the promised time plus a grace period.
+  The timer that was already due fires anyway and is dropped by the prefilter, so no
+  reminder goes out at 07:31 and no model call is spent on it.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      llm_calls: 1
+
+  - at: "07:30"
+    note: The driver defers. Message run and the old timer's run both happen on the 07:31 tick.
+    message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
+    script:
+      gate:
+        - {intent: eta_deferred, act: true, reason: The driver promises the ETA in 5 minutes.}
+      decide:
+        - actions:
+            - {type: defer_obligation, kind: eta_request, minutes: 5}
+          rationale: eta_deferred, accept one deferral of 5 minutes and send nothing; code moves the follow-up.
+    expect:
+      obligations:
+        eta_request: {status: open, attempts: 1, deferred: true}
+      timers: {pending: 1, due_at: "07:37"}
+      run_status: [acted, skipped]
+      llm_calls: 2
+    forbid:
+      - {kind: sms}
+      - {kind: email}
+      - {kind: hero_task}
+
+  - at: "07:36"
+    note: Quiet until the new follow-up.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: open, attempts: 1, deferred: true}
+      timers: {pending: 1, due_at: "07:37"}
+      llm_calls: 0

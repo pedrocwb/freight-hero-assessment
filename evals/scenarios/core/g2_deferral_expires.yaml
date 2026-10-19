@@ -1,0 +1,85 @@
+# G2: the driver defers but sends nothing by the promised time. The follow-up that the
+# deferral moved to 07:37 sends the second ETA request.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: SMS to drv_20931 for the ETA (attempts 1), timer T1 due 07:31.
+#   step 1  07:30  driver SMS "I'll tell you in 5 minutes".
+#           07:31  one tick: T1 fires (queued behind the message); the message run defers
+#                  until 07:35 and replaces T1 with T2 due 07:37; T1's run is skipped as
+#                  stale. Nothing is sent. (See G1 for the detail.)
+#   step 2  07:37  T2 fires (zero latency): intent eta_follow_up_due, decide only. The
+#                  ledger shows attempts 1 and no ETA, so Client A step 2: SMS the driver
+#                  again (attempts 2) and wait 30 minutes. The new timer is due
+#                  max(07:37 + 30 min, 07:35 + 2 min grace) = 08:07: the cadence goes on,
+#                  shifted by the deferral.
+id: g2_deferral_expires
+title: A deferral with no ETA by 07:37 leads to the second ETA SMS at 07:37
+suite: core
+tags: [regression, sop:delay_risk_high, sop:eta_deferred]
+description: >
+  A deferral delays the procedure; it does not stop it. When the promised time plus the
+  grace period passes with no ETA, the SOP's next step runs.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      llm_calls: 1
+
+  - at: "07:30"
+    note: The driver defers; the 07:31 timer becomes stale.
+    message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
+    script:
+      gate:
+        - {intent: eta_deferred, act: true, reason: The driver promises the ETA in 5 minutes.}
+      decide:
+        - actions:
+            - {type: defer_obligation, kind: eta_request, minutes: 5}
+          rationale: eta_deferred, accept one deferral of 5 minutes and send nothing; code moves the follow-up.
+    expect:
+      obligations:
+        eta_request: {status: open, attempts: 1, deferred: true}
+      timers: {pending: 1, due_at: "07:37"}
+    forbid:
+      - {kind: sms}
+
+  - at: "07:37"
+    note: The promise expired with no ETA; second ETA request.
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Following up on load 481207. What time will you arrive at Riverbend plant? Please send a time.
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (northline) step 2, the deferral ran out with no ETA, so SMS again and wait 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 2, deferred: true}
+      timers: {pending: 1, due_at: "08:07"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
