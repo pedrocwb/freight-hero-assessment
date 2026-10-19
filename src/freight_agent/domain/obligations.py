@@ -4,7 +4,7 @@ The ledger stores facts only (status, attempts, times). It never stores a
 pointer into the English SOP; the model reads the SOP plus these facts.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from freight_agent.domain.base import DomainModel
@@ -79,9 +79,12 @@ class Obligation(DomainModel):
         self._require_open("defer")
         if self.deferrals_used >= policy.max_per_obligation:
             raise InvariantViolation("deferral limit reached for this obligation")
-        if until <= now:
+        # Measured on UTC instants: Python subtracts two times of the same zone by wall
+        # clock, which is an hour off when the wait crosses a DST change.
+        wait = until.astimezone(UTC) - now.astimezone(UTC)
+        if wait <= timedelta(0):
             raise InvariantViolation("deferral must end in the future")
-        if until - now > timedelta(minutes=policy.max_minutes):
+        if wait > timedelta(minutes=policy.max_minutes):
             raise InvariantViolation(f"deferral longer than {policy.max_minutes} minutes")
         return self.model_copy(
             update={"deferred_until": until, "deferrals_used": self.deferrals_used + 1}
