@@ -90,3 +90,28 @@ async def test_released_event_keeps_its_place_and_dead_letters_after_max_attempt
 
     assert [e.event_id for e in dead] == ["a1"]
     assert nxt is not None and nxt.event_id == "a2"
+
+
+@pytest.mark.unit
+async def test_ties_on_time_follow_natural_id_order(store: MemoryStore) -> None:
+    """`out_10` is created after `out_9`; text order would deliver it first."""
+    from freight_agent.domain.outbox import OutboxItem, OutboxKind
+
+    async with store.unit_of_work() as uow:
+        for n in (9, 10, 2):
+            await uow.outbox.add(
+                OutboxItem(
+                    outbox_id=f"out_{n}",
+                    idempotency_key=f"e:{n}",
+                    run_id="run_1",
+                    load_id="481207",
+                    kind=OutboxKind.SMS,
+                    created_at=T0,
+                )
+            )
+        await uow.commit()
+
+    async with store.unit_of_work() as uow:
+        pending = await uow.outbox.pending()
+
+    assert [i.outbox_id for i in pending] == ["out_2", "out_9", "out_10"]

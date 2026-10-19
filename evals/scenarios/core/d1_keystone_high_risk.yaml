@@ -1,0 +1,84 @@
+# D1: Client B (Keystone Freight) replaces the high-risk procedure: one SMS, then the
+# broker's Slack channel. The dispatcher is never contacted.
+#
+# Expected timeline (Client B, load 481207 with broker keystone, 2026-10-13,
+# America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: intent delay_risk_high from code, decide only. The keystone
+#                  delay_risk_high section replaces the standard one: one SMS to
+#                  drv_20931 for the ETA (eta_request opens, attempts 1) and a follow-up
+#                  timer T1 due 07:31.
+#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, decide only.
+#                  Keystone: no second SMS; post an alert in the broker's Slack channel
+#                  that starts with the load number; close eta_request as exhausted.
+#                  No email to the dispatcher.
+#   step 2  08:05  nothing is pending: no run, no SMS, no email to dsp_4410 (Client A
+#                  would have emailed the dispatcher at 08:01).
+id: d1_keystone_high_risk
+title: Client B high risk, one SMS then a broker Slack alert, never the dispatcher
+suite: core
+tags: [regression, sop:delay_risk_high]
+description: >
+  The same load and the same events as the assignment's scenario, for another client.
+  Only the client's SOP section changes, and the agent's behavior follows it: one SMS,
+  a broker Slack alert after 30 minutes, the request closed as exhausted, and no contact
+  with the dispatcher at any point.
+load: fixtures/load_481207.json
+load_overrides:
+  broker: {id: keystone, name: Keystone Freight}
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; one SMS to the driver at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Keystone Freight. What time will you arrive at the Riverbend plant pickup in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (Keystone), no ETA request is open, so send the driver one SMS for the ETA and follow up in 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email, to: dsp_4410}
+
+  - at: "07:31"
+    note: No ETA after 30 minutes; alert the broker's Slack channel and close the request.
+    script:
+      decide:
+        - actions:
+            - type: post_broker_slack
+              text: "Load 481207: no ETA from the driver 30 minutes after our SMS at 07:01, and the delay risk for the Riverbend plant pickup is high."
+            - {type: close_obligation, kind: eta_request, status: exhausted}
+          rationale: delay_risk_high (Keystone), no ETA 30 minutes after the one SMS, so no second SMS; alert the broker's Slack channel and close the request as exhausted.
+    expect:
+      actions:
+        - {kind: broker_slack, contains: ["481207"], count: 1}
+      obligations:
+        eta_request: {status: exhausted, attempts: 1}
+      timers: {pending: 0}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: sms}
+      - {kind: email, to: dsp_4410}
+
+  - at: "08:05"
+    note: Nothing more; Client B never emails the dispatcher.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: exhausted, attempts: 1}
+      timers: {pending: 0}
+      runs: 0
+      llm_calls: 0

@@ -1,0 +1,78 @@
+# C2: the ETA arrives by email from the dispatcher instead of the driver.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
+#                  follow-up timer T1 due 07:31.
+#   step 1  07:20  dsp_4410 emails in the main thread: the driver will be there at 9:40.
+#           07:21  run: gate -> eta_provided, decide. eta_received counts an ETA "from the
+#                  driver or the dispatcher": close eta_request as satisfied, write the
+#                  ETA in the TMS, reply to no one. The request is about the truck, not
+#                  about who answers it. Closing cancels T1.
+#   step 2  07:31  nothing fires: no run, no reminder SMS to the driver.
+id: c2_eta_from_dispatcher
+title: The dispatcher emails the ETA; the request closes as satisfied
+suite: core
+tags: [regression, sop:delay_risk_high, sop:eta_received]
+description: >
+  Same outcome as C1 through another channel: the dispatcher's email answers the ETA
+  request that was sent to the driver by SMS, so the driver is not chased again.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+
+  - at: "07:20"
+    note: The dispatcher answers for the driver, by email; the run at 07:21 closes the request.
+    message:
+      channel: email
+      sender: dsp_4410
+      body: Spoke with the driver, he will be at Riverbend at 9:40 this morning.
+    script:
+      gate:
+        - {intent: eta_provided, act: true, reason: The dispatcher gives the driver's arrival time at the pickup.}
+      decide:
+        - actions:
+            - {type: close_obligation, kind: eta_request, status: satisfied}
+            - {type: write_tms_note, text: "ETA 09:40 at the Riverbend plant pickup (dispatcher, by email at 07:20)."}
+          rationale: eta_received, the ETA came from the dispatcher; close the request, record the ETA in the TMS and send no reply.
+    expect:
+      actions:
+        - {kind: tms_note, contains: ["9:40"], count: 1}
+      obligations:
+        eta_request: {status: satisfied, attempts: 1}
+      timers: {pending: 0}
+    forbid:
+      - {kind: sms}
+      - {kind: email}
+      - {kind: hero_task}
+
+  - at: "07:31"
+    note: The cancelled timer never fires; the driver gets no reminder.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: satisfied, attempts: 1}
+      timers: {pending: 0}
+      runs: 0
+      llm_calls: 0

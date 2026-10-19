@@ -1,0 +1,198 @@
+# Scenario A: the assignment's sequence for load 481207 (Client A, broker id `northline`).
+#
+# The Northline `delay_risk_high` section replaces the standard one: SMS the driver for
+# the ETA; no ETA after 30 minutes, SMS again; no ETA after the two SMS, email the
+# dispatcher in the main thread, then create a Hero task. Contacts: driver drv_20931
+# (sms), dispatcher dsp_4410 (email), broker brk_0087 (email, slack). The PO 55821 is in
+# the load's `instructions`.
+#
+# Timing (docs/decisions.md, "Eval timing"): the run of an injected event happens 60 s
+# after it; timers fire with zero latency. Times are America/Los_Angeles, 2026-10-13.
+# Only inbound messages call the gate model. A risk change and a timer get their intent
+# from code, so their runs make one model call (decide).
+#
+# Step 0 (A1), 07:00. Ping, delay risk low -> high. Code confirms the transition and
+#   logs a risk_changed event (intent delay_risk_high, no gate call).
+#   07:01 run 1: acted, 1 model call (decide). Ledger before: nothing open.
+#   Plan: send_sms(drv_20931, purpose eta_request) + schedule_timer(eta_request, 30).
+#   The executor opens the eta_request obligation with attempts 1 and creates timer T1,
+#   due 07:01 + 30 min = 07:31.
+#   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
+#
+# Step 1 (A2), 07:12. SMS from the driver: "What's the PO number?". No ETA in it.
+#   07:13 run 2: acted, 2 model calls (gate: question, act; then decide). The decide
+#   prompt shows `driver_questions` for this event, and the Northline `delay_risk_high`
+#   section as the procedure in progress, for context only.
+#   Plan: send_sms(drv_20931, purpose reply) with the PO 55821 from the load metadata.
+#   A reply is not an ETA request, so the ledger and T1 do not change.
+#   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
+#
+# Step 2 (A3), 07:31. No injection: the runner advances the clock to 07:31, T1 fires.
+#   07:31 run 3 (timer_due, intent eta_follow_up_due): acted, 1 model call (decide).
+#   The ledger says attempts 1, so this is the SOP's second step.
+#   Plan: send_sms(drv_20931, purpose eta_request) + schedule_timer(eta_request, 30).
+#   The executor records attempt 2; T1 is fired; new timer T2 due 07:31 + 30 = 08:01.
+#   After: eta_request open, attempts 2. Pending timers: T2 at 08:01.
+#
+# Step 3 (A4), 08:01. No injection: T2 fires at 08:01.
+#   08:01 run 4 (timer_due, eta_follow_up_due): acted, 1 model call (decide).
+#   The ledger says attempts 2, so this is the SOP's last step.
+#   Plan: send_email(to dsp_4410) + create_hero_task(call the driver) +
+#   close_obligation(eta_request, exhausted). Closing cancels the pending timers of the
+#   obligation; there are none, T2 has fired.
+#   After: eta_request exhausted, attempts 2. No pending timer: nothing fires later.
+#   The assignment's table shows 08:02 for these two actions. In evals timers fire with
+#   zero latency, so they are created at 08:01.
+#
+# Checks are facts: kinds, recipients, counts, ledger, timers, run statuses and model
+# calls. Wording is not checked; `contains` is used only for the PO number. A2 forbids
+# an SMS with purpose eta_request, and the ledger's `attempts` checks the same fact from
+# the state side. Whether the Hero task is urgent is left to the `escalation` section
+# (the script says urgent).
+
+id: a_client_a_high_risk
+title: "A: Client A, delay risk goes high, the driver asks for the PO and never gives an ETA"
+suite: core
+tags: [regression, sop:delay_risk_high, sop:driver_questions, sop:escalation, sop:communication_rules]
+description: >-
+  The assignment's situation end to end: two ETA requests 30 minutes apart, a question
+  answered from the load metadata without counting as an ETA request, then an email to
+  the dispatcher and a Hero task when the second request gets no answer.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+
+steps:
+  - at: "07:00"
+    note: "A1: the risk goes high; at 07:01 one SMS asks the driver for the ETA and a 30-minute timer starts"
+    ping: {delay_risk: high}
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), first step: no ETA request is open, so text the
+            driver for the ETA and follow up in 30 minutes.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: "Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?"
+            - type: schedule_timer
+              kind: eta_request
+              due_in_minutes: 30
+
+  - at: "07:12"
+    note: "A2: the driver asks for the PO; at 07:13 the answer goes out and the ETA request stays as it was"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: "What's the PO number?"
+    expect:
+      actions:
+        - {kind: sms, count: 1}
+        - {kind: sms, to: drv_20931, contains: ["55821"], count: 1}
+      # Still 1: the answer is not an ETA request. The follow-up stays at 07:31.
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 2
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
+      - {kind: sms, purpose: eta_request}
+    script:
+      gate:
+        - {intent: question, act: true, reason: "The driver asks for the PO number."}
+      decide:
+        - rationale: >-
+            driver_questions: the PO is in the load instructions, so answer it. The ETA
+            request stays open; its follow-up timer at 07:31 asks again.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: reply
+              text: "The PO number is 55821. You will need it at the gate."
+
+  - at: "07:31"
+    note: "A3: no ETA after 30 minutes; the timer fires and one SMS asks again"
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 2}
+      timers: {pending: 1, due_at: "08:01"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), second step: one ETA request and no ETA after 30
+            minutes, so text the driver again and wait 30 more minutes.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: "Following up from Northline Logistics: what time will you arrive at the Riverbend plant pickup?"
+            - type: schedule_timer
+              kind: eta_request
+              due_in_minutes: 30
+
+  - at: "08:01"
+    note: "A4: no ETA after two requests; email the dispatcher in the main thread, then a Hero task"
+    expect:
+      actions:
+        - {kind: email, to: dsp_4410, count: 1}
+        - {kind: hero_task, count: 1}
+      obligations:
+        eta_request: {status: exhausted, attempts: 2}
+      timers: {pending: 0}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: sms}
+      - {kind: broker_slack}
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), last step: two ETA requests without an ETA, so
+            email the dispatcher in the main thread, then create a Hero task, and close the
+            request as exhausted.
+          actions:
+            - type: send_email
+              to_contact_ids: [dsp_4410]
+              purpose: escalation
+              subject: "Load 481207: driver ETA needed for the Riverbend plant pickup"
+              body: |-
+                Hello,
+
+                We texted your driver at 07:01 and 07:31 for an ETA to the Riverbend plant pickup in Stockton and have no answer yet. Please send us the driver's ETA as soon as you can.
+
+                Thank you,
+                Northline Logistics operations
+            - type: create_hero_task
+              title: "Call the driver for the ETA"
+              urgent: true
+              description: >-
+                Load 481207 (Northline Logistics). The delay risk for the Riverbend plant
+                pickup in Stockton (window 06:00 to 14:00) went high at 07:00. The driver
+                got ETA texts at 07:01 and 07:31 and did not answer them; at 07:12 the
+                driver asked for the PO number and got it. The dispatcher at Prairie Haul
+                was emailed for the ETA at 08:01. Call the driver, get the ETA and record
+                it on the load.
+            - type: close_obligation
+              kind: eta_request
+              status: exhausted
