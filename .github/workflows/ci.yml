@@ -69,18 +69,13 @@ jobs:
       - name: Tests with coverage (unit, contract, property)
         run: make cov
 
-      # TODO(EVK-3): remove the guard once `agent eval run` exists. Until then click
-      # answers the unknown `eval` command with exit code 2 and this step only warns.
-      # Any other failure (an import error, a failing scenario) fails the build.
-      - name: Evals, scripted mode (needs the EVK-3 CLI)
-        run: |
-          status=0
-          uv run agent eval --help > /dev/null 2>&1 || status=$?
-          if [ "$status" -eq 2 ]; then
-            echo "::warning title=Evals not run::'agent eval' is not registered yet (card EVK-3), so make eval was skipped."
-            exit 0
-          fi
-          make eval
+      # Errors in any SOP file fail the build; sections no scenario covers only warn.
+      - name: SOP lint
+        run: make sop-lint
+
+      # Exit 1: a regression scenario failed; 2: the harness could not run a scenario.
+      - name: Evals, scripted mode
+        run: make eval
 
       # pytest exits with 5 when the selection collects no test.
       - name: Look for integration tests
