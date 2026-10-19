@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import (
@@ -103,6 +104,21 @@ def test_current_stop_is_the_first_stop_of_the_active_stage() -> None:
     assert load.current_stop().sequence == 1
     delivery_bound = load.model_copy(update={"stage": Stage.TO_DELIVERY})
     assert delivery_bound.current_stop().sequence == 2
+
+
+@pytest.mark.unit
+def test_metadata_without_stops_is_rejected_with_a_clear_error() -> None:
+    """Every run reads the current stop (its appointment, its timezone), escalations too."""
+    with pytest.raises(DomainError, match="invalid load metadata: a load needs at least one stop"):
+        Load.from_metadata({**METADATA, "stops": []})
+
+
+@pytest.mark.unit
+def test_a_load_cannot_be_built_without_stops() -> None:
+    load = Load.from_metadata(METADATA)
+
+    with pytest.raises(ValidationError, match="stops"):
+        Load.model_validate({**load.model_dump(), "stops": ()})
 
 
 @pytest.mark.unit

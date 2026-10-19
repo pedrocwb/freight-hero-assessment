@@ -37,6 +37,7 @@ B = "550031"  # a second load: the fixture under another id
 DRIVER = "drv_20931"
 ETA = ObligationKind.ETA_REQUEST
 MAX_QUEUE_ATTEMPTS = 3
+LEASE_S = 300.0  # five minutes, so the claim lease tests read in whole minutes
 OBLIGATION_OF = {A: "obl_1", B: "obl_2"}  # the parent obligation of each load's timers
 RUN_OF = {A: "run_1", B: "run_2"}  # the parent run of each load's outbox items
 
@@ -232,6 +233,25 @@ async def test_a_risk_tracker_is_saved_and_replaced_per_load(
     async with uow_factory() as uow:
         assert await uow.loads.get_tracker(A) == upgrading
         assert await uow.loads.get_tracker(B) is None
+
+
+@pytest.mark.usefixtures("loads")
+async def test_a_risk_tracker_keeps_its_recent_ping_ids_in_order(
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    """The ping dedupe lives with the tracker, so it outlives the process that wrote it."""
+    seen = RiskTracker(band=DelayRisk.HIGH, recent_ping_ids=("p1", "p10", "p2"))
+    async with uow_factory() as uow:
+        await uow.loads.save_tracker(A, seen)
+        await uow.commit()
+    async with uow_factory() as uow:
+        assert await uow.loads.get_tracker(A) == seen
+        await uow.loads.save_tracker(A, seen.remember("p3", keep=2))
+        await uow.commit()
+
+    async with uow_factory() as uow:
+        tracker = await uow.loads.get_tracker(A)
+    assert tracker is not None and tracker.recent_ping_ids == ("p2", "p3")
 
 
 # --- Event log ---------------------------------------------------------------------
@@ -669,9 +689,10 @@ async def _ingest(uow_factory: UnitOfWorkFactory, *events: Event) -> None:
         await uow.commit()
 
 
-async def _claim(uow_factory: UnitOfWorkFactory) -> str | None:
+async def _claim(uow_factory: UnitOfWorkFactory, now: datetime | None = None) -> str | None:
+    """Claim at `now` (07:00 by default): the claim time the lease counts from."""
     async with uow_factory() as uow:
-        event = await uow.queue.claim_next()
+        event = await uow.queue.claim_next(now or at(0))
         await uow.commit()
     return None if event is None else event.event_id
 
@@ -686,6 +707,18 @@ async def _release(uow_factory: UnitOfWorkFactory, event_id: str) -> None:
     async with uow_factory() as uow:
         await uow.queue.release(event_id, "model timeout")
         await uow.commit()
+
+
+async def _reclaim(uow_factory: UnitOfWorkFactory, now: datetime) -> int:
+    async with uow_factory() as uow:
+        reclaimed = await uow.queue.reclaim_expired(now, LEASE_S)
+        await uow.commit()
+    return reclaimed
+
+
+async def _dead(uow_factory: UnitOfWorkFactory) -> list[str]:
+    async with uow_factory() as uow:
+        return _event_ids(await uow.queue.dead_letters())
 
 
 async def _waiting(uow_factory: UnitOfWorkFactory) -> int:
@@ -715,7 +748,7 @@ async def test_one_event_per_load_is_in_flight_while_other_loads_proceed(
     await _ingest(uow_factory, first, _message("a2", minute=1), _message("b1", load_id=B))
 
     async with uow_factory() as uow:
-        assert await uow.queue.claim_next() == first
+        assert await uow.queue.claim_next(at(0)) == first
         await uow.commit()
     # a2 waits behind a1, which is in flight on the same load; b1's load is free.
     assert await _claim(uow_factory) == "b1"
@@ -799,6 +832,78 @@ async def test_size_counts_the_events_waiting_to_be_claimed(
     assert await _waiting(uow_factory) == 2
 
 
+@pytest.mark.usefixtures("loads")
+async def test_reclaim_expired_returns_claims_older_than_the_lease_to_their_place(
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    """A worker that dies between claim and commit (a crash, a cancelled run) leaves its
+    event in flight, and every later event of the load would wait forever. The claim is
+    timed with the caller's clock, the `now` given to `claim_next`, and the lease compares
+    it with the `now` given to `reclaim_expired`: the database's own clock plays no part."""
+    await _ingest(
+        uow_factory, _message("a1"), _message("a2", minute=1), _message("b1", load_id=B, minute=2)
+    )
+    assert await _claim(uow_factory, at(0)) == "a1"
+    assert await _claim(uow_factory, at(4)) == "b1"
+
+    assert await _reclaim(uow_factory, at(5)) == 0  # exactly the lease: not expired yet
+    assert await _reclaim(uow_factory, at(5, 1)) == 1  # a1; b1 was claimed at 07:04
+
+    assert await _waiting(uow_factory) == 2
+    assert await _claim(uow_factory, at(5, 1)) == "a1"  # back ahead of a2
+    assert await _claim(uow_factory, at(5, 1)) is None  # b1 is still in flight
+    assert await _reclaim(uow_factory, at(9, 1)) == 1  # b1, now
+    assert await _reclaim(uow_factory, at(9, 1)) == 0  # a reclaimed event is not counted twice
+
+
+@pytest.mark.usefixtures("loads")
+async def test_a_reclaimed_claim_counts_as_a_failed_attempt(
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    """So an event whose run always dies still becomes a dead letter."""
+    poison = _message("a1")
+    await _ingest(uow_factory, poison, _message("a2", minute=1))
+    assert await _claim(uow_factory, at(0)) == "a1"
+    await _release(uow_factory, "a1")  # an ordinary failure counts with the expired claims
+
+    assert await _claim(uow_factory, at(1)) == "a1"
+    assert await _reclaim(uow_factory, at(10)) == 1
+    assert await _dead(uow_factory) == []
+    assert await _claim(uow_factory, at(10)) == "a1"
+    assert await _reclaim(uow_factory, at(20)) == 1
+
+    async with uow_factory() as uow:
+        assert await uow.queue.dead_letters() == [poison]
+    assert await _claim(uow_factory, at(20)) == "a2"
+    assert await _reclaim(uow_factory, at(20)) == 0
+
+
+@pytest.mark.usefixtures("loads")
+async def test_a_late_release_or_completion_of_a_reclaimed_event_changes_nothing(
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    """A run that outlived its lease finds its event back in the queue. Its release must
+    not count a second failure or queue the event twice, and its completion must not take
+    the queued event away (the event runs again; its stored run makes that a skip)."""
+    await _ingest(uow_factory, _message("a1"), _message("a2", minute=1))
+    assert await _claim(uow_factory, at(0)) == "a1"
+    assert await _reclaim(uow_factory, at(6)) == 1
+
+    await _release(uow_factory, "a1")
+    await _complete(uow_factory, "a1")
+
+    assert await _waiting(uow_factory) == 2
+    for _ in range(MAX_QUEUE_ATTEMPTS - 2):  # the lease already counted one failure
+        assert await _claim(uow_factory, at(6)) == "a1"
+        await _release(uow_factory, "a1")
+    assert await _dead(uow_factory) == []
+    assert await _claim(uow_factory, at(6)) == "a1"
+    await _release(uow_factory, "a1")
+    assert await _dead(uow_factory) == ["a1"]
+    assert await _claim(uow_factory, at(6)) == "a2"
+    assert await _claim(uow_factory, at(6)) is None
+
+
 # --- Transactions ------------------------------------------------------------------
 
 
@@ -862,11 +967,11 @@ async def _change_everything(uow: UnitOfWork, load: Load) -> None:
     """Insert and update in every repository of the baseline, enqueue, and claim."""
     await uow.loads.save(load.model_copy(update={"stage": Stage.AT_PICKUP}))
     await uow.loads.save(load.model_copy(update={"load_id": "990001"}))
-    await uow.loads.save_tracker(A, RiskTracker(band=DelayRisk.HIGH))
+    await uow.loads.save_tracker(A, RiskTracker(band=DelayRisk.HIGH, recent_ping_ids=("p9",)))
     for arrived in (_message("m2", minute=2), _message("m3", minute=3)):
         await uow.events.append(arrived)
         await uow.queue.enqueue(arrived)
-    assert await uow.queue.claim_next() is not None
+    assert await uow.queue.claim_next(at(3)) is not None
 
     obligation = await uow.obligations.get("obl_1")
     timer = await uow.timers.get("timer_1")
@@ -909,7 +1014,7 @@ async def test_leaving_without_commit_discards_every_change(
 
     async with uow_factory() as uow:
         assert await _read_everything(uow) == baseline
-        claimed = await uow.queue.claim_next()  # the discarded claim is undone too
+        claimed = await uow.queue.claim_next(at(4))  # the discarded claim is undone too
         assert claimed is not None and claimed.event_id == "m1"
 
 

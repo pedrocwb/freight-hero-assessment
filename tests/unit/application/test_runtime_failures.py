@@ -1,15 +1,18 @@
 """The runtime's exits other than acting: escalations, failures, retries and tracing."""
 
 import asyncio
+from datetime import datetime
 
 import pytest
 
 from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.persistence.memory.store import MemoryEventQueue
 from freight_agent.application.runtime import RuntimeConfig
 from freight_agent.domain.actions import Purpose, SendEmail, SendSms
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load
+from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.sop import MergeMode, SopSection
 from freight_agent.domain.validation import Severity
@@ -221,6 +224,61 @@ async def test_a_plan_whose_actions_are_all_dropped_is_a_noop(load: Load) -> Non
     assert (await world.snapshot()).outbox == ()
 
 
+async def already_in_the_outbox(world: World, key: str) -> None:
+    """An item under `key` from an earlier attempt: the executor skips that action."""
+    async with world.store.unit_of_work() as uow:
+        await uow.outbox.add(
+            OutboxItem(
+                outbox_id="out_earlier",
+                idempotency_key=key,
+                run_id="run_earlier",
+                load_id=LOAD_ID,
+                kind=OutboxKind.SMS,
+                payload={"contact_id": DRIVER, "text": "sent before", "purpose": "reply"},
+                created_at=at(7, 0),
+                status=OutboxStatus.SENT,
+            )
+        )
+        await uow.commit()
+
+
+PO_REPLY = SendSms(contact_id=DRIVER, text="The PO number is 55821.", purpose=Purpose.REPLY)
+SKIPPED_FIRST = "executor skipped action 0 (send_sms): already applied: msg:0712:0 is in the outbox"
+
+
+async def test_a_run_whose_actions_the_executor_all_skipped_is_a_noop(load: Load) -> None:
+    """Approved is not done: a run that changed nothing did not act."""
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO?")
+    await already_in_the_outbox(world, "msg:0712:0")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    world.model.push(DECIDE, plan(PO_REPLY))
+
+    runs = await world.tick(at(7, 13))
+
+    assert [(r.status, r.skip_reason) for r in runs] == [(RunStatus.NOOP, SKIPPED_FIRST)]
+    assert [(r.status, r.skip_reason) for r in (await world.snapshot()).runs] == [
+        (RunStatus.NOOP, SKIPPED_FIRST)
+    ]
+    assert world.sent("sms") == []
+
+
+async def test_a_run_with_some_actions_skipped_still_acted_and_records_the_skips(
+    load: Load,
+) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO?")
+    await already_in_the_outbox(world, "msg:0712:0")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    gate_note = SendSms(contact_id=DRIVER, text="You need it at the gate.", purpose=Purpose.REPLY)
+    world.model.push(DECIDE, plan(PO_REPLY, gate_note))
+
+    runs = await world.tick(at(7, 13))
+
+    assert [(r.status, r.skip_reason) for r in runs] == [(RunStatus.ACTED, SKIPPED_FIRST)]
+    assert [d.payload["text"] for d in world.sent("sms")] == ["You need it at the gate."]
+
+
 # --- unexpected failures: release, retry, dead letter ---------------------------------------
 
 
@@ -360,6 +418,102 @@ async def test_a_run_finished_elsewhere_meanwhile_is_not_executed_twice(load: Lo
     assert len(runs[0].usage) == 1
     assert world.sent("sms") == []
     assert await queue_size(world) == 0
+
+
+# --- the claim lease (the watchdog) ---------------------------------------------------------
+
+
+class HangingModel:
+    """Hangs on its first `times` decide calls until the run is cancelled (a shutdown, a
+    client that went away), then answers from the script. A cancelled run is neither
+    completed nor released: only the claim lease can give its event back."""
+
+    def __init__(self, times: int) -> None:
+        self.times = times
+        self.inner = ScriptedModel()
+        self.entered = asyncio.Event()
+
+    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+        if request.role is ModelRole.DECIDE and self.times > 0:
+            self.times -= 1
+            self.entered.set()
+            await asyncio.Event().wait()  # until cancelled
+        return await self.inner.generate(request, schema)
+
+
+async def cancel_tick(world: World, model: HangingModel, when: datetime) -> None:
+    """A tick whose run is cancelled while the model thinks."""
+    model.entered.clear()
+    tick = asyncio.create_task(world.tick(when))
+    await model.entered.wait()
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+
+def test_the_claim_lease_is_the_run_deadline_plus_a_minute_by_default() -> None:
+    assert RuntimeConfig().effective_claim_lease_s == 240.0 + 60
+    assert RuntimeConfig(run_deadline_s=30).effective_claim_lease_s == 90
+    assert RuntimeConfig(claim_lease_s=5).effective_claim_lease_s == 5
+
+
+async def test_an_event_a_cancelled_run_left_in_flight_runs_again_after_the_lease(
+    load: Load,
+) -> None:
+    model = HangingModel(times=1)
+    world = await World(load, llm=model, config=RuntimeConfig(claim_lease_s=120)).start()
+    await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
+    await cancel_tick(world, model, at(7, 1))
+    assert await queue_size(world) == 0  # in flight, and nobody will finish it
+
+    assert await world.tick(at(7, 3)) == []  # 120 s after the claim: still leased
+    model.inner.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
+    runs = await world.tick(at(7, 3, 1))
+
+    assert [(r.event_id, r.status) for r in runs] == [("risk:p1", RunStatus.ACTED)]
+    assert len(world.sent("sms")) == 1
+    assert await dead_letters(world) == []
+
+
+async def test_an_event_whose_release_failed_runs_again_after_the_lease(
+    load: Load, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run fails, and so does the release of its event (the store went away): the
+    error reaches the worker and the event stays in flight until its lease runs out."""
+    config = RuntimeConfig(claim_lease_s=60)
+    world = await World(load, sop=FlakySop(failures=1), config=config).start()
+    await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
+
+    async def unreachable(self: MemoryEventQueue, event_id: str, error: str) -> None:
+        raise ConnectionError("store unreachable")
+
+    monkeypatch.setattr(MemoryEventQueue, "release", unreachable)
+    with pytest.raises(ConnectionError):
+        await world.tick(at(7, 1))
+    monkeypatch.undo()
+
+    world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
+    assert await world.tick(at(7, 2)) == []  # still leased
+    runs = await world.tick(at(7, 2, 1))
+
+    assert [(r.event_id, r.status) for r in runs] == [("risk:p1", RunStatus.ACTED)]
+    assert len(world.sent("sms")) == 1
+
+
+async def test_an_event_whose_runs_keep_dying_becomes_a_dead_letter(load: Load) -> None:
+    """Each expired claim counts as a failed attempt, so a poison event still stops."""
+    model = HangingModel(times=10)
+    world = await World(load, llm=model, config=RuntimeConfig(claim_lease_s=60)).start()
+    await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
+
+    for minute in (1, 3, 5):  # three claims, each dies; the next tick reclaims it
+        await cancel_tick(world, model, at(7, minute))
+    assert await world.tick(at(7, 7)) == []  # the third reclaim makes it a dead letter
+
+    assert await dead_letters(world) == ["risk:p1"]
+    assert model.times == 7
+    assert world.sent("sms") == []
+    assert await world.tick(at(7, 30)) == []
 
 
 # --- tracing --------------------------------------------------------------------------------

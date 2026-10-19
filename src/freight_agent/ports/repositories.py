@@ -72,18 +72,38 @@ class RunRepository(Protocol):
 
 
 class EventQueue(Protocol):
-    """Per-load FIFO. At most one event per load is in flight at a time."""
+    """Per-load FIFO. At most one event per load is in flight at a time.
+
+    Every time given is the runtime's clock, never the store's: the eval harness and the
+    simulation run on a virtual clock.
+    """
 
     async def enqueue(self, event: Event) -> None: ...
 
-    async def claim_next(self) -> Event | None:
-        """The oldest queued event whose load has nothing in flight, or None."""
+    async def claim_next(self, now: datetime) -> Event | None:
+        """The oldest queued event whose load has nothing in flight, or None.
+
+        The event is in flight from `now`, the claim time `reclaim_expired` counts from.
+        """
         ...
 
-    async def complete(self, event_id: str) -> None: ...
+    async def complete(self, event_id: str) -> None:
+        """Drop an event in flight from the queue. An event not in flight is left as it is."""
+        ...
 
     async def release(self, event_id: str, error: str) -> None:
-        """Return a claimed event to the queue. After too many failures it becomes a dead letter."""
+        """Return an event in flight to the queue, counted as a failed attempt; after too
+        many it becomes a dead letter. An event not in flight is left as it is."""
+        ...
+
+    async def reclaim_expired(self, now: datetime, lease_s: float) -> int:
+        """Release every event claimed more than `lease_s` seconds before `now`.
+
+        A worker that dies between claim and commit (a crash, a cancelled run) never
+        completes or releases its event, and the load's later events would wait forever.
+        Each reclaim counts as a failed attempt, as `release` does, so an event whose runs
+        always die still becomes a dead letter. Returns how many events it released.
+        """
         ...
 
     async def size(self) -> int: ...

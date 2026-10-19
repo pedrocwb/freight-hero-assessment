@@ -8,7 +8,7 @@ import asyncio
 import bisect
 import copy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import TracebackType
 from typing import Self
 
@@ -52,6 +52,7 @@ class _State:
     arrivals: dict[str, int] = field(default_factory=dict)  # event_id -> arrival number
     next_arrival: int = 0
     inflight: dict[str, str] = field(default_factory=dict)  # load_id -> event_id
+    claimed_at: dict[str, datetime] = field(default_factory=dict)  # in-flight event_id -> claim
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
 
@@ -221,27 +222,26 @@ class MemoryEventQueue:
         state.arrivals[event.event_id] = state.next_arrival
         state.next_arrival += 1
 
-    async def claim_next(self) -> Event | None:
+    async def claim_next(self, now: datetime) -> Event | None:
         state = self._s.state
         for index, event_id in enumerate(state.queue):
             event = state.events[event_id]
             if event.load_id not in state.inflight:
                 del state.queue[index]
                 state.inflight[event.load_id] = event_id
+                state.claimed_at[event_id] = now
                 return event
         return None
 
     async def complete(self, event_id: str) -> None:
-        state = self._s.state
-        event = state.events.get(event_id)
-        if event is not None and state.inflight.get(event.load_id) == event_id:
-            del state.inflight[event.load_id]
+        if self._in_flight(event_id):
+            self._end_claim(event_id)
 
     async def release(self, event_id: str, error: str) -> None:
+        if not self._in_flight(event_id):
+            return  # completed, dead, or reclaimed after its lease: nothing to give back
+        self._end_claim(event_id)
         state = self._s.state
-        event = state.events[event_id]
-        if state.inflight.get(event.load_id) == event_id:
-            del state.inflight[event.load_id]
         state.failures[event_id] = state.failures.get(event_id, 0) + 1
         if state.failures[event_id] >= self._s.max_queue_attempts:
             state.dead.append(event_id)
@@ -249,6 +249,23 @@ class MemoryEventQueue:
             # Back to its place by arrival: ahead of its load's later events, and still
             # behind older events of other loads, so a failure never jumps the queue.
             bisect.insort(state.queue, event_id, key=state.arrivals.__getitem__)
+
+    async def reclaim_expired(self, now: datetime, lease_s: float) -> int:
+        cutoff = now - timedelta(seconds=lease_s)
+        expired = [e for e, claimed in self._s.state.claimed_at.items() if claimed < cutoff]
+        for event_id in expired:
+            await self.release(event_id, f"claim lease of {lease_s:g} s expired")
+        return len(expired)
+
+    def _in_flight(self, event_id: str) -> bool:
+        state = self._s.state
+        event = state.events.get(event_id)
+        return event is not None and state.inflight.get(event.load_id) == event_id
+
+    def _end_claim(self, event_id: str) -> None:
+        state = self._s.state
+        del state.inflight[state.events[event_id].load_id]
+        del state.claimed_at[event_id]
 
     async def size(self) -> int:
         return len(self._s.state.queue)

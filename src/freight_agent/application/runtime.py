@@ -14,14 +14,20 @@ a database would hold the claimed rows):
 3. commit: one unit of work checks again that no other run finished the event,
    executes the verdict's actions, saves the run record and completes the event.
 
+A worker that dies between claim and commit (a crash, a cancelled task, a failure
+while releasing) leaves its event in flight. The claim lease takes it back: every
+`process_all` first releases the claims older than `claim_lease_s`, each counted as a
+failed attempt (the watchdog of the plan).
+
 The tracer exports the run after the commit, and can never break it.
 """
 
 import asyncio
 import logging
-from collections import deque
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from typing import cast
 
 from freight_agent.application import escalation
 from freight_agent.application.context import load_run_context
@@ -32,7 +38,7 @@ from freight_agent.application.contracts import (
     LocationPing,
 )
 from freight_agent.application.decide import Decider
-from freight_agent.application.executor import Executor
+from freight_agent.application.executor import ExecutionResult, Executor
 from freight_agent.application.gate import Gate
 from freight_agent.application.graph import GraphDeps, RunState, Verdict, build_graph, need
 from freight_agent.application.prefilter import SkipReason
@@ -65,16 +71,29 @@ class RuntimeConfig:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     recent_events_limit: int = 30
     run_deadline_s: float = 240.0
+    # How long a claimed event may stay in flight before `process_all` takes it back;
+    # None: `run_deadline_s` plus a minute, so a run that is still thinking keeps it.
+    claim_lease_s: float | None = None
     max_delivery_attempts: int = 5
     llm_timeout_s: float = 60.0  # per model call; the adapter enforces it
     decide_max_tool_rounds: int = 2
     outbox_batch_size: int = 100  # items one `dispatch_outbox` call sends at most
-    recent_pings_per_load: int = 64  # ping ids remembered to drop redeliveries
+    recent_pings_per_load: int = 64  # ping ids the risk tracker keeps to drop redeliveries
     # Production keeps the worker going: an unexpected error becomes a failed attempt
     # and the event is released for a retry. The eval harness sets this so that a
     # harness error (a missing cassette) ends the trial with its own message; the
     # event is still released first. Domain errors are failed attempts either way.
     reraise_unexpected: bool = False
+
+    @property
+    def effective_claim_lease_s(self) -> float:
+        if self.claim_lease_s is not None:
+            return self.claim_lease_s
+        return self.run_deadline_s + _LEASE_MARGIN_S
+
+
+# Past the run deadline, the commit phase still has to finish before a claim may expire.
+_LEASE_MARGIN_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -111,28 +130,6 @@ class _Finished:
     stored: bool  # a failed attempt is stored only when it dead-letters the event
 
 
-class _RecentPings:
-    """The last ping ids of each load, in process memory.
-
-    The integration layer delivers at least once, so the same ping can arrive
-    twice; counted twice it would confirm a downgrade early. The ports have no
-    place to keep ping ids durably, so this window lives in the process: it
-    catches the usual quick redelivery, but a restart or a second ingest process
-    forgets it. A durable version stores the last ping id with the risk tracker.
-    """
-
-    def __init__(self, size: int) -> None:
-        self._size = size
-        self._ids: dict[str, deque[str]] = {}
-
-    def __contains__(self, key: tuple[str, str]) -> bool:
-        load_id, ping_id = key
-        return ping_id in self._ids.get(load_id, ())
-
-    def add(self, load_id: str, ping_id: str) -> None:
-        self._ids.setdefault(load_id, deque(maxlen=self._size)).append(ping_id)
-
-
 class AgentRuntime:
     def __init__(self, deps: RuntimeDeps) -> None:
         self._deps = deps
@@ -150,7 +147,6 @@ class AgentRuntime:
             )
         )
         self._executor = Executor(deps.clock, deps.ids, config.validation.deferral)
-        self._pings = _RecentPings(config.recent_pings_per_load)
 
     def _uow(self) -> UnitOfWork:
         return self._deps.uow_factory()
@@ -190,17 +186,20 @@ class AgentRuntime:
 
         Only a confirmed transition into or out of HIGH becomes an event. Every
         confirmed transition saves the load with its new `delay_risk`, in the same
-        unit of work as the tracker. A ping id seen recently is a redelivery and
-        changes nothing (see `_RecentPings`).
+        unit of work as the tracker. A ping id the tracker remembers is a redelivery
+        and changes nothing; the tracker keeps the ids, so this holds across restarts
+        and processes (the load row lock serializes two ingests of one load).
         """
-        if (ping.load_id, ping.ping_id) in self._pings:
-            return IngestResult(accepted=True, duplicate=True, reason="ping already received")
+        config = self._deps.config
         async with self._uow() as uow:
             load = await uow.loads.get(ping.load_id)
             if load is None:
                 return _unknown_load(ping.load_id)
             tracker = await uow.loads.get_tracker(load.load_id) or RiskTracker(band=load.delay_risk)
-            tracker, transition = observe(tracker, ping.delay_risk, self._deps.config.ping_filter)
+            if tracker.has_seen(ping.ping_id):
+                return IngestResult(accepted=True, duplicate=True, reason="ping already received")
+            tracker, transition = observe(tracker, ping.delay_risk, config.ping_filter)
+            tracker = tracker.remember(ping.ping_id, keep=config.recent_pings_per_load)
             await uow.loads.save_tracker(load.load_id, tracker)
             result = IngestResult(accepted=True)
             if transition is not None:
@@ -208,7 +207,6 @@ class AgentRuntime:
                 if DelayRisk.HIGH in (transition.previous, transition.current):
                     result = await self._log_risk_change(uow, ping, transition)
             await uow.commit()
-        self._pings.add(ping.load_id, ping.ping_id)
         return result
 
     async def _log_risk_change(
@@ -300,19 +298,36 @@ class AgentRuntime:
         return await self._export(finished)
 
     async def process_all(self) -> list[RunRecord]:
-        """Run events until nothing is claimable (each load runs one event at a time)."""
+        """Take back the expired claims, then run events until nothing is claimable
+        (each load runs one event at a time)."""
+        await self._reclaim_expired()
         runs: list[RunRecord] = []
         while (run := await self.process_next()) is not None:
             runs.append(run)
         return runs
 
+    async def _reclaim_expired(self) -> None:
+        """Release the events whose claim outlived the lease: their worker died.
+
+        A run that is only slow and commits after this finds its event back in the queue:
+        its completion leaves the queued event alone, and the event's next run is skipped
+        as already processed. The lease is longer than the run deadline, so that is rare.
+        """
+        lease_s = self._deps.config.effective_claim_lease_s
+        async with self._uow() as uow:
+            reclaimed = await uow.queue.reclaim_expired(self._deps.clock.now(), lease_s)
+            await uow.commit()
+        if reclaimed:
+            logger.warning("reclaimed %d event(s) in flight for more than %g s", reclaimed, lease_s)
+
     async def _claim(self) -> _Attempt | None:
         deps = self._deps
         async with self._uow() as uow:
-            event = await uow.queue.claim_next()
+            now = deps.clock.now()
+            event = await uow.queue.claim_next(now)
             if event is None:
                 return None
-            attempt = _Attempt(event=event, run_id=deps.ids.new("run"), started_at=deps.clock.now())
+            attempt = _Attempt(event=event, run_id=deps.ids.new("run"), started_at=now)
             try:
                 ctx = await load_run_context(
                     uow,
@@ -354,10 +369,10 @@ class AgentRuntime:
                 verdict = Verdict(
                     status=RunStatus.SKIPPED, skip_reason=SkipReason.ALREADY_PROCESSED.value
                 )
-            await self._executor.apply(
+            result = await self._executor.apply(
                 uow, run_id=attempt.run_id, ctx=state.ctx, actions=verdict.actions
             )
-            record = self._record(attempt, verdict)
+            record = self._record(attempt, _with_skips(verdict, result))
             await uow.runs.save(record)
             await uow.queue.complete(event_id)
             await uow.commit()
@@ -421,10 +436,12 @@ class AgentRuntime:
     async def dispatch_outbox(self) -> int:
         """Deliver pending outbox items through the gateways. Returns how many were sent.
 
-        Each item is sent outside any unit of work and its new status saved in its
-        own. A `DeliveryError` keeps the item pending for the next dispatch, until
-        `max_delivery_attempts` makes it failed. Gateways ignore a repeated
-        idempotency key, so a resend after a crash is harmless.
+        Each item is sent outside any unit of work and its new status saved in its own.
+        The payload is checked before the call: a malformed one fails the item at once,
+        since no retry can fix it. Anything the gateway call raises keeps the item pending
+        for the next dispatch, until `max_delivery_attempts` makes it failed, and the
+        other items of the batch are still sent. Gateways ignore a repeated idempotency
+        key, so a resend after a crash is harmless.
         """
         async with self._uow() as uow:
             pending = await uow.outbox.pending(self._deps.config.outbox_batch_size)
@@ -441,18 +458,29 @@ class AgentRuntime:
     async def _deliver(self, item: OutboxItem) -> OutboxItem:
         attempts = item.attempts + 1
         try:
-            await _send(self._deps.gateways, item)
-        except DeliveryError as exc:
-            final = attempts >= self._deps.config.max_delivery_attempts
-            status = OutboxStatus.FAILED if final else OutboxStatus.PENDING
-            update = {"attempts": attempts, "last_error": str(exc), "status": status}
-            return item.model_copy(update=update)
+            send = _delivery(item)
         except (KeyError, TypeError, ValueError) as exc:  # retrying cannot fix the payload
             update = {
                 "attempts": attempts,
                 "last_error": f"malformed payload: {type(exc).__name__}: {exc}",
                 "status": OutboxStatus.FAILED,
             }
+            return item.model_copy(update=update)
+        try:
+            await send(self._deps.gateways)
+        except Exception as exc:  # the payload is sound, so the failure may pass: retry
+            error = str(exc) if isinstance(exc, DeliveryError) else f"{type(exc).__name__}: {exc}"
+            final = attempts >= self._deps.config.max_delivery_attempts
+            logger.warning(
+                "delivering outbox item %s failed (attempt %d%s): %s",
+                item.outbox_id,
+                attempts,
+                ", final" if final else "",
+                error,
+                exc_info=not isinstance(exc, DeliveryError),
+            )
+            status = OutboxStatus.FAILED if final else OutboxStatus.PENDING
+            update = {"attempts": attempts, "last_error": error, "status": status}
             return item.model_copy(update=update)
         return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
 
@@ -481,61 +509,101 @@ class AgentRuntime:
             )
 
 
+def _with_skips(verdict: Verdict, result: ExecutionResult) -> Verdict:
+    """The verdict as executed: the executor's skips go in `skip_reason`, and a run that
+    acted on nothing (every approved action skipped) is a noop. A run with some actions
+    applied still acted."""
+    if not result.skipped:
+        return verdict
+    skips = "; ".join(f"action {k.index} ({k.type}): {k.reason}" for k in result.skipped)
+    nothing_done = len(result.skipped) == len(verdict.actions)
+    status = (
+        RunStatus.NOOP if verdict.status is RunStatus.ACTED and nothing_done else verdict.status
+    )
+    return replace(verdict, status=status, skip_reason=f"executor skipped {skips}")
+
+
 def _unknown_load(load_id: str) -> IngestResult:
     return IngestResult(accepted=False, reason=f"unknown load {load_id!r}")
 
 
-async def _send(gateways: Gateways, item: OutboxItem) -> None:
-    """One outbox item through its gateway (payload keys: docs/decisions.md)."""
+# One outbox item's gateway call, its payload already read.
+_Send = Callable[[Gateways], Awaitable[None]]
+
+
+def _delivery(item: OutboxItem) -> _Send:
+    """The gateway call of one outbox item (payload keys: docs/decisions.md).
+
+    The payload is read here, before any call, so that a malformed one (`KeyError`,
+    `TypeError`, `ValueError`) is never confused with a gateway that failed.
+    """
     payload, key, load_id = item.payload, item.idempotency_key, item.load_id
     match item.kind:
         case OutboxKind.SMS:
-            await gateways.sms.send(
-                load_id=load_id,
-                contact_id=_text(payload["contact_id"]),
-                text=_text(payload["text"]),
-                idempotency_key=key,
+            contact_id, text = _text(payload["contact_id"]), _text(payload["text"])
+            return lambda g: g.sms.send(
+                load_id=load_id, contact_id=contact_id, text=text, idempotency_key=key
             )
         case OutboxKind.EMAIL:
-            await gateways.email.send(
+            to_contact_ids = _texts(payload["to_contact_ids"])
+            subject, body = _optional_text(payload.get("subject")), _text(payload["body"])
+            return lambda g: g.email.send(
                 load_id=load_id,
-                to_contact_ids=tuple(_text(c) for c in payload["to_contact_ids"]),
-                subject=payload.get("subject"),
-                body=_text(payload["body"]),
+                to_contact_ids=to_contact_ids,
+                subject=subject,
+                body=body,
                 idempotency_key=key,
             )
         case OutboxKind.BROKER_SLACK:
-            await gateways.broker_slack.post(
-                broker_id=_text(payload["broker_id"]),
-                load_id=load_id,
-                text=_text(payload["text"]),
-                idempotency_key=key,
+            broker_id, text = _text(payload["broker_id"]), _text(payload["text"])
+            return lambda g: g.broker_slack.post(
+                broker_id=broker_id, load_id=load_id, text=text, idempotency_key=key
             )
         case OutboxKind.TMS_NOTE:
-            await gateways.tms.write_note(
-                load_id=load_id, text=_text(payload["text"]), idempotency_key=key
-            )
+            text = _text(payload["text"])
+            return lambda g: g.tms.write_note(load_id=load_id, text=text, idempotency_key=key)
         case OutboxKind.HERO_TASK:
-            await gateways.internal.create_hero_task(
+            title, description = _text(payload["title"]), _text(payload["description"])
+            urgent = _flag(payload["urgent"])
+            return lambda g: g.internal.create_hero_task(
                 load_id=load_id,
-                title=_text(payload["title"]),
-                description=_text(payload["description"]),
-                urgent=bool(payload["urgent"]),
+                title=title,
+                description=description,
+                urgent=urgent,
                 idempotency_key=key,
             )
         case OutboxKind.INTERNAL_SLACK:
-            await gateways.internal.post_internal_slack(
-                load_id=load_id, text=_text(payload["text"]), idempotency_key=key
+            text = _text(payload["text"])
+            return lambda g: g.internal.post_internal_slack(
+                load_id=load_id, text=text, idempotency_key=key
             )
         case OutboxKind.STAGE_UPDATE:
-            await gateways.internal.update_stage(
-                load_id=load_id, stage=Stage(payload["stage"]), idempotency_key=key
+            stage = Stage(payload["stage"])
+            return lambda g: g.internal.update_stage(
+                load_id=load_id, stage=stage, idempotency_key=key
             )
 
 
 def _text(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError(f"expected text, got {type(value).__name__}")
+    return value
+
+
+def _optional_text(value: object) -> str | None:
+    return None if value is None else _text(value)
+
+
+def _texts(value: object) -> tuple[str, ...]:
+    """A list of strings; a bare string is refused, not read as its characters."""
+    if not isinstance(value, list | tuple):
+        raise TypeError(f"expected a list of text, got {type(value).__name__}")
+    return tuple(_text(item) for item in cast(Sequence[object], value))
+
+
+def _flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"expected true or false, got {type(value).__name__}")
     return value
 
 

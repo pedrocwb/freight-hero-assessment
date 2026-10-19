@@ -1,4 +1,4 @@
-"""Which model the interactive platform uses when LLM_MODE is not set."""
+"""The interactive platform never spends on a live model unless asked to."""
 
 from pathlib import Path
 from typing import Any
@@ -22,17 +22,12 @@ def _settings(**values: Any) -> Settings:
 
 
 @pytest.mark.unit
-def test_the_live_model_when_its_key_is_set_and_no_mode_is_chosen() -> None:
-    assert _interactive_mode(_settings(openrouter_api_key="sk-or-test")) == "live"
+def test_a_key_alone_does_not_switch_the_platform_to_the_live_model() -> None:
+    assert _interactive_mode(_settings(openrouter_api_key="sk-or-test")) == "replay"
 
 
 @pytest.mark.unit
-def test_replay_without_a_key() -> None:
-    assert _interactive_mode(_settings()) == "replay"
+def test_live_only_when_asked_for() -> None:
+    settings = _settings(openrouter_api_key="sk-or-test", llm_mode="live")
 
-
-@pytest.mark.unit
-def test_an_explicit_mode_wins() -> None:
-    settings = _settings(openrouter_api_key="sk-or-test", llm_mode="scripted")
-
-    assert _interactive_mode(settings) == "scripted"
+    assert _interactive_mode(settings) == "live"

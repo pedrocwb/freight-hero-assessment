@@ -62,9 +62,9 @@ async def test_queue_never_hands_out_two_events_of_the_same_load() -> None:
         await uow.queue.enqueue(_event("a1", "A", 0))
         await uow.queue.enqueue(_event("a2", "A", 1))
         await uow.queue.enqueue(_event("b1", "B", 2))
-        first = await uow.queue.claim_next()
-        second = await uow.queue.claim_next()
-        third = await uow.queue.claim_next()
+        first = await uow.queue.claim_next(T0)
+        second = await uow.queue.claim_next(T0)
+        third = await uow.queue.claim_next(T0)
         await uow.commit()
 
     assert first is not None and first.event_id == "a1"
@@ -78,14 +78,14 @@ async def test_released_event_keeps_its_place_and_dead_letters_after_max_attempt
     async with store.unit_of_work() as uow:
         await uow.queue.enqueue(_event("a1", "A", 0))
         await uow.queue.enqueue(_event("a2", "A", 1))
-        claimed = await uow.queue.claim_next()
+        claimed = await uow.queue.claim_next(T0)
         assert claimed is not None
         await uow.queue.release("a1", "llm timeout")
-        again = await uow.queue.claim_next()
+        again = await uow.queue.claim_next(T0)
         assert again is not None and again.event_id == "a1"
         await uow.queue.release("a1", "llm timeout")
         dead = await uow.queue.dead_letters()
-        nxt = await uow.queue.claim_next()
+        nxt = await uow.queue.claim_next(T0)
         await uow.commit()
 
     assert [e.event_id for e in dead] == ["a1"]
