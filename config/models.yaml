@@ -1,0 +1,113 @@
+# Models per role, their fallbacks, prices and the bake-off candidates.
+#
+# Switching a model is a change to this file. Rule from the plan: cheap, light models
+# first; prompt and SOP improvement rounds run on them before any model is upgraded.
+#
+# Every model here comes from the public catalog https://openrouter.ai/api/v1/models,
+# fetched on 2026-10-19, and lists `tools`, `tool_choice` and `structured_outputs` among
+# its supported parameters. Structured output is a forced tool call (see
+# adapters/llm/openrouter.py), so `tools` + `tool_choice` are the hard requirement.
+#
+# Role settings:
+#   model             OpenRouter model id (primary)
+#   fallbacks         ordered; walked by the resilient wrapper (adapters/llm/resilient.py),
+#                     one OpenRouterModel per id. Pick another provider family for
+#                     availability.
+#   temperature       null: not sent. Some reasoning models (Claude Haiku 5.5, GPT-6 Luna)
+#                     take no temperature; with require_parameters on, sending one leaves
+#                     them no endpoint, so a role on such a model sets null.
+#   max_tokens        completion cap, reasoning tokens included
+#   reasoning_effort  optional: none | minimal | low | medium | high
+#   provider          OpenRouter provider routing for the PRIMARY model only (fallbacks use
+#                     default routing). Pinned for reproducible evals; a pinned provider
+#                     that is down fails the call and the chain moves to the next model.
+#                     require_parameters defaults to true: only endpoints that honour every
+#                     parameter we send (notably tool_choice).
+
+roles:
+  gate:
+    # Classification into a small enum, the cheapest reliable structured output.
+    # GPT-4.1 Nano: no reasoning, fast first token, forced tool calls are solid.
+    model: openai/gpt-4.1-nano
+    fallbacks: [google/gemini-2.5-flash-lite]
+    temperature: 0
+    max_tokens: 256
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  decide:
+    # Tools (read_sop_section, read_document) plus the Plan as a forced tool call.
+    # Gemini 2.5 Flash Lite: same price tier as Nano, stronger instruction following.
+    # The fallback is one step up and from another provider family.
+    model: google/gemini-2.5-flash-lite
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 2048
+    provider:
+      order: [google-ai-studio]
+      allow_fallbacks: false
+
+  judge:
+    # Grades wording only (evals). No fallback: a verdict from another model is not
+    # comparable across runs, so a judge outage should fail the eval, not change judges.
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 1024
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  driver_sim:
+    # Plays a driver persona in multi-turn evals; some variety is wanted.
+    model: google/gemini-2.5-flash-lite
+    fallbacks: [openai/gpt-4.1-nano]
+    temperature: 0.7
+    max_tokens: 400
+
+# USD per 1M tokens and context length, as listed in the catalog on 2026-10-19.
+# cached_input: price of a prompt-cache read (omitted when the catalog lists none, then
+# cached tokens cost the input price). The billed price depends on the endpoint
+# OpenRouter routes to, so these are estimates for budgets and reports.
+pricing:
+  openai/gpt-4.1-nano:
+    input: 0.10
+    output: 0.40
+    cached_input: 0.025
+    context_length: 1047576
+  google/gemini-2.5-flash-lite:
+    input: 0.10
+    output: 0.40
+    cached_input: 0.01
+    context_length: 1048576
+  openai/gpt-4.1-mini:
+    input: 0.40
+    output: 1.60
+    cached_input: 0.10
+    context_length: 1047576
+  mistralai/mistral-small-3.2-24b-instruct:
+    input: 0.09375
+    output: 0.25
+    context_length: 256000
+  qwen/qwen3-30b-a3b-instruct-2507:
+    input: 0.09
+    output: 0.30
+    context_length: 262144
+  openai/gpt-oss-120b:
+    input: 0.15
+    output: 0.60
+    cached_input: 0.075
+    context_length: 131072
+
+# Cheap models for the bake-off (live suite, k=3) before the improvement rounds. All of
+# them take temperature, tools, tool_choice and structured outputs, so one role config
+# serves each of them. Open-weight ones (Mistral, Qwen, gpt-oss) are served by several
+# providers at different quantizations: pin `provider.order` and `quantizations` when one
+# of them goes on a role. gpt-oss-120b always reasons: give it reasoning_effort: low.
+bakeoff_candidates:
+  - openai/gpt-4.1-nano
+  - google/gemini-2.5-flash-lite
+  - mistralai/mistral-small-3.2-24b-instruct
+  - qwen/qwen3-30b-a3b-instruct-2507
+  - openai/gpt-oss-120b
