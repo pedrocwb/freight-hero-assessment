@@ -5,6 +5,7 @@ so a failed run leaves no partial state, exactly like a database transaction.
 """
 
 import asyncio
+import bisect
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,7 +41,9 @@ class _State:
     outbox: dict[str, OutboxItem] = field(default_factory=dict)
     outbox_keys: set[str] = field(default_factory=set)
     runs: dict[str, RunRecord] = field(default_factory=dict)
-    queue: list[str] = field(default_factory=list)
+    queue: list[str] = field(default_factory=list)  # waiting event ids, in arrival order
+    arrivals: dict[str, int] = field(default_factory=dict)  # event_id -> arrival number
+    next_arrival: int = 0
     inflight: dict[str, str] = field(default_factory=dict)  # load_id -> event_id
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
@@ -118,7 +121,8 @@ class MemoryObligationRepository:
 
     async def list_for_load(self, load_id: str) -> list[Obligation]:
         items = [o for o in self._s.state.obligations.values() if o.load_id == load_id]
-        return sorted(items, key=lambda o: o.opened_at)
+        # The id breaks ties, as in every other list: a database has no insertion order.
+        return sorted(items, key=lambda o: (o.opened_at, o.obligation_id))
 
     async def save(self, obligation: Obligation) -> None:
         self._s.state.obligations[obligation.obligation_id] = obligation
@@ -189,7 +193,8 @@ class MemoryRunRepository:
 
     async def for_event(self, event_id: str) -> RunRecord | None:
         matching = [r for r in self._s.state.runs.values() if r.event_id == event_id]
-        return max(matching, key=lambda r: r.started_at) if matching else None
+        # The last of the event's runs in `list_for_load` order, ties included.
+        return max(matching, key=lambda r: (r.started_at, r.run_id)) if matching else None
 
     async def list_for_load(self, load_id: str) -> list[RunRecord]:
         items = [r for r in self._s.state.runs.values() if r.load_id == load_id]
@@ -206,6 +211,8 @@ class MemoryEventQueue:
             state.events[event.event_id] = event
             state.event_order.append(event.event_id)
         state.queue.append(event.event_id)
+        state.arrivals[event.event_id] = state.next_arrival
+        state.next_arrival += 1
 
     async def claim_next(self) -> Event | None:
         state = self._s.state
@@ -232,7 +239,9 @@ class MemoryEventQueue:
         if state.failures[event_id] >= self._s.max_queue_attempts:
             state.dead.append(event_id)
         else:
-            state.queue.insert(0, event_id)
+            # Back to its place by arrival: ahead of its load's later events, and still
+            # behind older events of other loads, so a failure never jumps the queue.
+            bisect.insort(state.queue, event_id, key=state.arrivals.__getitem__)
 
     async def size(self) -> int:
         return len(self._s.state.queue)
