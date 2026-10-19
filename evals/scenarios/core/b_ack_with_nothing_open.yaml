@@ -1,0 +1,43 @@
+# Scenario B1: the driver sends "ok" and the agent asked nothing (load 481207, Client A).
+#
+# The assignment's example of when not to act: an acknowledgement with nothing open needs
+# no answer, no note and no task. The gate is the only model call; decide never runs.
+#
+# Timing (docs/decisions.md, "Eval timing"): the run of an injected event happens 60 s
+# after it. Times are America/Los_Angeles, 2026-10-13.
+#
+# Step 0, 07:05. SMS from the driver: "ok". Ledger: nothing open, no timers. The risk is
+#   low, as in the fixture.
+#   07:06 run 1: noop, 1 model call (gate: acknowledgement, act false). An
+#   acknowledgement is not in MUST_ACT, so the run ends at the gate: no SOP resolution,
+#   no decide, no outbox item.
+#   After: still no obligation and no timer.
+
+id: b_ack_with_nothing_open
+title: "B1: the driver says ok and nothing is open, so the agent does nothing"
+suite: core
+tags: [regression, sop:acknowledgements]
+description: >-
+  An "ok" from the driver when the agent asked nothing ends at the gate with no action and
+  one model call.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+
+steps:
+  - at: "07:05"
+    note: "B1: \"ok\" with nothing open; the gate ends the run"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: "ok"
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: null
+      timers: {pending: 0}
+      run_status: [noop]
+      llm_calls: 1
+    script:
+      gate:
+        - {intent: acknowledgement, act: false, reason: "The driver only says ok and nothing was asked."}

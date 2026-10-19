@@ -1,0 +1,85 @@
+# Scenario B4: pings that do not cross into high do not wake the agent (load 481207,
+# Client A).
+#
+# When not to act, decided in code before any model: a ping only updates the risk
+# tracker, and only a confirmed transition into or out of high becomes an event
+# (docs/decisions.md, "Intents and the gate"). low -> low is no change; low -> medium is
+# a transition the tracker records, but it is not an event. No event means no run and no
+# model call. The last step is a control: a ping that does reach high wakes the agent, so
+# the quiet steps above it are not quiet because pings are ignored.
+#
+# Timing (docs/decisions.md, "Eval timing"): the run of an injected event happens 60 s
+# after it. Times are America/Los_Angeles, 2026-10-13. The fixture's risk is low.
+#
+# Step 0, 07:00. Ping, risk low (the band is low): no transition, no event.
+#   No run, no model call, no outbox item. Ledger: nothing open.
+#
+# Step 1, 07:10. Ping, risk medium: the tracker confirms low -> medium (an upgrade needs
+#   one ping), and the load's delay_risk becomes medium. It does not cross high: no event.
+#   No run, no model call, no outbox item. Ledger: nothing open.
+#
+# Step 2, 07:20 (control). Ping, risk high: medium -> high becomes a risk_changed event
+#   (intent delay_risk_high, from code, no gate call).
+#   07:21 run 1: acted, 1 model call (decide).
+#   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
+#   After: eta_request open, attempts 1. Pending timers: T1 at 07:51.
+#
+# The spec cannot assert "no run" directly (an empty run_status means "not checked"), so
+# llm_calls 0 and no_actions stand in for it in steps 0 and 1.
+
+id: b_medium_risk_does_not_wake
+title: "B4: pings at low and medium do not wake the agent; only high does"
+suite: core
+tags: [regression, sop:delay_risk_high]
+description: >-
+  low -> low and low -> medium pings make no event, no run and no model call; a later
+  medium -> high ping starts the ETA request, which shows the pings were processed.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+
+steps:
+  - at: "07:00"
+    note: "Risk stays low: no event"
+    ping: {delay_risk: low}
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: null
+      timers: {pending: 0}
+      llm_calls: 0
+
+  - at: "07:10"
+    note: "B4: risk goes to medium: tracked, but medium does not wake the agent"
+    ping: {delay_risk: medium}
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: null
+      timers: {pending: 0}
+      llm_calls: 0
+
+  - at: "07:20"
+    note: "Control: medium -> high wakes the agent; at 07:21 the ETA request and a 30-minute timer"
+    ping: {delay_risk: high}
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:51"}
+      run_status: [acted]
+      llm_calls: 1
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), first step: text the driver for the ETA and follow
+            up in 30 minutes.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: "Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?"
+            - type: schedule_timer
+              kind: eta_request
+              due_in_minutes: 30
