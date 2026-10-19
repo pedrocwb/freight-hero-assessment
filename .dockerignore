@@ -1,0 +1,40 @@
+# The build context. The Dockerfile copies only what it names; this keeps secrets, local
+# environments and caches out of the context, and so out of any image.
+
+# Secrets: never in the image. The example file has no values.
+.env*
+**/.env*
+!.env.example
+
+# Version control and tooling of this machine
+.git
+.github
+.claude
+.mcp.json
+.pre-commit-config.yaml
+
+# Local environments and build output (the image builds its own)
+.venv
+**/node_modules
+web/dist
+*.egg-info
+
+# Caches
+**/__pycache__
+**/*.py[co]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.hypothesis
+.import_linter_cache
+.coverage
+htmlcov
+.pgtest
+.DS_Store
+
+# Eval runs of this machine
+evals/results
+
+# Not in the image
+tests
+docs
