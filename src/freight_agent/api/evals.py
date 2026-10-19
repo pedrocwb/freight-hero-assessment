@@ -1,9 +1,8 @@
 """The eval page: scenario listing and suite runs, on the same `evalkit` the CLI uses.
 
-`run_suite` is the one seam to swap when `evalkit.suite` lands: until then it runs each
-scenario with `ScenarioRunner` and grades it with `grade_step` and `check_invariants`,
-like the orchestrator's script. A run happens in a worker thread with its own event
-loop, so a suite that takes seconds never stalls the simulation or the event stream.
+Trials are graded exactly as the CLI grades them (`evalkit.suite.grade`). A run happens
+in a worker thread with its own event loop, so a suite that takes seconds never stalls
+the simulation or the event stream.
 """
 
 import asyncio
@@ -17,7 +16,7 @@ from freight_agent.adapters.clock import SystemClock
 from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.api.errors import NotFound
 from freight_agent.bootstrap import build_llm
-from freight_agent.evalkit.graders import check_invariants, grade_step
+from freight_agent.evalkit import suite as eval_suite
 from freight_agent.evalkit.results import Failure, ScenarioResult
 from freight_agent.evalkit.runner import RunOutcome, ScenarioRunner
 from freight_agent.evalkit.spec import Scenario, load_scenario
@@ -96,24 +95,13 @@ def select(all_scenarios: Sequence[Scenario], suite: str, scenario: str | None) 
 
 
 def grade(scenario: Scenario, outcome: RunOutcome) -> ScenarioResult:
-    """Every failure of one trial: script accounting, a runtime error, each step, invariants."""
-    failures = list(outcome.failures)
-    if outcome.error is not None:
-        failures.append(Failure(step_index=None, check="error", message=outcome.error))
-    for step, observation in zip(scenario.steps, outcome.observations, strict=False):
-        failures += grade_step(step, observation, timezone=scenario.timezone)
-    if outcome.observations:
-        load = outcome.observations[-1].snapshot.load
-        failures += check_invariants(load, outcome.observations)
-    return ScenarioResult(
-        scenario_id=scenario.id,
-        trial=outcome.trial,
-        passed=not failures,
-        failures=tuple(failures),
-        observations=outcome.observations,
-        usage=outcome.usage,
-        error=outcome.error,
-    )
+    """The CLI's verdict (`evalkit.suite.grade`). A trial that could not run also lists its
+    error as a failure, so the page shows why."""
+    result = eval_suite.grade(scenario, outcome)
+    if outcome.error is None:
+        return result
+    error = Failure(step_index=None, check="error", message=outcome.error)
+    return result.model_copy(update={"failures": (*result.failures, error)})
 
 
 async def run_suite(
@@ -125,7 +113,7 @@ async def run_suite(
     k: int,
     model: LanguageModel | None = None,
 ) -> SuiteSummary:
-    """Run `k` trials of each scenario and summarize. The seam to swap for `evalkit.suite`.
+    """Run `k` trials of each scenario and summarize them for the page.
 
     `model` replaces the replay model (tests); scripted mode always uses the scenario's
     own script.

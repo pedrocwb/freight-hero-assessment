@@ -52,7 +52,7 @@ from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import later
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.ports.repositories import UnitOfWorkFactory
-from freight_agent.settings import LlmMode, MissingSetting, Settings
+from freight_agent.settings import LlmMode, MissingSetting, Settings, is_set
 
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 # The assignment's morning: five minutes before the 07:00 ping.
@@ -90,6 +90,15 @@ class Session:
         )
 
 
+def _interactive_mode(settings: Settings) -> LlmMode:
+    """`LLM_MODE` when it is set. Otherwise the live model when its key is there: replay
+    answers only the prompts of recorded eval scenarios, and every new conversation on
+    the platform makes new prompts."""
+    if "llm_mode" in settings.model_fields_set or not is_set(settings.openrouter_api_key):
+        return settings.llm_mode
+    return "live"
+
+
 def open_session(
     settings: Settings,
     *,
@@ -104,7 +113,7 @@ def open_session(
     reset really starts over. The model comes from `llm_mode` (default: the setting)
     unless `llm` is given, which tests use to script the agent.
     """
-    mode = llm_mode or settings.llm_mode
+    mode = llm_mode or _interactive_mode(settings)
     effective = settings.model_copy(update={"persistence": "memory", "llm_mode": mode})
     persistence = build_uow_factory(effective)
     clock = VirtualClock(start.astimezone(timezone))

@@ -356,3 +356,43 @@ def sop_lint() -> None:
     errors = sum(issue.severity is Severity.ERROR for issue in issues)
     typer.echo(f"{errors} errors, {len(issues) - errors} warnings in {settings.sops_dir}")
     raise typer.Exit(1 if errors else 0)
+
+
+# --- agent serve and agent db -------------------------------------------------------------
+
+
+@app.command("serve")
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Interface to listen on."),
+    port: int = typer.Option(8000, help="Port of the platform API (the web UI proxies to it)."),
+) -> None:
+    """Serve the simulation platform's API (the web UI in web/ talks to it)."""
+    from freight_agent.api.__main__ import main as serve_api
+
+    serve_api(["--host", host, "--port", str(port)])
+
+
+db_app = typer.Typer(no_args_is_help=True, help="Postgres schema migrations.")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("migrate")
+def db_migrate() -> None:
+    """Apply pending migrations to DATABASE_URL_DIRECT (or DATABASE_URL), from env or .env."""
+    from freight_agent.adapters.persistence.postgres.migrate import MigrationError, migrate
+
+    settings = Settings()
+    url = settings.database_url_direct or settings.database_url
+    from psycopg import OperationalError
+
+    try:
+        applied = migrate(url.get_secret_value() if url is not None else None)
+    except MigrationError as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2) from exc
+    except OperationalError as exc:  # the message names host and port, never the password
+        typer.echo(f"error: cannot reach the database: {str(exc).strip().splitlines()[0]}")
+        raise typer.Exit(2) from exc
+    typer.echo(
+        f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else "")
+    )
