@@ -1,0 +1,49 @@
+# Git hooks. Install once per clone with `make hooks`; check the whole tree with
+# `uv run pre-commit run --all-files`. CI runs the same gates, so the hooks only make
+# failures show up earlier.
+minimum_pre_commit_version: "4.0.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Recorded cassettes and eval results are kept byte for byte as written.
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        exclude: ^evals/(cassettes|results)/
+      - id: end-of-file-fixer
+        exclude: ^evals/(cassettes|results)/
+      - id: check-yaml
+      - id: check-added-large-files
+
+  # Keep `rev` on the ruff version in uv.lock, so the hook and `make lint` agree.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Tools that need the project's environment run through uv (it must be on PATH).
+  # Their configuration is in pyproject.toml, so a change there runs them too.
+  - repo: local
+    hooks:
+      - id: no-env-files
+        name: block .env files
+        description: Secrets live in .env files; only .env.example may be committed.
+        language: fail
+        entry: ".env files hold secrets and must not be committed (only .env.example may be)"
+        files: (^|/)\.env(\..+)?$
+        exclude: (^|/)\.env\.example$
+      - id: pyright
+        name: pyright
+        language: system
+        entry: uv run pyright
+        types_or: [python, toml]
+        pass_filenames: false
+      - id: lint-imports
+        name: import-linter (layer rules)
+        language: system
+        entry: uv run lint-imports
+        types_or: [python, toml]
+        pass_filenames: false

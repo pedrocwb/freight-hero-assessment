@@ -1,0 +1,103 @@
+# Scenario evals against real models through OpenRouter. Started by hand from the
+# Actions tab, because every run spends money. The results (transcripts, pass^k and cost
+# per scenario) are uploaded as an artifact.
+#
+# The command lands with card EVK-3:
+#   uv run agent eval run --suite core --mode live --k 3 --model-set cheap --cost-cap-usd 2
+# `--k` runs each scenario k times (pass^k needs every trial to pass), `--model-set` names a
+# set in config/models.yaml and `--cost-cap-usd` aborts the run once the spend passes it.
+# If EVK-3 names a flag differently, update the run step below.
+name: Evals (live)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Scenario suite
+        type: string
+        default: core
+      k:
+        description: Trials per scenario
+        type: number
+        default: 3
+      model_set:
+        description: Model set from config/models.yaml
+        type: string
+        default: cheap
+      cost_cap_usd:
+        description: Abort once the run has spent this many USD
+        type: string
+        default: "2.00"
+
+permissions:
+  contents: read
+
+# One live run at a time, so two runs never spend against the same budget at once.
+concurrency:
+  group: evals-live
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.8.17"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  live:
+    name: Live evals (${{ inputs.suite }}, k=${{ inputs.k }}, ${{ inputs.model_set }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Inputs reach the shell as environment variables, never as interpolated code.
+      - name: Check inputs and the API key
+        env:
+          SUITE: ${{ inputs.suite }}
+          K: ${{ inputs.k }}
+          MODEL_SET: ${{ inputs.model_set }}
+          COST_CAP_USD: ${{ inputs.cost_cap_usd }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$SUITE" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "suite must be a plain name, got '$SUITE'"
+          [[ "$MODEL_SET" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "model_set must be a plain name, got '$MODEL_SET'"
+          [[ "$K" =~ ^[1-9][0-9]*$ ]] || fail "k must be a positive integer, got '$K'"
+          [[ "$COST_CAP_USD" =~ ^[0-9]+(\.[0-9]+)?$ ]] || fail "cost_cap_usd must be a number, got '$COST_CAP_USD'"
+          [ -n "$OPENROUTER_API_KEY" ] || fail "the OPENROUTER_API_KEY repository secret is not set"
+
+      - name: Run live evals
+        env:
+          SUITE: ${{ inputs.suite }}
+          K: ${{ inputs.k }}
+          MODEL_SET: ${{ inputs.model_set }}
+          COST_CAP_USD: ${{ inputs.cost_cap_usd }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: >-
+          uv run agent eval run
+          --suite "$SUITE"
+          --mode live
+          --k "$K"
+          --model-set "$MODEL_SET"
+          --cost-cap-usd "$COST_CAP_USD"
+
+      # Also after a failure or a cost-cap abort: partial results are what explain it.
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evals-live-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evals/results/
+          if-no-files-found: warn
+          retention-days: 30
