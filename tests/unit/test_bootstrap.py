@@ -24,6 +24,7 @@ from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_c
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
 from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.observability.langsmith import LangSmithTracer
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -378,29 +379,15 @@ def test_postgres_without_a_database_url_names_the_variable(
 # --- tracer --------------------------------------------------------------------
 
 
-@dataclass
-class FakeLangSmithTracer:
-    api_key: SecretStr
-    project: str
-
-    async def record_run(self, run: Any) -> str | None:
-        return None
-
-
 @pytest.mark.unit
-def test_tracing_is_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_module(monkeypatch, bootstrap.LANGSMITH, FakeLangSmithTracer)
-
+def test_tracing_is_off_by_default(tmp_path: Path) -> None:
     assert isinstance(
         build_tracer(_settings(tmp_path, langsmith_api_key=LANGSMITH_KEY)), NullTracer
     )
 
 
 @pytest.mark.unit
-def test_langsmith_traces_when_tracing_is_on_and_the_key_is_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _fake_module(monkeypatch, bootstrap.LANGSMITH, FakeLangSmithTracer)
+def test_langsmith_traces_when_tracing_is_on_and_the_key_is_set(tmp_path: Path) -> None:
     settings = _settings(
         tmp_path,
         langsmith_tracing=True,
@@ -410,36 +397,20 @@ def test_langsmith_traces_when_tracing_is_on_and_the_key_is_set(
 
     tracer = build_runtime_deps(settings).tracer
 
-    assert isinstance(tracer, FakeLangSmithTracer)
-    assert (tracer.api_key.get_secret_value(), tracer.project) == (LANGSMITH_KEY, "freight-evals")
+    # Building it reaches no network: the SDK client is created on the first export.
+    assert isinstance(tracer, LangSmithTracer)
+    assert tracer._project == "freight-evals"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.unit
 def test_tracing_on_without_a_key_falls_back_to_no_tracing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _fake_module(monkeypatch, bootstrap.LANGSMITH, FakeLangSmithTracer)
-
     with caplog.at_level(logging.WARNING):
         tracer = build_tracer(_settings(tmp_path, langsmith_tracing=True))
 
     assert isinstance(tracer, NullTracer)
     assert "LANGSMITH_API_KEY" in caplog.text
-
-
-@pytest.mark.unit
-def test_tracing_falls_back_to_no_tracing_until_the_langsmith_adapter_lands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _absent(monkeypatch, bootstrap.LANGSMITH)
-    settings = _settings(tmp_path, langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY)
-
-    with caplog.at_level(logging.WARNING):
-        tracer = build_tracer(settings)
-
-    assert isinstance(tracer, NullTracer)
-    assert "LangSmith" in caplog.text
-    assert LANGSMITH_KEY not in caplog.text
 
 
 # --- lazy adapters -------------------------------------------------------------

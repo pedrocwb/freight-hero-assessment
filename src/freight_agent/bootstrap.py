@@ -9,10 +9,10 @@ Local mode is the default and needs no secret and no network: in-memory storage,
 recording gateways (there are no real integrations), recorded model answers (`replay`)
 and no tracing. Each outside system is switched on by its setting.
 
-Adapters still being written by other cards (Postgres, the LangSmith tracer) are
-imported lazily, by name, through `LazyAdapter`: until one lands, choosing it is a clear
-error (Postgres) or a logged fallback (tracing), and nothing here has to change when it
-does, as long as it exposes the name below.
+The Postgres adapter is imported lazily, by name, through `LazyAdapter`, so a memory-only
+deployment never loads the database driver; choosing it while it is missing is a clear
+error. Tracing that is switched on without its key falls back to no tracing, with a
+warning that names no secret.
 """
 
 import importlib
@@ -34,6 +34,7 @@ from freight_agent.adapters.llm.openrouter import models_for_role
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
 from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.observability.langsmith import LangSmithTracer, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -88,7 +89,6 @@ class LazyAdapter:
 # `unit_of_work_factory(database_url: SecretStr) -> UnitOfWorkFactory`
 POSTGRES = LazyAdapter("freight_agent.adapters.persistence.postgres", "unit_of_work_factory")
 # `LangSmithTracer(*, api_key: SecretStr, project: str)`, a `Tracer`
-LANGSMITH = LazyAdapter("freight_agent.adapters.observability.langsmith", "LangSmithTracer")
 
 
 # --- language model ------------------------------------------------------------
@@ -198,7 +198,7 @@ def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
 # --- tracing -------------------------------------------------------------------
 
 
-def build_tracer(settings: Settings) -> Tracer:
+def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = None) -> Tracer:
     """LangSmith when `LANGSMITH_TRACING` is on and its key is set, otherwise no tracing.
 
     Tracing is optional and must never stop the agent, so a missing key or a missing
@@ -210,11 +210,11 @@ def build_tracer(settings: Settings) -> Tracer:
     if not is_set(key):
         logger.warning("LANGSMITH_TRACING is on but LANGSMITH_API_KEY is not set: no tracing")
         return NullTracer()
-    tracer_class = LANGSMITH.load()
-    if tracer_class is None:
-        logger.warning("LANGSMITH_TRACING is on but the LangSmith tracer is not available yet")
-        return NullTracer()
-    return tracer_class(api_key=key, project=settings.langsmith_project)
+    return LangSmithTracer(
+        langsmith_client_factory(key.get_secret_value()),
+        project_name=settings.langsmith_project,
+        sop_version=sop_version,
+    )
 
 
 # --- runtime -------------------------------------------------------------------
@@ -234,14 +234,15 @@ def build_runtime_deps(
     deliveries are recorded, not sent.
     """
     clock = SystemClock() if clock is None else clock
+    sop = FileSopRepository(settings.sops_dir)
     return RuntimeDeps(
         uow_factory=build_uow_factory(settings) if persistence is None else persistence,
         clock=clock,
         ids=UuidIdGenerator(),
         llm=build_llm(settings, clock=clock) if llm is None else llm,
-        sop=FileSopRepository(settings.sops_dir),
+        sop=sop,
         gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
-        tracer=build_tracer(settings),
+        tracer=build_tracer(settings, sop_version=sop.version),
         config=RuntimeConfig(),
     )
 
