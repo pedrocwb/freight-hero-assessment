@@ -481,6 +481,27 @@ async def test_a_prose_reply_is_followed_by_one_forced_answer() -> None:
 
 
 @pytest.mark.unit
+async def test_claude_tool_rounds_use_auto_since_no_endpoint_takes_required() -> None:
+    """OpenRouter has no Anthropic endpoint for `tool_choice: "required"` (a 404 for
+    Claude Haiku 5.5), so the rounds let the model choose; prose still ends in one
+    forced answer."""
+    chat = FakeChat(
+        script=[calls(("read_sop_section", {"section_id": "escalation"})), answers("Plan", PLAN)]
+    )
+    model = OpenRouterModel(
+        RoleConfig(model="anthropic/claude-haiku-5.5", max_tokens=512),
+        PRICING,
+        SecretStr(KEY),
+        chat_factory=lambda _role, _key: chat,
+        timer=_clock(0.0, 0.0),
+    )
+
+    await model.generate(decide(sop_tool([])), Plan)
+
+    assert [s.tool_choice for s in chat.sent] == ["auto", "auto"]
+
+
+@pytest.mark.unit
 async def test_an_answer_next_to_a_tool_call_ends_the_loop_without_running_the_tool() -> None:
     log: list[dict[str, Any]] = []
     model, chat = make_model(calls(("read_sop_section", {"section_id": "a"}), ("Plan", PLAN)))

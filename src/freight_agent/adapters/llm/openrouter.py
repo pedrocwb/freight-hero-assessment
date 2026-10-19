@@ -15,10 +15,11 @@ error names the model.
 The conversation:
 
 - No tools, or `max_tool_rounds == 0` (the gate): one forced call.
-- Otherwise up to `max_tool_rounds` rounds with `tool_choice="required"`. The model
-  calls read-only tools, which run here and go back as tool messages, or the answer
-  tool, which ends the loop. When the rounds run out, or the model replies in prose,
-  one last call forces the answer. A request makes at most `max_tool_rounds + 1` calls.
+- Otherwise up to `max_tool_rounds` rounds with `tool_choice="required"` (`"auto"` for
+  Claude, see `round_tool_choice`). The model calls read-only tools, which run here and
+  go back as tool messages, or the answer tool, which ends the loop. When the rounds run
+  out, or the model replies in prose, one last call forces the answer. A request makes
+  at most `max_tool_rounds + 1` calls.
 
 Any provider error, timeout (`request.timeout_s` covers the whole conversation) or
 answer that does not fit the schema becomes `LlmError`, named after the model.
@@ -63,6 +64,16 @@ Timer = Callable[[], float]
 _APP_TITLE = "freight-agent"
 _MAX_CAUSE = 500  # characters of a provider's error text kept in an LlmError
 _REQUIRED = "required"  # tool choice: call some tool, prose is not an option
+_AUTO = "auto"  # tool choice: a tool or prose, as the model likes
+
+# Model id prefixes whose tool rounds use `auto`: OpenRouter has no Anthropic endpoint that
+# takes `tool_choice: "required"` (a 404 for Claude Haiku 5.5), while a forced call to one
+# named tool works. A prose reply in a round already ends in one forced answer.
+_NO_REQUIRED_MODELS = ("anthropic/",)
+
+
+def round_tool_choice(model_id: str) -> str:
+    return _AUTO if model_id.startswith(_NO_REQUIRED_MODELS) else _REQUIRED
 
 
 def openrouter_chat(role: RoleConfig, api_key: SecretStr) -> BaseChatModel:
@@ -138,7 +149,7 @@ class OpenRouterModel:
         bound = [*(_function(t) for t in request.tools), answer] if rounds > 0 else [answer]
 
         for _ in range(rounds):
-            reply = await self._ask(request, messages, bound, _REQUIRED)
+            reply = await self._ask(request, messages, bound, round_tool_choice(self.model_id))
             call = _answer_call(reply, name)
             if call is not None:
                 return self._parse(request, schema, call)
