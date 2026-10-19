@@ -29,7 +29,7 @@ import asyncio
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -129,7 +129,7 @@ class OpenRouterModel:
         self, request: LlmRequest, schema: type[SchemaT], messages: list[BaseMessage]
     ) -> SchemaT:
         """Appends every reply and tool result to `messages`, which become the transcript."""
-        answer = answer_tool(schema)
+        answer = answer_tool(schema, flatten_unions=flattens_unions(self.model_id))
         name = answer["function"]["name"]
         tools = {t.name: t for t in request.tools}
         if name in tools:
@@ -176,7 +176,7 @@ class OpenRouterModel:
 
     def _parse(self, request: LlmRequest, schema: type[SchemaT], call: ToolCall) -> SchemaT:
         try:
-            return schema.model_validate(call["args"])
+            return schema.model_validate(_narrow(call["args"], _schema_of(schema)))
         except ValidationError as exc:
             problems = "; ".join(
                 f"{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}"
@@ -228,29 +228,56 @@ def models_for_role(
     )
 
 
-def answer_tool(schema: type[BaseModel]) -> dict[str, Any]:
-    """The schema as an OpenAI-style function the model calls to give its answer."""
+def answer_tool(schema: type[BaseModel], *, flatten_unions: bool = False) -> dict[str, Any]:
+    """The schema as an OpenAI-style function the model calls to give its answer.
+
+    `flatten_unions` sends each discriminated union as one flat object (`_flat_object`),
+    for models that lose a union on the way (`flattens_unions`).
+    """
     tool = convert_to_openai_tool(schema)
     function = tool["function"]
     function["description"] = f"Give your final answer. {function.get('description', '')}".strip()
-    function["parameters"] = _portable(function["parameters"])
+    function["parameters"] = _portable(function["parameters"], flatten_unions)
     return tool
 
 
-def _portable(node: Any) -> Any:
+# Model id prefixes whose answer tool goes out with flat unions. Through OpenRouter, Gemini
+# drops a union under `items`: the model sees an array of nothing and answers
+# `actions: []` while its rationale lists the right actions (every plan of the first live
+# run). GPT models are the opposite: given the flat object they fill every field of it in
+# one item, so "SMS, then a timer" comes back as one SMS. Each keeps the shape it reads.
+_FLAT_UNION_MODELS = ("google/",)
+
+
+def flattens_unions(model_id: str) -> bool:
+    return model_id.startswith(_FLAT_UNION_MODELS)
+
+
+def _schema_of(schema: type[BaseModel]) -> dict[str, Any]:
+    """The parameters as pydantic wrote them, before `_portable`: `_narrow` needs the
+    union branches that a flat wire schema no longer has."""
+    return convert_to_openai_tool(schema)["function"]["parameters"]
+
+
+def _portable(node: Any, flatten_unions: bool) -> Any:
     """A JSON schema every provider accepts and a small model fills in completely.
 
     Pydantic writes a discriminated union as `oneOf` plus a `discriminator` whose mapping
     points at `$defs` that LangChain has already inlined. Gemini rejects that shape and
     `const`, so: `oneOf` becomes `anyOf`, the discriminator goes, `const` becomes a
     one-value `enum`, and a constant property (the action `type`) becomes required,
-    since pydantic leaves it optional only because it has a default.
+    since pydantic leaves it optional only because it has a default. With
+    `flatten_unions`, the union becomes one flat object instead (`_flat_object`), and
+    `_narrow` turns the answer back into the union before pydantic validates it.
     """
     if isinstance(node, list):
-        return [_portable(item) for item in node]
+        return [_portable(item, flatten_unions) for item in cast("list[Any]", node)]
     if not isinstance(node, dict):
         return node
-    schema: dict[str, Any] = node
+    schema = cast("dict[str, Any]", node)
+    union = _discriminated_union(schema) if flatten_unions else None
+    if union is not None:
+        return _flat_object(*union)
     out: dict[str, Any] = {}
     for key, value in schema.items():
         if key == "discriminator":
@@ -258,19 +285,152 @@ def _portable(node: Any) -> Any:
         if key == "const":
             out["enum"] = [value]
         elif key == "properties" and isinstance(value, dict):
-            properties: dict[str, Any] = value
-            out[key] = {name: _portable(prop) for name, prop in properties.items()}
+            properties = cast("dict[str, Any]", value)
+            out[key] = {name: _portable(prop, flatten_unions) for name, prop in properties.items()}
         else:
-            out["anyOf" if key == "oneOf" else key] = _portable(value)
+            out["anyOf" if key == "oneOf" else key] = _portable(value, flatten_unions)
     constants = [
         name
-        for name, prop in schema.get("properties", {}).items()
+        for name, prop in cast("dict[str, Any]", schema.get("properties", {})).items()
         if isinstance(prop, dict) and "const" in prop
     ]
     if constants:
         required = list(out.get("required", []))
         out["required"] = required + [c for c in constants if c not in required]
     return out
+
+
+def _discriminated_union(node: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]] | None:
+    """(the discriminator property, the branches) of a union of objects, each picked by a
+    constant value of that property; None for any other node."""
+    branches = node.get("oneOf", node.get("anyOf"))
+    if not isinstance(branches, list) or not branches:
+        return None
+    objects = [b for b in cast("list[Any]", branches) if isinstance(b, dict) and "properties" in b]
+    if len(objects) != len(cast("list[Any]", branches)):
+        return None
+    discriminator = node.get("discriminator")
+    key = discriminator.get("propertyName") if isinstance(discriminator, dict) else None
+    if not isinstance(key, str):
+        return None
+    typed = cast("list[dict[str, Any]]", objects)
+    if any(_constant(b, key) is None for b in typed):
+        return None
+    return key, typed
+
+
+def _constant(branch: Mapping[str, Any], key: str) -> str | None:
+    prop = branch.get("properties", {}).get(key)
+    if not isinstance(prop, dict):
+        return None
+    value = cast("dict[str, Any]", prop).get("const")
+    return value if isinstance(value, str) else None
+
+
+def _flat_object(key: str, branches: list[dict[str, Any]]) -> dict[str, Any]:
+    """One object for a union: `key` is the only required field and lists every branch;
+    the other fields of every branch sit side by side, each saying which branches use it.
+
+    A field several branches share keeps only the constraints they all have (an SMS text
+    has a length cap, a TMS note does not); pydantic checks the exact branch afterwards.
+    Defaults go, since a field the model leaves out takes its default anyway, and a
+    nullable field is plain: in a flat object an unused field is simply left out.
+    """
+    values = [cast("str", _constant(b, key)) for b in branches]
+    fields: dict[str, dict[str, Any]] = {}
+    users: dict[str, list[str]] = {}
+    for value, branch in zip(values, branches, strict=True):
+        for name, prop in cast("dict[str, Any]", branch["properties"]).items():
+            if name == key:
+                continue
+            clean = _optional_field(_portable(prop, flatten_unions=True))
+            fields[name] = clean if name not in fields else _common(fields[name], clean)
+            users.setdefault(name, []).append(value)
+    catalog = "; ".join(
+        f"{value}: {', '.join(n for n in branch['properties'] if n != key) or 'nothing else'}"
+        for value, branch in zip(values, branches, strict=True)
+    )
+    properties: dict[str, Any] = {
+        key: {
+            "type": "string",
+            "enum": values,
+            "description": f"What this item is. Fill only the fields of its {key}: {catalog}.",
+        }
+    }
+    for name, prop in fields.items():
+        note = f"Only for {', '.join(users[name])}."
+        rest = {k: v for k, v in prop.items() if k != "description"}
+        described = f"{note} {prop['description']}" if "description" in prop else note
+        properties[name] = {**rest, "description": described}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": [key],
+        "additionalProperties": False,
+    }
+
+
+def _optional_field(prop: Any) -> dict[str, Any]:
+    field = {k: v for k, v in cast("dict[str, Any]", prop).items() if k not in ("default", "title")}
+    variants = field.pop("anyOf", None)
+    if isinstance(variants, list):
+        typed = [v for v in cast("list[Any]", variants) if v != {"type": "null"}]
+        if len(typed) == 1 and isinstance(typed[0], dict):
+            field = {**cast("dict[str, Any]", typed[0]), **field}
+        else:
+            field["anyOf"] = variants
+    return field
+
+
+def _common(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in first.items() if second.get(k) == v}
+
+
+def _narrow(value: Any, node: Any) -> Any:
+    """The answer to a `_portable` schema, put back in the shape of the original one.
+
+    In a union item, only the chosen branch's fields stay: the others are fields of other
+    actions that a small model filled too, often with null (from a flat object nearly
+    always, from a union now and then). A null for a field that does not take null goes
+    as well, so the field takes its default or pydantic says it is missing. Everything
+    else passes through untouched for pydantic to judge.
+    """
+    if not isinstance(node, dict):
+        return value
+    schema = cast("dict[str, Any]", node)
+    if isinstance(value, list):
+        items = schema.get("items")
+        return [_narrow(v, items) for v in cast("list[Any]", value)]
+    if not isinstance(value, dict):
+        return value
+    answer = cast("dict[str, Any]", value)
+    union = _discriminated_union(schema)
+    if union is not None:
+        key, branches = union
+        branch = next((b for b in branches if _constant(b, key) == answer.get(key)), None)
+        if branch is None:
+            return answer  # an unknown type: pydantic names it
+        props = cast("dict[str, Any]", branch["properties"])
+        return {
+            name: _narrow(v, props[name])
+            for name, v in answer.items()
+            if name in props and (v is not None or _nullable(props[name]))
+        }
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return answer
+    known = cast("dict[str, Any]", props)
+    return {name: _narrow(v, known.get(name)) for name, v in answer.items()}
+
+
+def _nullable(prop: Any) -> bool:
+    if not isinstance(prop, dict):
+        return True
+    field = cast("dict[str, Any]", prop)
+    variants = field.get("anyOf")
+    if isinstance(variants, list):
+        return {"type": "null"} in cast("list[Any]", variants)
+    return field.get("type") in (None, "null")
 
 
 def _function(spec: ToolSpec) -> dict[str, Any]:

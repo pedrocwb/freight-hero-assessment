@@ -1,0 +1,52 @@
+# Bake-off candidate set "nano" (`--model-set nano`): the default set with GPT-4.1 Nano
+# on decide too. Only the decide role differs from config/models.yaml; see that file for
+# what each setting means and where the prices come from.
+
+roles:
+  gate:
+    model: openai/gpt-4.1-nano
+    fallbacks: [google/gemini-2.5-flash-lite]
+    temperature: 0
+    max_tokens: 256
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  decide:
+    model: openai/gpt-4.1-nano
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 2048
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  judge:
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 1024
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  driver_sim:
+    model: google/gemini-2.5-flash-lite
+    fallbacks: [openai/gpt-4.1-nano]
+    temperature: 0.7
+    max_tokens: 400
+
+pricing:
+  openai/gpt-4.1-nano: {input: 0.10, output: 0.40, cached_input: 0.025, context_length: 1047576}
+  google/gemini-2.5-flash-lite: {input: 0.10, output: 0.40, cached_input: 0.01, context_length: 1048576}
+  openai/gpt-4.1-mini: {input: 0.40, output: 1.60, cached_input: 0.10, context_length: 1047576}
+  mistralai/mistral-small-3.2-24b-instruct: {input: 0.10, output: 0.30, context_length: 131072}
+  qwen/qwen3-30b-a3b-instruct-2507: {input: 0.10, output: 0.30, context_length: 262144}
+  openai/gpt-oss-120b: {input: 0.037, output: 0.17, context_length: 131072}
+
+bakeoff_candidates:
+  - openai/gpt-4.1-nano
+  - google/gemini-2.5-flash-lite
+  - mistralai/mistral-small-3.2-24b-instruct
+  - qwen/qwen3-30b-a3b-instruct-2507
+  - openai/gpt-oss-120b

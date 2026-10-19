@@ -40,8 +40,9 @@ from freight_agent.adapters.llm.openrouter import (
     models_for_role,
     openrouter_chat,
 )
-from freight_agent.domain.actions import Plan, Purpose, SendSms
+from freight_agent.domain.actions import Plan, Purpose, ScheduleTimer, SendEmail, SendSms
 from freight_agent.domain.intents import GateDecision, Intent
+from freight_agent.domain.obligations import ObligationKind
 from freight_agent.ports.llm import LlmError, LlmRequest, ModelRole, ToolSpec
 
 KEY = "sk-or-v1-never-show-me-0123456789"
@@ -255,6 +256,130 @@ async def test_the_answer_tool_is_portable_across_providers() -> None:
     assert send_sms["properties"]["type"]["enum"] == ["send_sms"]
     assert "type" in send_sms["required"]
     assert all("type" in v["required"] for v in variants)
+
+
+@pytest.mark.unit
+async def test_a_flat_answer_tool_has_no_union_at_all() -> None:
+    """No `anyOf` either: Gemini through OpenRouter drops a union under `items`, and the
+    model then sends `actions: []` whatever its rationale says."""
+    tool = answer_tool(Plan, flatten_unions=True)
+
+    text = json.dumps(tool)
+    for keyword in ('"oneOf"', '"anyOf"', '"discriminator"', '"const"'):
+        assert keyword not in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("model_id", "flat"),
+    [
+        ("google/gemini-2.5-flash-lite", True),
+        ("openai/gpt-4.1-nano", False),
+        ("openai/gpt-oss-120b", False),
+    ],
+)
+async def test_only_gemini_gets_the_flat_answer_tool(model_id: str, flat: bool) -> None:
+    """GPT models given the flat object fill every field of it in one item, so two
+    actions become one; they keep the union, which they read well."""
+    chat = FakeChat(script=[answers("Plan", PLAN)])
+    model = OpenRouterModel(
+        RoleConfig(model=model_id, max_tokens=512),
+        PRICING,
+        SecretStr(KEY),
+        chat_factory=lambda _role, _key: chat,
+        timer=_clock(0.0, 0.0),
+    )
+
+    await model.generate(decide(), Plan)
+
+    (sent,) = chat.sent
+    items = sent.tools[0]["function"]["parameters"]["properties"]["actions"]["items"]
+    assert ("anyOf" not in items) is flat
+
+
+@pytest.mark.unit
+async def test_the_action_union_goes_out_as_one_flat_object_picked_by_its_type() -> None:
+    """`type` is the one required field and lists every action; the fields of every action
+    sit side by side, each saying which actions use it."""
+    tool = answer_tool(Plan, flatten_unions=True)
+
+    item = tool["function"]["parameters"]["properties"]["actions"]["items"]
+    assert item["type"] == "object"
+    assert item["required"] == ["type"]
+    properties = item["properties"]
+    assert next(iter(properties)) == "type"
+    assert properties["type"]["enum"] == [
+        "send_sms",
+        "send_email",
+        "post_broker_slack",
+        "write_tms_note",
+        "create_hero_task",
+        "post_internal_slack",
+        "update_stage",
+        "schedule_timer",
+        "defer_obligation",
+        "close_obligation",
+    ]
+    assert "schedule_timer: kind, due_in_minutes" in properties["type"]["description"]
+    assert properties["due_in_minutes"]["type"] == "integer"
+    assert properties["due_in_minutes"]["description"].startswith("Only for schedule_timer.")
+    assert properties["subject"] == {"type": "string", "description": "Only for send_email."}
+    # Shared by several actions: only the constraints they all have are kept.
+    assert properties["text"]["minLength"] == 1
+    assert "maxLength" not in properties["text"]
+    assert "default" not in properties["purpose"]
+
+
+@pytest.mark.unit
+async def test_a_flat_answer_is_narrowed_back_to_the_fields_of_its_action_type() -> None:
+    """Small models fill the fields of the other actions too, often with null; those are
+    dropped before validation, so `extra="forbid"` still guards the real fields."""
+    plan = {
+        "rationale": "first step",
+        "actions": [
+            {
+                "type": "send_sms",
+                "contact_id": "drv-1",
+                "text": "What time will you arrive at the pickup?",
+                "purpose": "eta_request",
+                "kind": None,
+                "due_in_minutes": None,
+                "subject": None,
+            },
+            {"type": "schedule_timer", "kind": "eta_request", "due_in_minutes": 30, "text": ""},
+            {"type": "send_email", "to_contact_ids": ["dsp-1"], "body": "ETA?", "subject": None},
+        ],
+    }
+    model, _ = make_model(answers("Plan", plan))
+
+    response = await model.generate(decide(), Plan)
+
+    sms, timer, email = response.parsed.actions
+    assert sms == SendSms(
+        contact_id="drv-1",
+        text="What time will you arrive at the pickup?",
+        purpose=Purpose.ETA_REQUEST,
+    )
+    assert timer == ScheduleTimer(kind=ObligationKind.ETA_REQUEST, due_in_minutes=30)
+    assert email == SendEmail(to_contact_ids=("dsp-1",), body="ETA?", subject=None)
+
+
+@pytest.mark.unit
+async def test_a_missing_field_of_the_chosen_action_is_still_an_llm_error() -> None:
+    plan = {"actions": [{"type": "schedule_timer", "kind": "eta_request"}], "rationale": "x"}
+    model, _ = make_model(answers("Plan", plan))
+
+    with pytest.raises(LlmError, match=r"Plan.*due_in_minutes"):
+        await model.generate(decide(), Plan)
+
+
+@pytest.mark.unit
+async def test_an_unknown_action_type_is_still_an_llm_error() -> None:
+    plan = {"actions": [{"type": "call_driver", "contact_id": "drv-1"}], "rationale": "x"}
+    model, _ = make_model(answers("Plan", plan))
+
+    with pytest.raises(LlmError, match="Plan"):
+        await model.generate(decide(), Plan)
 
 
 # Tool loop
