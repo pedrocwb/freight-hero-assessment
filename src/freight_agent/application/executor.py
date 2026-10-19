@@ -42,7 +42,7 @@ from freight_agent.domain.obligations import (
     ObligationStatus,
 )
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
-from freight_agent.domain.timers import Timer, TimerStatus, follow_up_due_at
+from freight_agent.domain.timers import Timer, TimerStatus, follow_up_due_at, later
 from freight_agent.ports.clock import Clock, IdGenerator
 from freight_agent.ports.repositories import UnitOfWork
 
@@ -272,7 +272,7 @@ class _Execution:
     async def _schedule_timer(self, kind: ObligationKind, minutes: int) -> None:
         obligation = await self._open_obligation(kind, "schedule a timer")
         due_at = follow_up_due_at(
-            requested=self._now + timedelta(minutes=minutes),
+            requested=later(self._now, timedelta(minutes=minutes)),
             deferred_until=obligation.deferred_until,
             grace=self._grace,
         )
@@ -282,7 +282,7 @@ class _Execution:
         """Count the promise from the message time; push any active timer past it."""
         obligation = await self._open_obligation(kind, "defer")
         said_at = self._event.occurred_at
-        until = said_at + timedelta(minutes=minutes)
+        until = later(said_at, timedelta(minutes=minutes))
         deferred = obligation.defer(until=until, now=said_at, policy=self._policy)
         active = await self._active_timer(deferred)
         if active is None:

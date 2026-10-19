@@ -139,3 +139,20 @@ def test_the_grace_is_real_time_when_the_clocks_go_back() -> None:
 
     assert due.astimezone(UTC) == datetime(2026, 11, 1, 9, 1, tzinfo=UTC)
     assert due.tzinfo is LA
+
+
+@pytest.mark.unit
+def test_later_adds_real_time_across_the_fall_back() -> None:
+    from datetime import UTC, timedelta
+    from zoneinfo import ZoneInfo
+
+    from freight_agent.domain.timers import later
+
+    la = ZoneInfo("America/Los_Angeles")
+    before = datetime(2026, 11, 1, 1, 55, tzinfo=la)  # 01:55 PDT, the first 01:xx
+
+    after = later(before, timedelta(minutes=15))
+
+    assert after.astimezone(UTC) - before.astimezone(UTC) == timedelta(minutes=15)
+    assert after.tzinfo is la
+    assert after.utcoffset() == timedelta(hours=-8)  # 01:10 PST

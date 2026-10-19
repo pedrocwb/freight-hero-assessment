@@ -115,3 +115,16 @@ async def test_ties_on_time_follow_natural_id_order(store: MemoryStore) -> None:
         pending = await uow.outbox.pending()
 
     assert [i.outbox_id for i in pending] == ["out_2", "out_9", "out_10"]
+
+
+@pytest.mark.unit
+def test_virtual_clock_advances_real_time_across_the_fall_back() -> None:
+    from datetime import UTC
+
+    from freight_agent.adapters.clock import VirtualClock
+
+    clock = VirtualClock(datetime(2026, 11, 1, 1, 55, tzinfo=LA))
+
+    clock.advance(timedelta(minutes=15))
+
+    assert clock.now().astimezone(UTC) == datetime(2026, 11, 1, 9, 10, tzinfo=UTC)

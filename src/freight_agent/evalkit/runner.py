@@ -28,7 +28,7 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
-from freight_agent.application.runtime import AgentRuntime, RuntimeDeps
+from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
 from freight_agent.domain.runs import RunRecord, Usage
@@ -78,6 +78,9 @@ def build_runtime(
         sop=sop,
         gateways=gateways,
         tracer=NullTracer(),
+        # An eval must fail loudly on a harness error (a missing cassette, a bug), not
+        # record it as a failed run and move on.
+        config=RuntimeConfig(reraise_unexpected=True),
     )
     return AgentRuntime(deps)
 

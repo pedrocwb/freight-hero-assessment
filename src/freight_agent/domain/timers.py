@@ -27,6 +27,16 @@ class Timer(DomainModel):
         return self.model_copy(update={"status": status})
 
 
+def later(at: datetime, delta: timedelta) -> datetime:
+    """`at` plus `delta` of real time, in `at`'s timezone.
+
+    Python adds a timedelta to an aware datetime on the wall clock, which is an hour off
+    across a daylight-saving change: 01:55 PDT + 15 minutes would read 02:10 PST, 75 real
+    minutes later. Waits in the SOPs are real minutes.
+    """
+    return (at.astimezone(UTC) + delta).astimezone(at.tzinfo)
+
+
 def is_stale(timer: Timer, obligation: Obligation | None) -> bool:
     """A timer may act only while it is the active timer of an open obligation."""
     if timer.status in (TimerStatus.SUPERSEDED, TimerStatus.CANCELLED):
