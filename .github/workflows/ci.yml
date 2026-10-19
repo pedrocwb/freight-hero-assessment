@@ -1,0 +1,139 @@
+# The quality gates of every change: lint, types, layer rules, tests with coverage and
+# the scenario evals in scripted mode. Each gate is a Makefile target, so `make ci`
+# runs the same checks locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels the run it replaces; runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The uv that writes uv.lock locally. Bump it together with the lock format.
+  UV_VERSION: "0.8.17"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  checks:
+    name: Lint, types, layers, tests, evals
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      has-integration-tests: ${{ steps.integration.outputs.found }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # setup-uv publishes no floating major tag after v7, so it is pinned to a release.
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # The hooks a contributor may have skipped locally: whitespace, YAML, and the
+      # block on committed .env files. The rest of the hooks run as their own steps.
+      - name: File hygiene (pre-commit)
+        env:
+          SKIP: ruff-check,ruff-format,pyright,lint-imports
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Lint (ruff check, ruff format --check)
+        run: make lint
+
+      - name: Types (pyright)
+        run: make typecheck
+
+      - name: Layer rules (import-linter)
+        run: make arch
+
+      - name: Tests with coverage (unit, contract, property)
+        run: make cov
+
+      # TODO(EVK-3): remove the guard once `agent eval run` exists. Until then click
+      # answers the unknown `eval` command with exit code 2 and this step only warns.
+      # Any other failure (an import error, a failing scenario) fails the build.
+      - name: Evals, scripted mode (needs the EVK-3 CLI)
+        run: |
+          status=0
+          uv run agent eval --help > /dev/null 2>&1 || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::warning title=Evals not run::'agent eval' is not registered yet (card EVK-3), so make eval was skipped."
+            exit 0
+          fi
+          make eval
+
+      # pytest exits with 5 when the selection collects no test.
+      - name: Look for integration tests
+        id: integration
+        run: |
+          status=0
+          uv run pytest -m integration --collect-only -q > /dev/null || status=$?
+          case "$status" in
+            0) echo "found=true" >> "$GITHUB_OUTPUT" ;;
+            5) echo "found=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
+
+  # Runs only once tests marked `integration` exist (Postgres adapter, card PG-1).
+  integration:
+    name: Integration tests (Postgres)
+    needs: checks
+    if: needs.checks.outputs.has-integration-tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # pgvector ships the vector extension the SOP section embeddings need.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+          POSTGRES_DB: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent -d agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Same names and defaults as .env.example. There is no pooler here, so both match.
+      DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
+      DATABASE_URL_DIRECT: postgresql://agent:agent@localhost:5432/agent
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Integration tests
+        run: uv run pytest -m integration
