@@ -896,3 +896,18 @@ def test_action_purpose_matches_the_payload_purpose() -> None:
     assert checks(failures) == ["forbid[0]"]
     assert "with purpose eta_request" in failures[0].message
     assert grade(expect(actions=[{"kind": "sms", "purpose": "reply"}]), observe(reply)) == []
+
+
+@pytest.mark.unit
+def test_a_stage_update_matches_its_stage() -> None:
+    update = item(OutboxKind.STAGE_UPDATE, stage="to_delivery")
+
+    assert (
+        grade(expect(actions=[{"kind": "stage_update", "stage": "to_delivery"}]), observe(update))
+        == []
+    )
+    failures = grade(
+        expect(actions=[{"kind": "stage_update", "stage": "at_delivery"}]), observe(update)
+    )
+    assert checks(failures) == ["expect.actions[0]"]
+    assert "to stage at_delivery" in failures[0].message
