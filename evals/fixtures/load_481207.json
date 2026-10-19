@@ -1,0 +1,33 @@
+{
+  "load_id": "481207",
+  "broker": { "id": "northline", "name": "Northline Logistics" },
+  "shipper": "Riverbend Foods",
+  "carrier": { "name": "Prairie Haul LLC", "mc_number": "778120" },
+  "commodity": "Canned tomato sauce, 38,000 lb, dry van",
+  "stage": "to_pickup",
+  "delay_risk": "low",
+  "contacts": [
+    { "id": "drv_20931", "role": "driver", "channels": ["sms"] },
+    { "id": "dsp_4410", "role": "dispatcher", "channels": ["email"] },
+    { "id": "brk_0087", "role": "broker", "channels": ["email", "slack"] }
+  ],
+  "stops": [
+    {
+      "sequence": 1,
+      "type": "pickup",
+      "name": "Riverbend plant",
+      "address": "Stockton, CA",
+      "timezone": "America/Los_Angeles",
+      "appointment": { "type": "window", "start": "2026-10-13T06:00", "end": "2026-10-13T14:00" }
+    },
+    {
+      "sequence": 2,
+      "type": "delivery",
+      "name": "Valley DC",
+      "address": "Reno, NV",
+      "timezone": "America/Los_Angeles",
+      "appointment": { "type": "fixed", "time": "2026-10-14T09:30" }
+    }
+  ],
+  "instructions": "Call 1 hr before arrival. PO 55821 required at gate."
+}

@@ -1,0 +1,56 @@
+"""The language model port. LangChain and OpenRouter live behind it, in adapters."""
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Protocol, TypeVar
+
+from pydantic import BaseModel
+
+from freight_agent.domain.runs import Usage
+
+SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+class ModelRole(StrEnum):
+    GATE = "gate"
+    DECIDE = "decide"
+    JUDGE = "judge"
+    DRIVER_SIM = "driver_sim"
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """A read-only tool the model may call. Action tools do not exist: actions are proposed."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    run: Callable[[dict[str, Any]], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class LlmRequest:
+    role: ModelRole
+    system: str
+    user: str
+    tools: tuple[ToolSpec, ...] = ()
+    max_tool_rounds: int = 2
+    timeout_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class LlmResponse[T: BaseModel]:
+    parsed: T
+    usage: Usage
+    transcript: tuple[dict[str, Any], ...] = field(default=())
+
+
+class LlmError(Exception):
+    """The model failed, timed out, or returned output that does not match the schema."""
+
+
+class LanguageModel(Protocol):
+    async def generate(
+        self, request: LlmRequest, schema: type[SchemaT]
+    ) -> LlmResponse[SchemaT]: ...
