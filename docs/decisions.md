@@ -46,11 +46,11 @@ Canonical section ids (scenarios tag them as `sop:<id>`):
 
 | id | Layer(s) | Intents | What it says |
 |---|---|---|---|
-| `communication_rules` | standard | all | Tone, only the load's contacts, never share rates or prices, one question per SMS, no promises the agent cannot keep |
+| `communication_rules` | standard | all | Tone, only the load's contacts, never share rates or prices, short SMS, no promises the agent cannot keep |
 | `escalation` | standard | all | When and how to create a Hero task, when it is urgent, what to write in it |
 | `delay_risk_high` | standard, `northline`, `keystone` | `delay_risk_high`, `eta_follow_up_due` | The high-risk procedure (see below) |
 | `delay_risk_cleared` | standard | `delay_risk_low` | Risk is back to normal: close the open ETA request as cancelled, no messages |
-| `eta_received` | standard | `eta_provided` | Close the ETA request as satisfied, write the ETA in the TMS; a vague answer ("soon") is not an ETA |
+| `eta_received` | standard | `eta_provided` | Close the ETA request as satisfied and write the ETA, as a local clock time, in the TMS. A relative ETA ("in 30 min") is converted from the message time. A vague answer ("soon", "on my way") is not an ETA: send nothing, keep the request open, the follow-up continues |
 | `eta_deferred` | standard | `eta_deferred` | The contact promises an answer later: accept one deferral of up to 15 minutes, send nothing |
 | `driver_questions` | standard | `question` | Answer from the load metadata when the answer is there; otherwise a Hero task; never guess |
 | `acknowledgements` | standard | `acknowledgement` | "ok", "thanks": do nothing; an acknowledgement is not an ETA |
