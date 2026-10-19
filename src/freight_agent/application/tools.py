@@ -6,6 +6,7 @@ argument is an answer, not an exception: the tool returns the valid ids so a
 small model can recover in its next tool round instead of failing the run.
 """
 
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -72,11 +73,13 @@ def read_document_tool(attachments: Sequence[Attachment]) -> ToolSpec:
         attachment = by_id.get(_text_arg(args, "attachment_id"))
         if attachment is None:
             return _unknown("attachment_id", args, by_id)
+        # Every value comes from outside (a filename is whatever the sender chose), so each
+        # is a JSON string: a newline in one cannot start a line of its own.
         return (
-            f"attachment {attachment.attachment_id}\n"
-            f"filename: {attachment.filename}\n"
-            f"content type: {attachment.content_type}\n"
-            f"reference: {attachment.ref}\n"
+            f"attachment {_json(attachment.attachment_id)}\n"
+            f"filename: {_json(attachment.filename)}\n"
+            f"content type: {_json(attachment.content_type)}\n"
+            f"reference: {_json(attachment.ref)}\n"
             "Content extraction is not available, so the type and the values of this document "
             "are unknown. Do not guess them: create a Hero task to review the document, with "
             "the attachment id and the filename."
@@ -101,7 +104,11 @@ def _text_arg(args: dict[str, Any], name: str) -> str:
 def _unknown(name: str, args: dict[str, Any], valid: dict[str, Any]) -> str:
     given = args.get(name)
     problem = f"Unknown {name} {given!r}." if name in args else f"Missing {name}."
-    return f"{problem} Valid {name} values: {', '.join(valid)}."
+    return f"{problem} Valid {name} values: {', '.join(_json(v) for v in valid)}."
+
+
+def _json(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)
 
 
 def _id_schema(name: str, description: str, valid: dict[str, Any]) -> dict[str, Any]:

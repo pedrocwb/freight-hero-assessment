@@ -38,15 +38,24 @@ roles:
 
   decide:
     # Tools (read_sop_section, read_document) plus the Plan as a forced tool call.
-    # Gemini 2.5 Flash Lite: same price tier as Nano, stronger instruction following.
-    # The fallback is one step up and from another provider family.
-    model: google/gemini-2.5-flash-lite
-    fallbacks: [openai/gpt-4.1-mini]
+    # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
+    # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
+    # about $0.024 for a long load (100 messages, 80 decide calls). Claude Haiku 5.5 also
+    # passed 22/22 at about 5 times the cost (config/models.haiku.yaml). gpt-oss always
+    # reasons; low effort keeps the decide call near 5 s (p95 8 to 11 s).
+    # Pinned to DeepInfra at bf16, the cheapest full-precision endpoint; fp4/int4 ones
+    # are cheaper still but were not measured. The fallback is another family and takes
+    # `reasoning` too: the chain sends every fallback the same settings, and GPT-4.1
+    # has no endpoint for `reasoning` (it failed that way in the bake-off).
+    model: openai/gpt-oss-120b
+    fallbacks: [google/gemini-2.5-flash-lite]
     temperature: 0
-    max_tokens: 2048
+    max_tokens: 4096
+    reasoning_effort: low
     provider:
-      order: [google-ai-studio]
+      order: [deepinfra]
       allow_fallbacks: false
+      quantizations: [bf16]
 
   judge:
     # Grades wording only (evals). No fallback: a verdict from another model is not
@@ -94,20 +103,29 @@ pricing:
     input: 0.09
     output: 0.30
     context_length: 262144
+  # The pinned DeepInfra bf16 endpoint's price (the catalog's model-level price is
+  # 0.15 / 0.60). No cache-read price is listed, so cached tokens cost the input price.
   openai/gpt-oss-120b:
-    input: 0.15
-    output: 0.60
-    cached_input: 0.075
+    input: 0.037
+    output: 0.17
     context_length: 131072
+  # Fetched 2026-10-19. Cache writes cost 0.125; the prompts carry no cache_control.
+  anthropic/claude-haiku-5.5:
+    input: 0.10
+    output: 0.50
+    cached_input: 0.01
+    context_length: 1000000
 
-# Cheap models for the bake-off (live suite, k=3) before the improvement rounds. All of
-# them take temperature, tools, tool_choice and structured outputs, so one role config
-# serves each of them. Open-weight ones (Mistral, Qwen, gpt-oss) are served by several
-# providers at different quantizations: pin `provider.order` and `quantizations` when one
-# of them goes on a role. gpt-oss-120b always reasons: give it reasoning_effort: low.
+# The bake-off candidates (evals/RESULTS.md has the runs; config/models.NAME.yaml has each
+# candidate's set, run with --model-set NAME). Five at most: Mistral Small 3.2 was
+# measured too (config/models.mistral.yaml) and left the list when Claude Haiku 5.5 joined.
+# Open-weight ones (Qwen, gpt-oss) are served by several providers at different
+# quantizations: pin `provider.order` and `quantizations` when one goes on a role.
+# gpt-oss-120b always reasons: give it reasoning_effort: low. Claude Haiku 5.5 takes no
+# temperature: set it to null.
 bakeoff_candidates:
   - openai/gpt-4.1-nano
   - google/gemini-2.5-flash-lite
-  - mistralai/mistral-small-3.2-24b-instruct
   - qwen/qwen3-30b-a3b-instruct-2507
   - openai/gpt-oss-120b
+  - anthropic/claude-haiku-5.5
