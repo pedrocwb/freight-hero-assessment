@@ -1,0 +1,49 @@
+"""The `UnitOfWork` implementations the contract suite runs on.
+
+The suite in `test_unit_of_work.py` runs every test once per entry of `UOW_FACTORIES`,
+so putting an implementation through the whole contract is one line in that registry.
+"""
+
+import os
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
+from typing import Protocol
+
+from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.ports.repositories import UnitOfWorkFactory
+
+
+class OpenStore(Protocol):
+    """Opens a fresh, empty store for one test and closes it when the test ends.
+
+    The suite sets how many failed attempts make a queued event a dead letter,
+    because its queue tests count them.
+    """
+
+    def __call__(
+        self, *, max_queue_attempts: int
+    ) -> AbstractAsyncContextManager[UnitOfWorkFactory]: ...
+
+
+@dataclass(frozen=True)
+class UowFactory:
+    open_store: OpenStore
+    requires_env: tuple[str, ...] = ()  # the suite skips this entry while one is unset or empty
+
+    def skip_reason(self) -> str | None:
+        missing = [name for name in self.requires_env if not os.environ.get(name)]
+        return f"set {', '.join(missing)} to run this implementation" if missing else None
+
+
+@asynccontextmanager
+async def open_memory(*, max_queue_attempts: int) -> AsyncIterator[UnitOfWorkFactory]:
+    yield MemoryStore(max_queue_attempts=max_queue_attempts).unit_of_work
+
+
+# A Postgres entry needs an `open_postgres` that connects to DATABASE_URL, starts from
+# empty tables, yields the adapter's unit of work factory and closes its pool.
+UOW_FACTORIES: dict[str, UowFactory] = {
+    "memory": UowFactory(open_memory),
+    # "postgres": UowFactory(open_postgres, requires_env=("DATABASE_URL",)),
+}
