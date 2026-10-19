@@ -203,6 +203,8 @@ Errors are `{"detail": "..."}` with a 4xx: 400 bad input (invalid metadata, an u
 timezone, the clock going back, a mode that cannot be built), 404 unknown load, task,
 suite or scenario, 409 a load that exists, 422 a body or query that does not validate
 (FastAPI's `detail` is then a list of problems) or a SOP file that cannot be read. An
-unexpected error is a 500 with `{"detail": "internal error: ..."}`.
+unexpected error is a 500 with `{"detail": "internal error <id>: the server log has the
+details", "error_id": "<id>"}`: no internals reach the client, and the id finds the logged
+traceback.
 
 CORS allows `http://localhost:5173` and `http://127.0.0.1:5173` (the Vite dev server).
