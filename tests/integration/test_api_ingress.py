@@ -157,6 +157,52 @@ async def test_a_duplicate_message_id_is_reported_and_runs_once(api: Api) -> Non
     assert [r["status"] for r in await api.get(f"/api/loads/{LOAD_ID}/runs")] == ["noop"]
 
 
+async def test_a_duplicate_message_moves_no_clock_and_fires_no_timer(api: Api) -> None:
+    """A redelivery changes nothing, even one stamped later than the first delivery: the
+    clock stays, so the 07:31 follow-up neither fires nor runs on its account."""
+    await api.high_risk_at_seven()
+    api.model.push(GATE, GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="ok"))
+    body = {
+        "message_id": "m-1",
+        "load_id": LOAD_ID,
+        "channel": "sms",
+        "sender_contact_id": DRIVER,
+        "body": "ok",
+        "occurred_at": local(7, 5),
+    }
+    await api.client.post("/api/v1/events", json=body)
+    before = await api.get("/api/sim/state")
+
+    again = await api.client.post("/api/v1/events", json={**body, "occurred_at": local(7, 40)})
+
+    assert (again.json()["event_id"], again.json()["duplicate"]) == ("m-1", True)
+    after = await api.get("/api/sim/state")
+    assert (before["now"], after["now"]) == (local(7, 6), local(7, 6))
+    assert after["next_timer_due_at"] == local(7, 31)
+    runs = await api.get(f"/api/loads/{LOAD_ID}/runs")
+    assert [r["event_id"] for r in runs][1:] == ["m-1"]
+
+
+async def test_a_duplicate_ping_moves_no_clock(api: Api) -> None:
+    await api.create_load()
+    api.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
+    body = {
+        "ping_id": "p-1",
+        "load_id": LOAD_ID,
+        "lat": 37.9577,
+        "lon": -121.2908,
+        "occurred_at": local(7, 0),
+        "delay_risk": "high",
+    }
+    await api.client.post("/api/v1/pings", json=body)
+
+    again = (await api.client.post("/api/v1/pings", json=body)).json()
+
+    assert (again["duplicate"], again["reason"]) == (True, "ping already received")
+    assert (await api.get("/api/sim/state"))["now"] == local(7, 1)
+    assert len(await api.get(f"/api/loads/{LOAD_ID}/runs")) == 1
+
+
 async def test_ingress_for_an_unknown_load_is_a_404(api: Api) -> None:
     message = {"load_id": "nope", "channel": "sms", "sender_contact_id": DRIVER, "body": "hi"}
     ping = {"load_id": "nope", "lat": 1.0, "lon": 2.0, "delay_risk": "high"}

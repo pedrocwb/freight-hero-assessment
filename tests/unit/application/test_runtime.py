@@ -351,6 +351,32 @@ async def test_a_downgrade_needs_two_pings_and_a_duplicate_does_not_count(load: 
     assert await world.pending_timers() == []
 
 
+async def test_a_ping_redelivered_after_a_restart_does_not_confirm_a_downgrade(
+    load: Load,
+) -> None:
+    """The ping ids live with the tracker, so a new process (or a second one) knows them:
+    one real low reading, delivered twice, must not count as the two a downgrade needs."""
+    world = await World(load).start()
+    await world.high_risk_at_seven()
+    await world.ping(at(7, 10), DelayRisk.LOW, "p2")
+
+    world.restart()
+    again = await world.ping(at(7, 11), DelayRisk.LOW, "p2")
+
+    assert again == IngestResult(accepted=True, duplicate=True, reason="ping already received")
+    assert (await world.snapshot()).load.delay_risk is DelayRisk.HIGH
+    async with world.store.unit_of_work() as uow:
+        tracker = await uow.loads.get_tracker(LOAD_ID)
+    assert tracker is not None
+    assert (tracker.band, tracker.pending, tracker.pending_count) == (
+        DelayRisk.HIGH,
+        DelayRisk.LOW,
+        1,
+    )
+    assert tracker.recent_ping_ids == ("p1", "p2")
+    assert await world.tick(at(7, 12)) == []
+
+
 async def test_the_ping_memory_is_bounded(load: Load) -> None:
     config = RuntimeConfig(
         ping_filter=PingFilterConfig(downgrade_confirmations=3), recent_pings_per_load=1

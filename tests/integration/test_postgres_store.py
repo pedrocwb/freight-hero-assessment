@@ -113,7 +113,7 @@ async def _ingest(store: PostgresStore, *events: Event) -> None:
 
 async def _claim(store: PostgresStore) -> str | None:
     async with store.unit_of_work() as uow:
-        event = await uow.queue.claim_next()
+        event = await uow.queue.claim_next(at(0))
         await uow.commit()
     return None if event is None else event.event_id
 
@@ -141,7 +141,7 @@ async def test_a_claim_not_yet_committed_holds_its_load_back_from_another_worker
     await _ingest(store, _message("a1"), _message("a2", minute=1), _message("b1", B, minute=2))
 
     async with store.unit_of_work() as first:
-        claimed = await first.queue.claim_next()
+        claimed = await first.queue.claim_next(at(0))
         assert claimed is not None and claimed.event_id == "a1"
         # a1 is claimed in a transaction the other worker cannot see yet: it skips the
         # locked row, and a2 still waits behind a1 rather than jumping ahead of it.
@@ -170,7 +170,7 @@ async def test_a_claim_that_loses_the_race_for_a_load_moves_on_to_another(
 
     first = store.unit_of_work()
     await first.__aenter__()
-    claimed = await first.queue.claim_next()
+    claimed = await first.queue.claim_next(at(0))
     assert claimed is not None and claimed.event_id == "a2"  # a1 is not visible yet
     await slow.commit()
     await slow.__aexit__(None, None, None)
@@ -203,7 +203,7 @@ async def test_workers_on_two_pools_never_run_two_events_of_one_load_at_once(
     async def worker(pool: PostgresStore) -> None:
         while sum(len(done) for done in processed.values()) < len(events):
             async with pool.unit_of_work() as uow:
-                event = await uow.queue.claim_next()
+                event = await uow.queue.claim_next(at(0))
                 await uow.commit()
             if event is None:
                 await asyncio.sleep(0.005)
@@ -257,6 +257,57 @@ async def test_the_database_refuses_a_second_event_of_a_load_in_flight(
     assert await _claim(store) == "a1"
 
     with pytest.raises(psycopg.errors.UniqueViolation):
+        await _execute(
+            schema, sql.SQL("UPDATE event_queue SET state = 'in_flight', claimed_at = now()")
+        )
+
+
+@pytest.mark.usefixtures("loads")
+async def test_the_claim_time_is_the_callers_clock_not_the_databases(
+    store: PostgresStore, schema: str
+) -> None:
+    """The lease compares the claim time with the runtime's `now`, and evals and the
+    simulation run on a virtual clock: a database timestamp would expire every claim at
+    once, or never."""
+    await _ingest(store, _message("a1"))
+    assert await _claim(store) == "a1"
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URL, autocommit=True) as conn:
+        await conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        cursor = await conn.execute("SELECT claimed_at FROM event_queue WHERE event_id = 'a1'")
+        assert await cursor.fetchone() == (at(0),)
+
+
+@pytest.mark.usefixtures("loads")
+async def test_reclaiming_skips_a_claim_another_worker_is_finishing(
+    store: PostgresStore, other_store: PostgresStore
+) -> None:
+    """A worker completing an old claim holds its row; the watchdog of another worker
+    neither waits for it nor takes the event away from under it."""
+    await _ingest(store, _message("a1"))
+    assert await _claim(store) == "a1"
+
+    async with store.unit_of_work() as finishing:
+        await finishing.queue.complete("a1")
+        async with other_store.unit_of_work() as watchdog:
+            reclaim = watchdog.queue.reclaim_expired(at(60), 300)
+            assert await asyncio.wait_for(reclaim, timeout=2) == 0
+        await finishing.commit()
+
+    async with other_store.unit_of_work() as uow:
+        assert await uow.queue.size() == 0
+        assert await uow.queue.reclaim_expired(at(60), 300) == 0
+
+
+@pytest.mark.usefixtures("loads")
+async def test_the_database_refuses_an_event_in_flight_without_a_claim_time(
+    store: PostgresStore, schema: str
+) -> None:
+    """The lease counts from the claim time: without one, nothing would ever take the
+    event back."""
+    await _ingest(store, _message("a1"))
+
+    with pytest.raises(psycopg.errors.CheckViolation):
         await _execute(schema, sql.SQL("UPDATE event_queue SET state = 'in_flight'"))
 
 

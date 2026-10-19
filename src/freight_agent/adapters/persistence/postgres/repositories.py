@@ -13,13 +13,14 @@ serialized ones where it matters, without waiting on each other where it does no
   scheduler never waits on a run that is changing them; the next tick picks them up.
   This keeps one lock order (obligation, then timers) and so no deadlock between them.
 - `queue.claim_next` skips locked rows, and a partial unique index allows one event
-  in flight per load (see `PostgresEventQueue`).
+  in flight per load (see `PostgresEventQueue`). `queue.reclaim_expired` skips locked
+  rows too.
 - Every other read (lists, `recent`, `for_event`, the outbox) takes no lock.
 
 Keep units of work short: a lock is held until the unit of work ends.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Final
 
 from psycopg import errors
@@ -86,7 +87,7 @@ class PostgresLoadRepository:
     async def get_tracker(self, load_id: str) -> RiskTracker | None:
         # Locks the load's row, not the tracker's: a load's first tracker has no row yet.
         row = await self._s.one(
-            "SELECT t.band, t.pending, t.pending_count"
+            "SELECT t.band, t.pending, t.pending_count, t.recent_ping_ids"
             " FROM loads l LEFT JOIN risk_trackers t ON t.load_id = l.load_id"
             " WHERE l.load_id = %s FOR NO KEY UPDATE OF l",
             (load_id,),
@@ -95,10 +96,12 @@ class PostgresLoadRepository:
 
     async def save_tracker(self, load_id: str, tracker: RiskTracker) -> None:
         await self._s.run(
-            "INSERT INTO risk_trackers (load_id, band, pending, pending_count)"
-            " VALUES (%(load_id)s, %(band)s, %(pending)s, %(pending_count)s)"
+            "INSERT INTO risk_trackers (load_id, band, pending, pending_count, recent_ping_ids)"
+            " VALUES (%(load_id)s, %(band)s, %(pending)s, %(pending_count)s,"
+            " %(recent_ping_ids)s)"
             " ON CONFLICT (load_id) DO UPDATE SET band = EXCLUDED.band,"
-            " pending = EXCLUDED.pending, pending_count = EXCLUDED.pending_count",
+            " pending = EXCLUDED.pending, pending_count = EXCLUDED.pending_count,"
+            " recent_ping_ids = EXCLUDED.recent_ping_ids",
             rows.tracker_params(load_id, tracker),
         )
 
@@ -336,7 +339,7 @@ WITH next AS (
     LIMIT 1
     FOR NO KEY UPDATE OF q SKIP LOCKED
 ), claimed AS (
-    UPDATE event_queue q SET state = 'in_flight', claimed_at = now()
+    UPDATE event_queue q SET state = 'in_flight', claimed_at = %(now)s
     FROM next WHERE q.event_id = next.event_id
     RETURNING q.event_id
 )
@@ -345,6 +348,20 @@ SELECT {_EVENT_E} FROM events e JOIN claimed ON claimed.event_id = e.event_id
 
 # A claim that loses a race (see `claim_next`) tries again this many times in all.
 _CLAIM_ATTEMPTS: Final = 3
+
+# Releases the claims older than the cutoff, as `release` does. A row another unit of
+# work holds is skipped: that worker is completing or releasing it right now.
+_RECLAIM: Final = """
+WITH expired AS (
+    SELECT event_id FROM event_queue
+    WHERE state = 'in_flight' AND claimed_at < %(cutoff)s
+    FOR NO KEY UPDATE SKIP LOCKED
+)
+UPDATE event_queue q SET failures = q.failures + 1, last_error = %(error)s, claimed_at = NULL,
+    state = CASE WHEN q.failures + 1 >= %(max)s THEN 'dead' ELSE 'queued' END
+FROM expired WHERE q.event_id = expired.event_id
+RETURNING q.event_id
+"""
 
 
 class PostgresEventQueue:
@@ -378,11 +395,14 @@ class PostgresEventQueue:
             (event.event_id, event.load_id),
         )
 
-    async def claim_next(self) -> Event | None:
+    async def claim_next(self, now: datetime) -> Event | None:
+        """`claimed_at` is `now`, the runtime's clock, not the database's: the lease
+        compares it with the runtime's `now` (see `reclaim_expired`)."""
+        params = {"now": rows.aware(now, "claim time")}
         for _ in range(_CLAIM_ATTEMPTS):
             try:
                 async with self._s.conn.transaction():  # a savepoint in the unit of work
-                    row = await self._s.one(_CLAIM)
+                    row = await self._s.one(_CLAIM, params)
             except errors.UniqueViolation:
                 continue  # another worker took this load first; the next look sees it
             return None if row is None else rows.event_from(row)
@@ -401,6 +421,15 @@ class PostgresEventQueue:
             " WHERE event_id = %(event_id)s AND state = 'in_flight'",
             {"event_id": event_id, "error": error, "max": self._max_attempts},
         )
+
+    async def reclaim_expired(self, now: datetime, lease_s: float) -> int:
+        cutoff = rows.aware(now, "reclaim time") - timedelta(seconds=lease_s)
+        params = {
+            "cutoff": cutoff,
+            "error": f"claim lease of {lease_s:g} s expired",
+            "max": self._max_attempts,
+        }
+        return len(await self._s.all(_RECLAIM, params))
 
     async def size(self) -> int:
         row = await self._s.one("SELECT count(*) AS n FROM event_queue WHERE state = 'queued'")

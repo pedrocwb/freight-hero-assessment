@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import cast
 
 from freight_agent.domain.errors import DomainError
-from freight_agent.domain.events import Event, EventType
+from freight_agent.domain.events import RUN_TRIGGERS, Event, EventType
 from freight_agent.domain.load import Channel, Load, Role
 from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.outbox import OutboxKind
@@ -28,7 +28,9 @@ class RunContext:
     now: datetime
     obligations: tuple[Obligation, ...]  # every obligation of the load, oldest first
     pending_timers: tuple[Timer, ...]  # earliest first
-    recent_events: tuple[Event, ...]  # the last N events up to and incl. `event`, oldest first
+    # The last N events of the load, oldest first, without the run triggers logged after
+    # `event` (they get their own runs); every agent action is kept (docs/decisions.md).
+    recent_events: tuple[Event, ...]
     recent_outbound: tuple[OutboundRecord, ...]  # SMS, email and Slack sent in the rate window
     event_timer: Timer | None = None  # for TIMER_DUE events: the timer named in `event.data`
     tracker: RiskTracker | None = None
@@ -102,21 +104,41 @@ async def _event_timer(uow: UnitOfWork, event: Event) -> Timer | None:
 async def _history_until(
     events: EventLog, event: Event, page: Sequence[Event], limit: int
 ) -> tuple[Event, ...]:
-    """The last `limit` events of the load up to and including `event`.
+    """The last `limit` events of the load, in log order, without the run triggers
+    logged after `event`.
 
-    Messages that arrived while this event waited in the per-load queue are already in
+    Events that arrived while this event waited in the per-load queue are already in
     the log. They get their own runs, and the model must not read them as history: it
-    would act on an ETA that, for this run, has not arrived yet. When newer events push
-    `event` out of the first page, the page grows until it holds `event`, or the whole
-    history if `event` is not logged.
+    would act on an ETA that, for this run, has not arrived yet. The agent's own actions
+    are always kept, wherever they fall: an earlier event's run may commit its reply
+    after this event was logged, and that reply is what the agent has really done.
+
+    `page` is the newest `limit` events. It grows while it does not hold `event` or holds
+    fewer than `limit` events to keep, up to the whole history; when `event` is not
+    logged at all, the result is the latest events.
     """
+    if limit <= 0:
+        return ()
     size = limit
-    while event.event_id not in (ids := [e.event_id for e in page]) and len(page) >= size > 0:
+    while True:
+        whole = len(page) < size  # the page holds every event of the load
+        kept = _without_later_triggers(page, event.event_id)
+        if kept is not None and (len(kept) >= limit or whole):
+            return tuple(kept[-limit:])
+        if kept is None and whole:
+            return tuple(page[-limit:])
         size *= 2
         page = await events.recent(event.load_id, size)
-    if event.event_id in ids:
-        page = page[: ids.index(event.event_id) + 1]
-    return tuple(page[-limit:]) if limit > 0 else ()
+
+
+def _without_later_triggers(page: Sequence[Event], event_id: str) -> list[Event] | None:
+    """`page` up to and including the event, then only the agent actions after it.
+    None when the event is not in `page`."""
+    ids = [e.event_id for e in page]
+    if event_id not in ids:
+        return None
+    cut = ids.index(event_id) + 1
+    return [*page[:cut], *(e for e in page[cut:] if e.type not in RUN_TRIGGERS)]
 
 
 async def _events_since(

@@ -5,7 +5,7 @@ and a small in-test SOP: the standard sections the scenarios need plus the
 Northline (Client A) high-risk procedure. The real `sops/` tree is not read.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,7 @@ from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.sop import SopRepository
 from freight_agent.ports.tracing import Tracer
@@ -159,25 +160,31 @@ class World:
         llm: LanguageModel | None = None,
         sop: SopRepository | None = None,
         tracer: Tracer | None = None,
+        wrap_gateways: Callable[[Gateways], Gateways] | None = None,
     ) -> None:
+        """`wrap_gateways` puts test gateways in front of the recording ones."""
         self.load = load
         self.store = MemoryStore()
         self.clock = VirtualClock(at(6, 55))
         self.ids = SequentialIdGenerator()
         self.model = ScriptedModel()
         self.gateways = RecordingGateways()
-        self.runtime = AgentRuntime(
-            RuntimeDeps(
-                uow_factory=self.store.unit_of_work,
-                clock=self.clock,
-                ids=self.ids,
-                llm=llm or self.model,
-                sop=sop or FakeSop(),
-                gateways=self.gateways.as_gateways(),
-                tracer=tracer or NullTracer(),
-                config=config or RuntimeConfig(),
-            )
+        recording = self.gateways.as_gateways()
+        self.deps = RuntimeDeps(
+            uow_factory=self.store.unit_of_work,
+            clock=self.clock,
+            ids=self.ids,
+            llm=llm or self.model,
+            sop=sop or FakeSop(),
+            gateways=wrap_gateways(recording) if wrap_gateways else recording,
+            tracer=tracer or NullTracer(),
+            config=config or RuntimeConfig(),
         )
+        self.runtime = AgentRuntime(self.deps)
+
+    def restart(self) -> None:
+        """A new runtime on the same store: a restarted or a second worker process."""
+        self.runtime = AgentRuntime(self.deps)
 
     async def start(self) -> "World":
         await self.runtime.register_load(self.load)

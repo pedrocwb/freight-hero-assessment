@@ -1,11 +1,13 @@
 """The simulation clock and the loads: reset, state, advance, tick, fixtures, errors."""
 
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
 import pytest
 
+from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.api.app import create_app
 from freight_agent.domain.actions import CloseObligation, CloseStatus
 from freight_agent.domain.obligations import ObligationKind
@@ -164,6 +166,17 @@ async def test_invalid_metadata_is_a_400_with_the_reason(api: Api) -> None:
     assert "invalid load metadata" in response.json()["detail"]
 
 
+async def test_a_load_without_stops_is_a_400_and_is_not_registered(api: Api) -> None:
+    """Registered, it would crash every run of the load, the escalation path included."""
+    metadata = {**await api.fixture(), "stops": []}
+
+    response = await api.client.post("/api/loads", json=metadata)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "invalid load metadata: a load needs at least one stop"}
+    assert await api.get("/api/loads") == []
+
+
 async def test_a_load_id_that_exists_is_a_409(api: Api) -> None:
     await api.create_load()
 
@@ -256,6 +269,35 @@ async def test_tick_runs_what_is_due_now(api: Api) -> None:
 
 
 # --- cross-cutting ---------------------------------------------------------------------------
+
+
+async def test_an_unexpected_error_is_a_500_with_an_error_id_and_no_internals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The exception text can carry a connection string or a prompt: it stays in the
+    server log, under the id the client gets to report."""
+    app = create_app(api_settings(tmp_path), llm=ScriptedModel())
+
+    async def broken() -> None:
+        raise RuntimeError("cannot reach postgresql://agent:hunter2@db/freight")
+
+    monkeypatch.setattr(app.state.service, "state", broken)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with caplog.at_level(logging.ERROR, logger="freight_agent.api.app"):
+            response = await client.get("/api/sim/state")
+
+    assert response.status_code == 500
+    body = response.json()
+    error_id = body["error_id"]
+    assert body == {
+        "detail": f"internal error {error_id}: the server log has the details",
+        "error_id": error_id,
+    }
+    assert "hunter2" not in response.text and "RuntimeError" not in response.text
+    [logged] = [r for r in caplog.records if error_id in r.getMessage()]
+    assert "GET /api/sim/state" in logged.getMessage()
+    assert logged.exc_info is not None and "hunter2" in str(logged.exc_info[1])
 
 
 async def test_cors_allows_the_vite_dev_server(api: Api) -> None:

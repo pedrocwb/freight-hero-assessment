@@ -96,11 +96,20 @@ Only a confirmed risk transition into or out of `high` becomes an event. `medium
 tracked but does not wake the agent. On every confirmed transition the runtime saves the
 load with `delay_risk` set to the new band, in the same unit of work as the tracker.
 
+Pings are delivered at least once. The tracker keeps the ids of the last 64 pings it
+counted (`RiskTracker.recent_ping_ids`), stored with it in the same unit of work: a ping
+whose id it holds is a redelivery and changes nothing, after a restart or on another
+process too. The simulation API does not move its clock for a redelivered message or ping.
+
 ## Run context
 
 `application.context.load_run_context` reads the load's memory once per run. `recent_events`
-are the last N events **up to and including the event being processed**: messages queued
+are the last N events of the load in log order, **without the run triggers logged after the
+event being processed** (`domain.events.RUN_TRIGGERS`): messages, pings and timers queued
 behind it are already in the log but are not history for this run (they get their own runs).
+Every `agent_action` is kept, wherever it falls: a message queued ahead of a timer event can
+commit its reply after the timer event was logged, and the timer's run must see that reply,
+or it may send it again.
 `recent_outbound` is built from `agent_action` events in the rate window, however many
 events that takes; a broker Slack post counts against the first broker contact on Slack.
 
@@ -118,17 +127,33 @@ events that takes; a broker Slack post counts against the first broker contact o
 `load_context` → `prefilter` → `gate` → `resolve_sop` → `decide` → `validate` →
 `commit_execute`, with exits `noop`, `skipped` and `escalated`. One run per event. The
 whole run's state changes (ledger, timers, outbox, load, run record) are committed in one
-unit of work. Delivery happens afterwards from the outbox.
+unit of work. Delivery happens afterwards from the outbox: the dispatcher checks each
+item's payload first, and a malformed one fails at once (no retry can fix it); anything
+the gateway call raises keeps the item pending, with `attempts` and `last_error`, until
+`max_delivery_attempts` makes it `failed`, and the rest of the batch is still sent.
 
 Run status: `skipped` (prefilter), `noop` (gate does not act, or the plan is empty, or
-every action was dropped), `acted` (at least one approved action), `escalated` (the run
-created a Hero task because of a failure path: unknown sender, no SOP section, model
-failure or timeout, a high-severity validator violation), `failed` (unexpected error; the
-event goes back to the queue and becomes a dead letter after too many attempts).
+every action was dropped, or the executor skipped every approved action), `acted` (at
+least one approved action applied), `escalated` (the run created a Hero task because of a
+failure path: unknown sender, no SOP section, model failure or timeout, a high-severity
+validator violation), `failed` (unexpected error; the event goes back to the queue and
+becomes a dead letter after too many attempts).
 
 A model failure (`LlmError`, after fallbacks) or a run over its deadline creates one
 urgent Hero task and completes the event, so the event is never lost and never retried
 into a duplicate.
+
+**The claim lease (watchdog).** A worker that dies between claim and commit (a crash, a
+cancelled task, a failure while releasing) leaves its event in flight, and the load's
+later events would wait forever. The queue records the claim time from the runtime's
+clock (never the database's: evals and the simulation run on a virtual clock), and every
+`process_all` (so every `tick`) first calls `EventQueue.reclaim_expired(now, lease_s)`:
+events in flight for more than `RuntimeConfig.claim_lease_s` (default `run_deadline_s`
+plus 60 s) go back to their place in the queue, each counted as a failed attempt, so an
+event whose runs always die still becomes a dead letter. A run that was only slow and
+commits after its event was reclaimed changes nothing in the queue (`complete` and
+`release` leave an event that is not in flight alone); its stored run makes the event's
+next run a skip (`already_processed`).
 
 ## Executor semantics
 
@@ -151,8 +176,11 @@ The executor applies approved actions in plan order, inside the run's unit of wo
 
 An action that would break a domain invariant (for example `schedule_timer` with no open
 obligation) is skipped and reported in `ExecutionResult.skipped`; the rest of the plan runs.
-The validator normally drops such actions first. Validator rules evaluate each action against
-the state left by the actions approved before it in the same plan. Outbound text must not
+The run records the skips in `RunRecord.skip_reason` (`executor skipped action <index>
+(<type>): <reason>; ...`); when the executor skipped every approved action the run is
+`noop`, and with some applied it stays `acted`. The validator normally drops such actions
+first. Validator rules evaluate each action against the state left by the actions approved
+before it in the same plan. Outbound text must not
 contain an email address or a phone number (a high-severity violation that escalates the
 run); note that a bare 10-digit number reads as a phone number.
 
