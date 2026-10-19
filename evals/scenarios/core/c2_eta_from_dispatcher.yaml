@@ -3,13 +3,13 @@
 # Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high.
 #           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
-#                  follow-up timer due 07:31.
+#                  follow-up timer T1 due 07:31.
 #   step 1  07:20  dsp_4410 emails in the main thread: the driver will be there at 9:40.
-#           07:21  run: gate -> eta_provided, decide -> close eta_request as satisfied and
-#                  write the ETA in the TMS. The ETA request is about the truck, not about
-#                  who answers it, so an answer on another channel closes it too.
-#                  Closing cancels the 07:31 timer.
-#   step 2  07:31  nothing fires: no reminder SMS to the driver.
+#           07:21  run: gate -> eta_provided, decide. eta_received counts an ETA "from the
+#                  driver or the dispatcher": close eta_request as satisfied, write the
+#                  ETA in the TMS, reply to no one. The request is about the truck, not
+#                  about who answers it. Closing cancels T1.
+#   step 2  07:31  nothing fires: no run, no reminder SMS to the driver.
 id: c2_eta_from_dispatcher
 title: The dispatcher emails the ETA; the request closes as satisfied
 suite: core
@@ -30,19 +30,20 @@ steps:
             - type: send_sms
               contact_id: drv_20931
               purpose: eta_request
-              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
             - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
-        - {kind: sms, to: drv_20931, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
       obligations:
         eta_request: {status: open, attempts: 1}
       timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
       llm_calls: 1
 
   - at: "07:20"
-    note: The dispatcher answers for the driver, by email.
+    note: The dispatcher answers for the driver, by email; the run at 07:21 closes the request.
     message:
       channel: email
       sender: dsp_4410
@@ -53,8 +54,8 @@ steps:
       decide:
         - actions:
             - {type: close_obligation, kind: eta_request, status: satisfied}
-            - {type: write_tms_note, text: "Driver ETA at Riverbend plant (pickup): 09:40, from the carrier's dispatcher by email at 07:20."}
-          rationale: eta_received, the ETA came from the dispatcher; close the request and record the ETA.
+            - {type: write_tms_note, text: "ETA 09:40 at the Riverbend plant pickup (dispatcher, by email at 07:20)."}
+          rationale: eta_received, the ETA came from the dispatcher; close the request, record the ETA in the TMS and send no reply.
     expect:
       actions:
         - {kind: tms_note, contains: ["9:40"], count: 1}
@@ -62,16 +63,16 @@ steps:
         eta_request: {status: satisfied, attempts: 1}
       timers: {pending: 0}
     forbid:
-      - {kind: sms, to: drv_20931}
+      - {kind: sms}
+      - {kind: email}
       - {kind: hero_task}
 
   - at: "07:31"
-    note: The cancelled timer does not fire; the driver gets no reminder.
+    note: The cancelled timer never fires; the driver gets no reminder.
     expect:
       no_actions: true
       obligations:
         eta_request: {status: satisfied, attempts: 1}
       timers: {pending: 0}
+      runs: 0
       llm_calls: 0
-    forbid:
-      - {kind: sms}

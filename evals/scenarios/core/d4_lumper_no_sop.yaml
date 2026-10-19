@@ -1,27 +1,28 @@
 # D4: a situation no SOP covers. The driver asks who pays a lumper in cash. No section
-# says who pays lumpers, and the load metadata does not say either, so the agent must not
+# says who pays lumpers, and the load details do not say either, so the agent must not
 # improvise an answer: it hands the question to a Hero.
 #
 # Expected timeline (Client A, load 481207 at_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:40  driver SMS "lumper wants cash to unload, who pays?".
-#           09:41  run: gate -> question (it asks us something). driver_questions applies:
-#                  answer from the load metadata when the answer is there, otherwise a Hero
-#                  task, never guess. Nothing in the metadata covers lumper fees, so: one
-#                  urgent Hero task with the question, and an SMS telling the driver that
-#                  a person is on it. No SMS may promise that anyone will pay or reimburse.
+#           09:41  run: gate -> question (it asks us something), decide.
+#                  driver_questions: the answer is not in the load details, so do not
+#                  guess and do not reply with a promise; create a Hero task with the
+#                  question, who asked and what they need. escalation lists questions
+#                  about pay as Hero work, and communication_rules forbids promising a
+#                  payment. One Hero task; no SMS may say that anyone will pay.
 #
-# Live note: a gate that reads the message as `other` instead reaches no section with an
+# Live note: a gate that reads the message as `other` reaches no section with an
 # explicit intent, and decisions.md escalates the run to a Hero ("no SOP for this
-# situation") without a decide call. Both paths end in one Hero task, so the expectations
-# hold for both; run_status and llm_calls differ between them and are not asserted.
+# situation") without a decide call. Both paths end in one Hero task, so the
+# expectations hold for both; run_status and llm_calls differ and are not asserted.
 id: d4_lumper_no_sop
 title: A lumper payment question no SOP answers goes to a Hero, with no promise
 suite: core
 tags: [capability, sop:driver_questions, sop:escalation, sop:communication_rules]
 description: >
   The agent must know what it does not know. Lumper payment is not in any SOP or in the
-  load metadata; the right action is a Hero task, and the driver must not be told that
-  the broker will pay.
+  load details; the right action is a Hero task, and the driver must not be told that
+  anyone will pay.
 load: fixtures/load_481207.json
 load_overrides:
   stage: at_delivery
@@ -38,13 +39,9 @@ steps:
         - actions:
             - type: create_hero_task
               title: Tell the driver who pays the lumper at Valley DC
-              description: "At 09:40 the driver (load 481207, at Valley DC, Reno) said the lumper wants cash to unload and asked who pays. Neither the SOP nor the load metadata covers lumper fees. Confirm with Northline Logistics and the carrier, then answer the driver."
+              description: "Load 481207, delivery at Valley DC (Reno). At 09:40 the driver said by SMS that the lumper wants cash to unload and asked who pays. The SOP and the load details do not cover lumper fees, and nothing was answered yet. Confirm with Northline Logistics who pays, then tell the driver."
               urgent: true
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: escalation
-              text: Got it. Our team is checking on the lumper now and will text you back shortly.
-          rationale: driver_questions, the load metadata does not answer who pays the lumper, so a Hero task; do not guess.
+          rationale: driver_questions, the load details do not say who pays the lumper, so create a Hero task and do not guess or promise.
     expect:
       actions:
         - {kind: hero_task, count: 1}

@@ -5,14 +5,15 @@
 # America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high.
 #           07:01  run: intent delay_risk_high from code, decide only. The keystone
-#                  section replaces the standard one: one SMS to drv_20931 for the ETA
-#                  (eta_request opens, attempts 1) and a follow-up timer due 07:31.
-#   step 1  07:31  the timer fires (zero latency): intent eta_follow_up_due, decide only.
-#                  Keystone: no ETA after 30 minutes means one alert in the broker's Slack
-#                  channel, and the procedure is over: close eta_request as exhausted.
-#                  No second SMS and no email to the dispatcher.
-#   step 2  08:05  nothing is pending: no SMS, no email to dsp_4410 (Client A would email
-#                  the dispatcher here).
+#                  delay_risk_high section replaces the standard one: one SMS to
+#                  drv_20931 for the ETA (eta_request opens, attempts 1) and a follow-up
+#                  timer T1 due 07:31.
+#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, decide only.
+#                  Keystone: no second SMS; post an alert in the broker's Slack channel
+#                  that starts with the load number; close eta_request as exhausted.
+#                  No email to the dispatcher.
+#   step 2  08:05  nothing is pending: no run, no SMS, no email to dsp_4410 (Client A
+#                  would have emailed the dispatcher at 08:01).
 id: d1_keystone_high_risk
 title: Client B high risk, one SMS then a broker Slack alert, never the dispatcher
 suite: core
@@ -37,34 +38,36 @@ steps:
             - type: send_sms
               contact_id: drv_20931
               purpose: eta_request
-              text: Hi, this is Keystone Freight for load 481207. What time will you arrive at Riverbend plant in Stockton?
+              text: Hi, this is Keystone Freight. What time will you arrive at the Riverbend plant pickup in Stockton?
             - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (keystone), send one SMS to the driver and alert the broker's Slack if there is no ETA in 30 minutes.
+          rationale: delay_risk_high (Keystone), no ETA request is open, so send the driver one SMS for the ETA and follow up in 30 minutes.
     expect:
       actions:
-        - {kind: sms, to: drv_20931, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
       obligations:
         eta_request: {status: open, attempts: 1}
       timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
       llm_calls: 1
     forbid:
       - {kind: email, to: dsp_4410}
 
   - at: "07:31"
-    note: No ETA after 30 minutes; alert the broker's Slack channel and stop.
+    note: No ETA after 30 minutes; alert the broker's Slack channel and close the request.
     script:
       decide:
         - actions:
             - type: post_broker_slack
-              text: "Load 481207: delay risk is high for the Riverbend plant pickup and the driver has not answered our ETA request sent at 07:01."
+              text: "Load 481207: no ETA from the driver 30 minutes after our SMS at 07:01, and the delay risk for the Riverbend plant pickup is high."
             - {type: close_obligation, kind: eta_request, status: exhausted}
-          rationale: delay_risk_high (keystone), no ETA 30 minutes after the one SMS, so alert the broker's Slack channel; the procedure is used up.
+          rationale: delay_risk_high (Keystone), no ETA 30 minutes after the one SMS, so no second SMS; alert the broker's Slack channel and close the request as exhausted.
     expect:
       actions:
-        - {kind: broker_slack, count: 1}
+        - {kind: broker_slack, contains: ["481207"], count: 1}
       obligations:
         eta_request: {status: exhausted, attempts: 1}
       timers: {pending: 0}
+      run_status: [acted]
       llm_calls: 1
     forbid:
       - {kind: sms}
@@ -77,7 +80,5 @@ steps:
       obligations:
         eta_request: {status: exhausted, attempts: 1}
       timers: {pending: 0}
+      runs: 0
       llm_calls: 0
-    forbid:
-      - {kind: sms}
-      - {kind: email, to: dsp_4410}

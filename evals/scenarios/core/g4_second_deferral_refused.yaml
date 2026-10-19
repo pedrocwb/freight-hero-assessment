@@ -1,5 +1,5 @@
 # G4: a second deferral on the same request is not accepted. The policy allows one
-# deferral per obligation; the validator drops the second, and the SOP cadence goes on.
+# deferral per ETA request; the validator drops the second, and the SOP cadence goes on.
 #
 # Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high.
@@ -9,22 +9,23 @@
 #                  until 07:35 (deferrals used 1) and replaces T1 with T2 due 07:37; T1's
 #                  run is skipped as stale. Nothing is sent. (See G1 for the detail.)
 #   step 2  07:33  driver SMS "give me 10 more minutes".
-#           07:34  run: gate -> eta_deferred, decide.
-#                  Scripted: the model proposes defer_obligation 10 minutes. The validator
-#                  drops it (deferral_policy: the request already used its one deferral),
+#           07:34  run: gate -> eta_deferred, decide. eta_deferred rule 2: this request
+#                  already used its one wait, so send nothing and change nothing.
+#                  Scripted: a model that does not count deferrals proposes
+#                  defer_obligation 10 minutes. The validator drops it (deferral_policy),
 #                  so no action is approved: status noop. A careful live model returns an
 #                  empty plan, which is also noop. Either way the ledger keeps one
 #                  deferral and T2 stays at 07:37 (an accepted second deferral would have
 #                  moved it to 07:45).
-#   step 3  07:37  T2 fires: Client A step 2, the second ETA SMS (attempts 2) and a timer
-#                  due max(08:07, 07:35 + 2 min) = 08:07.
+#   step 3  07:37  T2 fires: Northline's next step, the second ETA SMS (attempts 2) and a
+#                  timer due max(08:07, 07:35 + 2 min) = 08:07.
 id: g4_second_deferral_refused
 title: A second deferral is refused and the follow-up still runs at 07:37
 suite: core
 tags: [regression, sop:delay_risk_high, sop:eta_deferred]
 description: >
-  A driver cannot push the ETA request back forever. Code enforces the one-deferral
-  limit, whatever the model proposes, and the SOP's next step runs on time.
+  A driver cannot push the ETA request back again and again. Code enforces the
+  one-deferral limit, whatever the model proposes, and the SOP's next step runs on time.
 load: fixtures/load_481207.json
 date: 2026-10-13
 start: "06:55"
@@ -38,19 +39,20 @@ steps:
             - type: send_sms
               contact_id: drv_20931
               purpose: eta_request
-              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
             - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
-        - {kind: sms, to: drv_20931, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
       obligations:
         eta_request: {status: open, attempts: 1}
       timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
       llm_calls: 1
 
   - at: "07:30"
-    note: First deferral, accepted.
+    note: First deferral, accepted; the 07:31 timer becomes stale.
     message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
     script:
       gate:
@@ -58,13 +60,13 @@ steps:
       decide:
         - actions:
             - {type: defer_obligation, kind: eta_request, minutes: 5}
-          rationale: eta_deferred, accept one deferral of 5 minutes and send nothing; code moves the follow-up.
+          rationale: eta_deferred, first wait for this request, so defer it by the 5 minutes promised and send nothing; code moves the follow-up.
     expect:
+      no_actions: true
       obligations:
         eta_request: {status: open, attempts: 1, deferred: true}
       timers: {pending: 1, due_at: "07:37"}
-    forbid:
-      - {kind: sms}
+      run_status: [acted, skipped]
 
   - at: "07:33"
     note: Second deferral. The validator drops it; nothing changes.
@@ -83,8 +85,6 @@ steps:
         eta_request: {status: open, attempts: 1, deferred: true}
       timers: {pending: 1, due_at: "07:37"}
       run_status: [noop]
-    forbid:
-      - {kind: sms}
 
   - at: "07:37"
     note: The follow-up runs on the first deferral's schedule; second ETA request.
@@ -94,13 +94,14 @@ steps:
             - type: send_sms
               contact_id: drv_20931
               purpose: eta_request
-              text: Following up on load 481207. What time will you arrive at Riverbend plant? Please send a time.
+              text: Following up from Northline Logistics. What time will you arrive at the Riverbend plant pickup?
             - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (northline) step 2, no ETA after the deferral, so SMS again and wait 30 minutes.
+          rationale: delay_risk_high (Northline), after 1 ETA request and no ETA (the one wait ran out), SMS the driver again and follow up in 30 minutes.
     expect:
       actions:
-        - {kind: sms, to: drv_20931, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
       obligations:
         eta_request: {status: open, attempts: 2, deferred: true}
       timers: {pending: 1, due_at: "08:07"}
+      run_status: [acted]
       llm_calls: 1

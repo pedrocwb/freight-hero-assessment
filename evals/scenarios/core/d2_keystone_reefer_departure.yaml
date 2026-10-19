@@ -4,19 +4,22 @@
 # Expected timeline (Client B reefer, load 481207 at_pickup, 2026-10-13,
 # America/Los_Angeles):
 #   step 0  09:05  driver SMS "loaded, leaving the shipper now".
-#           09:06  run: gate -> driver_departed. driver_departed = standard body (update
-#                  the stage, TMS note) + keystone/types/reefer extension (ask for the
-#                  temperature and the seal). Plan: stage at_pickup -> to_delivery, a TMS
-#                  note, one SMS to drv_20931 asking for both values. No ETA request.
+#           09:06  run: gate -> driver_departed, decide. driver_departed is the standard
+#                  body plus the keystone/types/reefer extension: set the stage
+#                  at_pickup -> to_delivery (the next stop is a delivery), write a TMS
+#                  note with the stop and the local time, and send the driver one SMS
+#                  that asks for both the temperature and the seal number. No ETA
+#                  request is open, so there is nothing to close.
 #   step 1  09:12  driver SMS "34F, seal 4471902".
-#           09:13  run: gate -> status_update. status_updates: the values matter for a
-#                  reefer, so write them in the TMS. Nothing to send.
+#           09:13  run: gate -> status_update, decide. status_updates: a trailer
+#                  temperature and a seal number matter, so write them in a TMS note
+#                  (the reefer extension says the same). Send no reply; the stage stays.
 id: d2_keystone_reefer_departure
 title: Client B reefer departure asks the driver for the temperature and the seal
 suite: core
 tags: [regression, sop:driver_departed, sop:status_updates]
 description: >
-  The same event (the driver leaves the pickup) gets more steps on a Client B reefer
+  The same event (the driver leaves the pickup) gets one more step on a Client B reefer
   load, because a load-type SOP file extends the standard section. The driver's answer
   is recorded in the TMS.
 load: fixtures/load_481207.json
@@ -29,7 +32,7 @@ date: 2026-10-13
 start: "09:00"
 steps:
   - at: "09:05"
-    note: The driver leaves the shipper.
+    note: The driver leaves the shipper; the run at 09:06 moves the stage and asks for the reefer values.
     message: {channel: sms, sender: drv_20931, body: "loaded, leaving the shipper now"}
     script:
       gate:
@@ -37,34 +40,35 @@ steps:
       decide:
         - actions:
             - {type: update_stage, stage: to_delivery}
-            - {type: write_tms_note, text: "Driver departed Riverbend plant (pickup) loaded at 09:05, by SMS. Heading to Valley DC."}
+            - {type: write_tms_note, text: "Driver left the Riverbend plant pickup loaded at 09:05, heading to Valley DC."}
             - type: send_sms
               contact_id: drv_20931
               purpose: reply
-              text: Thanks! Please text the trailer temperature and the seal number.
-          rationale: driver_departed (standard, extended for keystone reefer), update the stage, note the departure and ask for the temperature and the seal number.
+              text: Thanks! Please send the trailer temperature and the seal number.
+          rationale: driver_departed (standard, extended for Keystone reefer), set the stage to to_delivery, note the departure and ask for the temperature and the seal number in one SMS.
     expect:
       actions:
-        - {kind: stage_update, count: 1}
-        - {kind: tms_note}
+        - {kind: stage_update, stage: to_delivery, count: 1}
+        - {kind: tms_note, count: 1}
         - {kind: sms, to: drv_20931, contains: [temperature, seal], count: 1}
       obligations:
         eta_request: null
       timers: {pending: 0}
     forbid:
+      - {kind: sms, purpose: eta_request}
       - {kind: email}
       - {kind: broker_slack}
 
   - at: "09:12"
-    note: The driver sends the values; they go to the TMS.
+    note: The driver sends the values; they go to the TMS and nothing is sent.
     message: {channel: sms, sender: drv_20931, body: "34F, seal 4471902"}
     script:
       gate:
         - {intent: status_update, act: true, reason: The driver reports the trailer temperature and the seal number we asked for.}
       decide:
         - actions:
-            - {type: write_tms_note, text: "Reefer check after pickup: trailer at 34 F, seal number 4471902 (driver SMS at 09:12)."}
-          rationale: status_updates, the temperature and the seal number matter on a reefer load, so record them in the TMS.
+            - {type: write_tms_note, text: "Reefer check after pickup: trailer at 34 F, seal number 4471902 (driver, by SMS at 09:12)."}
+          rationale: status_updates, a trailer temperature and a seal number matter, so record them in the TMS and send no reply.
     expect:
       actions:
         - {kind: tms_note, contains: ["4471902"], count: 1}
@@ -72,4 +76,5 @@ steps:
         eta_request: null
     forbid:
       - {kind: stage_update}
+      - {kind: sms}
       - {kind: email}

@@ -9,8 +9,8 @@
 #                  until 07:35 and replaces T1 with T2 due 07:37; T1's run is skipped as
 #                  stale. Nothing is sent. (See G1 for the detail.)
 #   step 2  07:33  ping, risk high again. The tracker is already high: no transition, no
-#                  event, no run, no model call. No new ETA request, and the ledger and T2
-#                  (07:37) are unchanged.
+#                  event, no run, no model call. No new ETA request, and the ledger
+#                  (one deferral) and T2 (07:37) are unchanged.
 id: g5_ping_during_deferral
 title: A high-to-high ping during a deferral changes nothing
 suite: core
@@ -31,15 +31,16 @@ steps:
             - type: send_sms
               contact_id: drv_20931
               purpose: eta_request
-              text: Hi, this is Northline Logistics for load 481207. What time will you arrive at Riverbend plant in Stockton?
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
             - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (northline) step 1, SMS the driver for the ETA and wait 30 minutes.
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
-        - {kind: sms, to: drv_20931, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
       obligations:
         eta_request: {status: open, attempts: 1}
       timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
       llm_calls: 1
 
   - at: "07:30"
@@ -51,20 +52,21 @@ steps:
       decide:
         - actions:
             - {type: defer_obligation, kind: eta_request, minutes: 5}
-          rationale: eta_deferred, accept one deferral of 5 minutes and send nothing; code moves the follow-up.
+          rationale: eta_deferred, first wait for this request, so defer it by the 5 minutes promised and send nothing; code moves the follow-up.
     expect:
+      no_actions: true
       obligations:
         eta_request: {status: open, attempts: 1, deferred: true}
       timers: {pending: 1, due_at: "07:37"}
-    forbid:
-      - {kind: sms}
+      run_status: [acted, skipped]
 
   - at: "07:33"
-    note: Risk is still high. Not a transition, so no event.
+    note: Risk is still high. Not a transition, so no event and no run.
     ping: {delay_risk: high}
     expect:
       no_actions: true
       obligations:
         eta_request: {status: open, attempts: 1, deferred: true}
       timers: {pending: 1, due_at: "07:37"}
+      runs: 0
       llm_calls: 0
