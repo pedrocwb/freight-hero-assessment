@@ -24,8 +24,7 @@
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 1. Pending timers: T1 at 07:51.
 #
-# The spec cannot assert "no run" directly (an empty run_status means "not checked"), so
-# llm_calls 0 and no_actions stand in for it in steps 0 and 1.
+# Steps 0 and 1 assert `runs: 0`: no event, so no run at all.
 
 id: b_medium_risk_does_not_wake
 title: "B4: pings at low and medium do not wake the agent; only high does"
@@ -48,6 +47,7 @@ steps:
         eta_request: null
       timers: {pending: 0}
       llm_calls: 0
+      runs: 0
 
   - at: "07:10"
     note: "B4: risk goes to medium: tracked, but medium does not wake the agent"
@@ -58,6 +58,7 @@ steps:
         eta_request: null
       timers: {pending: 0}
       llm_calls: 0
+      runs: 0
 
   - at: "07:20"
     note: "Control: medium -> high wakes the agent; at 07:21 the ETA request and a 30-minute timer"

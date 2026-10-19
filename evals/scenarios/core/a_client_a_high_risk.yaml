@@ -45,10 +45,10 @@
 #   zero latency, so they are created at 08:01.
 #
 # Checks are facts: kinds, recipients, counts, ledger, timers, run statuses and model
-# calls. Wording is not checked; `contains` is used only for the PO number. The spec
-# cannot match an SMS's `purpose`: the ledger's `attempts` checks it instead, because
-# only an SMS with purpose eta_request opens the obligation or adds an attempt. Whether
-# the Hero task is urgent is left to the `escalation` section (the script says urgent).
+# calls. Wording is not checked; `contains` is used only for the PO number. A2 forbids
+# an SMS with purpose eta_request, and the ledger's `attempts` checks the same fact from
+# the state side. Whether the Hero task is urgent is left to the `escalation` section
+# (the script says urgent).
 
 id: a_client_a_high_risk
 title: "A: Client A, delay risk goes high, the driver asks for the PO and never gives an ETA"
@@ -110,6 +110,7 @@ steps:
     forbid:
       - {kind: email}
       - {kind: hero_task}
+      - {kind: sms, purpose: eta_request}
     script:
       gate:
         - {intent: question, act: true, reason: "The driver asks for the PO number."}

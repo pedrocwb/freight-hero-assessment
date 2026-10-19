@@ -26,9 +26,7 @@
 #   pending timers; T1 is cancelled, so nothing fires and the runtime never ticks.
 #   No run, no model call, no outbox item. The ledger is unchanged.
 #   (Were a cancelled timer to fire anyway, the prefilter would skip its run as
-#   stale_timer, still with no model call and no action. The spec cannot assert "no run"
-#   directly: an empty run_status means "not checked", so llm_calls 0 and no_actions
-#   stand in for it.)
+#   stale_timer, with no model call and no action, and `runs: 0` would catch it.)
 
 id: b_eta_received_cancels_follow_up
 title: "B3: the ETA arrives at 07:20, so the 07:31 follow-up never runs"
@@ -107,3 +105,4 @@ steps:
         eta_request: {status: satisfied, attempts: 1}
       timers: {pending: 0}
       llm_calls: 0
+      runs: 0

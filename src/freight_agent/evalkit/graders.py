@@ -62,6 +62,7 @@ def grade_step(step: Step, obs: StepObservation, *, timezone: str) -> list[Failu
         *_check_timers(expect.timers, obs.snapshot.timers, timezone),
         *_check_run_status(expect.run_status, obs.runs),
         *_check_llm_calls(expect.llm_calls, obs),
+        *_check_runs(expect.runs, obs),
     ]
     return [Failure(step_index=obs.step_index, check=c, message=m) for c, m in findings]
 
@@ -177,6 +178,14 @@ def _check_llm_calls(want: int | None, obs: StepObservation) -> _Findings:
         )
 
 
+def _check_runs(want: int | None, obs: StepObservation) -> _Findings:
+    if want is not None and len(obs.runs) != want:
+        yield (
+            "expect.runs",
+            f"expected {want} run(s), got {len(obs.runs)}: {_list_runs(obs.runs)}",
+        )
+
+
 # --- invariants -------------------------------------------------------------------------
 
 
@@ -275,6 +284,8 @@ def _matches(matcher: ActionMatcher, pattern: re.Pattern[str] | None, item: Outb
         return False
     if pattern is not None and pattern.search(text) is None:
         return False
+    if matcher.purpose is not None and item.payload.get("purpose") != matcher.purpose.value:
+        return False
     return matcher.urgent is None or item.payload.get("urgent") == matcher.urgent
 
 
@@ -322,6 +333,8 @@ def _describe_matcher(matcher: ActionMatcher) -> str:
         parts.append(f"matching /{matcher.regex}/i")
     if matcher.urgent is not None:
         parts.append("urgent" if matcher.urgent else "not urgent")
+    if matcher.purpose is not None:
+        parts.append(f"with purpose {matcher.purpose.value}")
     return " ".join(parts)
 
 
