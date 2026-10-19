@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.intents import GateDecision
@@ -72,6 +72,16 @@ class ActionMatcher(_Spec):
     count: int | None = Field(
         default=None, description="Exact number of matches; default at least 1"
     )
+
+    @field_validator("regex")
+    @classmethod
+    def _compiles(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(f"invalid regex {value!r}: {exc}") from exc
+        return value
 
 
 class ObligationExpectation(_Spec):

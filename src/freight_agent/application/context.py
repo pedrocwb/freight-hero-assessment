@@ -28,7 +28,7 @@ class RunContext:
     now: datetime
     obligations: tuple[Obligation, ...]  # every obligation of the load, oldest first
     pending_timers: tuple[Timer, ...]  # earliest first
-    recent_events: tuple[Event, ...]  # the last N events of the load, oldest first, incl. `event`
+    recent_events: tuple[Event, ...]  # the last N events up to and incl. `event`, oldest first
     recent_outbound: tuple[OutboundRecord, ...]  # SMS, email and Slack sent in the rate window
     event_timer: Timer | None = None  # for TIMER_DUE events: the timer named in `event.data`
     tracker: RiskTracker | None = None
@@ -81,7 +81,7 @@ async def load_run_context(
         now=now,
         obligations=tuple(obligations),
         pending_timers=tuple(pending),
-        recent_events=tuple(recent),
+        recent_events=await _history_until(uow.events, event, recent, recent_limit),
         recent_outbound=_outbound_records(outbound_scan, load, since),
         event_timer=await _event_timer(uow, event),
         tracker=await uow.loads.get_tracker(load.load_id),
@@ -97,6 +97,26 @@ async def _event_timer(uow: UnitOfWork, event: Event) -> Timer | None:
     if not isinstance(timer_id, str):
         return None
     return await uow.timers.get(timer_id)
+
+
+async def _history_until(
+    events: EventLog, event: Event, page: Sequence[Event], limit: int
+) -> tuple[Event, ...]:
+    """The last `limit` events of the load up to and including `event`.
+
+    Messages that arrived while this event waited in the per-load queue are already in
+    the log. They get their own runs, and the model must not read them as history: it
+    would act on an ETA that, for this run, has not arrived yet. When newer events push
+    `event` out of the first page, the page grows until it holds `event`, or the whole
+    history if `event` is not logged.
+    """
+    size = limit
+    while event.event_id not in (ids := [e.event_id for e in page]) and len(page) >= size > 0:
+        size *= 2
+        page = await events.recent(event.load_id, size)
+    if event.event_id in ids:
+        page = page[: ids.index(event.event_id) + 1]
+    return tuple(page[-limit:]) if limit > 0 else ()
 
 
 async def _events_since(

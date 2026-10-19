@@ -71,10 +71,7 @@ def build_runtime(
 ) -> RuntimeLike:
     """The product runtime on fresh in-memory storage, with deterministic ids and no tracing."""
     deps = RuntimeDeps(
-        # The ignore works around a port mismatch: `UnitOfWork` declares its repositories
-        # as mutable attributes, which are invariant, so the concrete memory repositories
-        # do not match. Read-only properties on the protocol would fix it.
-        uow_factory=MemoryStore().unit_of_work,  # pyright: ignore[reportArgumentType]
+        uow_factory=MemoryStore().unit_of_work,
         clock=clock,
         ids=SequentialIdGenerator(),
         llm=model,
@@ -168,7 +165,7 @@ class ScenarioRunner:
         metadata = {**cast(dict[str, Any], data), **scenario.load_overrides}
         try:
             return Load.from_metadata(metadata)
-        except (DomainError, TypeError) as exc:  # TypeError: an override of the wrong shape
+        except DomainError as exc:
             raise ScenarioSetupError(f"{scenario.load}: {exc}") from exc
 
 

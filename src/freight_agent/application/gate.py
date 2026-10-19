@@ -79,6 +79,11 @@ def system_decision(ctx: RunContext) -> GateDecision | None:
     event = ctx.event
     match event.type:
         case EventType.INBOUND_MESSAGE:
+            if event.attachments and not event.body.strip():
+                # A photo with no text: what it is does not depend on a model's reading.
+                return GateDecision(
+                    intent=Intent.DOCUMENT, act=True, reason="attachment with no text"
+                )
             return None
         case EventType.RISK_CHANGED:
             return _risk_decision(event.data)

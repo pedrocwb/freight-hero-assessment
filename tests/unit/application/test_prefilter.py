@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,7 +20,6 @@ from freight_agent.domain.obligations import (
     ObligationStatus,
 )
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.repositories import UnitOfWork
 
 LA = ZoneInfo("America/Los_Angeles")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
@@ -261,7 +259,7 @@ async def test_the_deferral_race_through_the_store(store: MemoryStore, load: Loa
 
     async with store.unit_of_work() as uow:
         ctx = await load_run_context(
-            cast(UnitOfWork, uow), event, now=_at(31), recent_limit=30, outbound_window_minutes=60
+            uow, event, now=_at(31), recent_limit=30, outbound_window_minutes=60
         )
 
     assert ctx.event_timer == fired

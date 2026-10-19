@@ -135,7 +135,7 @@ class Load(DomainModel):
                 instructions=data.get("instructions", ""),
                 load_types=tuple(data.get("load_types", ())),
             )
-        except (KeyError, ValueError, ValidationError) as exc:
+        except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise DomainError(f"invalid load metadata: {exc}") from exc
 
 

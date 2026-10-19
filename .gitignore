@@ -16,3 +16,5 @@ evals/results/*
 *.egg-info/
 .DS_Store
 .import_linter_cache/
+.claude/worktrees/
+.claude/settings.local.json

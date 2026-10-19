@@ -11,6 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.domain.intents import GateDecision, Intent
@@ -304,11 +305,9 @@ def test_action_regex_searches_case_insensitively() -> None:
 
 
 @pytest.mark.unit
-def test_an_invalid_regex_is_reported_not_raised() -> None:
-    failures = grade(expect(actions=[{"kind": "sms", "regex": "("}]), observe(sms()))
-
-    assert checks(failures) == ["expect.actions[0]"]
-    assert "invalid regex '('" in failures[0].message
+def test_an_invalid_regex_is_rejected_when_the_scenario_loads() -> None:
+    with pytest.raises(ValidationError, match="invalid regex '\\('"):
+        expect(actions=[{"kind": "sms", "regex": "("}])
 
 
 @pytest.mark.unit
@@ -445,14 +444,6 @@ def test_forbid_fails_on_any_match_and_lists_the_matches() -> None:
     assert "expected no email to dsp_4410, found 1" in failures[0].message
     assert "email to dsp_4410: 'Driver late Load 481207'" in failures[0].message
     assert "sms" not in failures[0].message
-
-
-@pytest.mark.unit
-def test_forbid_with_an_invalid_regex_is_reported() -> None:
-    failures = grade(step(forbid=[{"kind": "sms", "regex": "[a-"}]), observe())
-
-    assert checks(failures) == ["forbid[0]"]
-    assert "invalid regex" in failures[0].message
 
 
 # --- expect.obligations ---------------------------------------------------------------

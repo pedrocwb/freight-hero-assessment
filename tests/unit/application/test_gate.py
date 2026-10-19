@@ -178,6 +178,43 @@ async def test_attachment_is_a_document(load: Load) -> None:
 
 
 @pytest.mark.unit
+async def test_message_with_only_an_attachment_is_a_document_without_a_model_call(
+    load: Load,
+) -> None:
+    pod = Attachment(
+        attachment_id="att_2", filename="pod.pdf", content_type="application/pdf", ref="r"
+    )
+    trigger = event(
+        EventType.INBOUND_MESSAGE, channel=Channel.SMS, sender=DRIVER, body="  ", attachments=(pod,)
+    )
+
+    result, model = await classify(load, trigger)
+
+    assert (result.decision.intent, result.decision.act) == (Intent.DOCUMENT, True)
+    assert model.calls == []
+
+
+@pytest.mark.unit
+async def test_message_with_text_and_an_attachment_still_asks_the_model(load: Load) -> None:
+    pod = Attachment(
+        attachment_id="att_2", filename="pod.pdf", content_type="application/pdf", ref="r"
+    )
+    trigger = event(
+        EventType.INBOUND_MESSAGE,
+        channel=Channel.SMS,
+        sender=DRIVER,
+        body="delivered, here is the POD",
+        attachments=(pod,),
+    )
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, GateDecision(intent=Intent.DOCUMENT, act=True, reason="pod"))
+
+    await Gate(model).classify(context(load, trigger))
+
+    assert len(model.calls) == 1
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("event_type", [EventType.HERO_UPDATE, EventType.AGENT_ACTION])
 async def test_hero_updates_and_own_actions_do_not_act(load: Load, event_type: EventType) -> None:
     result, model = await classify(load, event(event_type, body="done"))

@@ -69,11 +69,7 @@ def grade_step(step: Step, obs: StepObservation, *, timezone: str) -> list[Failu
 def _check_actions(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]) -> _Findings:
     for index, matcher in enumerate(matchers):
         check = f"expect.actions[{index}]"
-        try:
-            found = _select(matcher, items)
-        except re.error as exc:
-            yield check, _invalid_regex(matcher, exc)
-            continue
+        found = _select(matcher, items)
         if matcher.count is None and not found:
             wanted = "at least 1"
         elif matcher.count is not None and len(found) != matcher.count:
@@ -98,11 +94,7 @@ def _check_no_actions(no_actions: bool, items: Sequence[OutboxItem]) -> _Finding
 def _check_forbid(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]) -> _Findings:
     for index, matcher in enumerate(matchers):
         check = f"forbid[{index}]"
-        try:
-            found = _select(matcher, items)
-        except re.error as exc:
-            yield check, _invalid_regex(matcher, exc)
-            continue
+        found = _select(matcher, items)
         if found:
             yield (
                 check,
@@ -267,7 +259,7 @@ def _check_budget(budget: Budget, observations: Sequence[StepObservation]) -> _F
 
 
 def _select(matcher: ActionMatcher, items: Sequence[OutboxItem]) -> list[OutboxItem]:
-    """The items the matcher matches. Raises `re.error` when the scenario's regex is invalid."""
+    """The items the matcher matches. The spec has already checked that the regex compiles."""
     pattern = re.compile(matcher.regex, re.IGNORECASE) if matcher.regex is not None else None
     return [item for item in items if _matches(matcher, pattern, item)]
 
@@ -331,10 +323,6 @@ def _describe_matcher(matcher: ActionMatcher) -> str:
     if matcher.urgent is not None:
         parts.append("urgent" if matcher.urgent else "not urgent")
     return " ".join(parts)
-
-
-def _invalid_regex(matcher: ActionMatcher, exc: re.error) -> str:
-    return f"invalid regex {matcher.regex!r} in the scenario: {exc}"
 
 
 def _list_items(items: Sequence[OutboxItem]) -> str:

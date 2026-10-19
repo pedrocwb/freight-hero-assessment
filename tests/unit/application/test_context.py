@@ -1,11 +1,11 @@
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
+from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.context import RunContext, load_run_context
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Direction, Event, EventType
@@ -15,7 +15,6 @@ from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import OutboundRecord
-from freight_agent.ports.repositories import UnitOfWork
 
 LA = ZoneInfo("America/Los_Angeles")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
@@ -146,14 +145,8 @@ async def _context(
 ) -> RunContext:
     async with store.unit_of_work() as uow:
         return await load_run_context(
-            _port(uow), event, now=now, recent_limit=recent_limit, outbound_window_minutes=window
+            uow, event, now=now, recent_limit=recent_limit, outbound_window_minutes=window
         )
-
-
-def _port(uow: MemoryUnitOfWork) -> UnitOfWork:
-    """Each memory repository satisfies its port, but the protocol's attributes are
-    mutable, so pyright treats them as invariant and rejects the concrete classes."""
-    return cast(UnitOfWork, uow)
 
 
 def _other_load(load: Load) -> Load:
@@ -321,6 +314,46 @@ async def test_recent_events_are_the_last_n_of_the_load_with_the_agents_own_acti
     ctx = await _context(store, events[-1], recent_limit=4)
 
     assert [e.event_id for e in ctx.recent_events] == ["act:e0:0", "m2", "act:m2:0", "m3"]
+
+
+@pytest.mark.unit
+async def test_recent_events_stop_at_the_event_being_processed(
+    store: MemoryStore, load: Load
+) -> None:
+    """A message queued behind this event is not history yet: it gets its own run."""
+    events = [
+        _message("m1", minutes=0),
+        _message("m2", minutes=12, body="What's the PO number?"),
+        _message("m3", minutes=14, body="be there 9:40"),
+    ]
+    await _seed(store, loads=[load], events=events)
+
+    ctx = await _context(store, events[1], recent_limit=30)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m1", "m2"]
+
+
+@pytest.mark.unit
+async def test_recent_events_reach_back_when_newer_events_fill_the_first_page(
+    store: MemoryStore, load: Load
+) -> None:
+    events = [_message(f"m{i}", minutes=i) for i in range(6)]
+    await _seed(store, loads=[load], events=events)
+
+    ctx = await _context(store, events[1], recent_limit=2)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m0", "m1"]
+
+
+@pytest.mark.unit
+async def test_recent_events_fall_back_to_the_latest_when_the_event_is_not_logged(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1", minutes=0)])
+
+    ctx = await _context(store, _message("unlogged", minutes=5), recent_limit=3)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m1"]
 
 
 # --- recent outbound -----------------------------------------------------------------------

@@ -69,7 +69,13 @@ High-risk procedures (the scenarios depend on these exact rules):
   the broker's Slack channel. Never contact the dispatcher.
 
 When no section applies to the event, the run escalates to a Hero ("no SOP for this
-situation") and records the gap. The agent does not improvise.
+situation") and records the gap. The agent does not improvise. General sections (empty
+`intents`, such as `communication_rules` and `escalation`) apply to every event, so they do
+not count for this check: the run escalates when no section with an explicit intent matches.
+
+The decide prompt also shows, as context only, the sections of procedures still in progress
+(the follow-up intent of each open obligation), so that an answer to a driver's question at
+07:13 knows the ETA request continues. The model is told not to run those steps now.
 
 ## Intents and the gate
 
@@ -79,14 +85,24 @@ situation") and records the gap. The agent does not improvise.
 | `risk_changed` from `high` to lower | `delay_risk_low` | none |
 | `timer_due` for an `eta_request` obligation | `eta_follow_up_due` | none |
 | `attachment_received` | `document` | none |
-| `inbound_message` | from the gate model | `gate` role |
+| `inbound_message` with attachments and no text | `document` | none |
+| `inbound_message` | from the gate model | `gate` role, `max_tool_rounds = 0` (direct structured output, no tools) |
 | `hero_update` | `other`, no action | none |
 
 The run continues to decide when `decision.act` is true or the intent is in `MUST_ACT`.
 Otherwise the run ends as `noop` with one model call (the gate).
 
 Only a confirmed risk transition into or out of `high` becomes an event. `medium` is
-tracked but does not wake the agent.
+tracked but does not wake the agent. On every confirmed transition the runtime saves the
+load with `delay_risk` set to the new band, in the same unit of work as the tracker.
+
+## Run context
+
+`application.context.load_run_context` reads the load's memory once per run. `recent_events`
+are the last N events **up to and including the event being processed**: messages queued
+behind it are already in the log but are not history for this run (they get their own runs).
+`recent_outbound` is built from `agent_action` events in the rate window, however many
+events that takes; a broker Slack post counts against the first broker contact on Slack.
 
 ## Prefilter (code, before any model call)
 
@@ -133,6 +149,13 @@ The executor applies approved actions in plan order, inside the run's unit of wo
 | `defer_obligation` | `until = event.occurred_at + minutes` (the message time, not the processing time); `obligation.defer(until, now=event.occurred_at, policy)`. If the obligation has an active timer, the executor replaces it with one due at `follow_up_due_at(requested=<old due_at>, deferred_until=until, grace)`; the old one becomes `superseded`. |
 | `close_obligation` | Close the open obligation of that kind with the status; every pending timer of it becomes `cancelled`. |
 
+An action that would break a domain invariant (for example `schedule_timer` with no open
+obligation) is skipped and reported in `ExecutionResult.skipped`; the rest of the plan runs.
+The validator normally drops such actions first. Validator rules evaluate each action against
+the state left by the actions approved before it in the same plan. Outbound text must not
+contain an email address or a phone number (a high-severity violation that escalates the
+run); note that a bare 10-digit number reads as a phone number.
+
 Outbox `idempotency_key` = `{event_id}:{index}`, with `index` the action's position in the
 approved list.
 
@@ -172,7 +195,9 @@ prefixes `run`, `obl`, `timer`, `out`.
 
 A step that injects an event at `at` runs `run_latency_seconds` (default 60) later, so the
 first SMS of the main scenario leaves at 07:01 and its timer is due at 07:31. Timers fire
-with zero latency: the 07:31 follow-up leaves at 07:31.
+with zero latency: the 07:31 follow-up leaves at 07:31. Step indexes are 0-based; default
+message and ping ids are `{scenario_id}:{step_index}`. A timer that comes due inside a
+step's latency window fires on the tick after the latency, after the injected event's run.
 
 ## Layer and file ownership
 

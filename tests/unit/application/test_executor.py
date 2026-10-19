@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -105,10 +105,7 @@ class _World:
         self, event: Event, *actions: Action, at_time: datetime, commit: bool = True
     ) -> ExecutionResult:
         self.clock.set(at_time)
-        async with self.store.unit_of_work() as memory_uow:
-            # MemoryUnitOfWork declares its repositories as concrete classes, and the
-            # protocol's mutable attributes are invariant, so pyright needs the cast.
-            uow = cast(UnitOfWork, memory_uow)
+        async with self.store.unit_of_work() as uow:
             await uow.events.append(event)
             ctx = await self._context(uow, event)
             result = await self.executor.apply(

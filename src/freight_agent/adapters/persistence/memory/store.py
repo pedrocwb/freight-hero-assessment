@@ -18,6 +18,15 @@ from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.ports.repositories import (
+    EventLog,
+    EventQueue,
+    LoadRepository,
+    ObligationRepository,
+    OutboxRepository,
+    RunRepository,
+    TimerRepository,
+)
 
 
 @dataclass
@@ -237,13 +246,15 @@ class MemoryUnitOfWork:
         self._store = store
         self._snapshot: _State | None = None
         self._committed = False
-        self.loads = MemoryLoadRepository(store)
-        self.events = MemoryEventLog(store)
-        self.obligations = MemoryObligationRepository(store)
-        self.timers = MemoryTimerRepository(store)
-        self.outbox = MemoryOutboxRepository(store)
-        self.runs = MemoryRunRepository(store)
-        self.queue = MemoryEventQueue(store)
+        # Typed as the ports: the protocol's attributes are invariant, so a concrete
+        # annotation would keep this unit of work from satisfying `UnitOfWork`.
+        self.loads: LoadRepository = MemoryLoadRepository(store)
+        self.events: EventLog = MemoryEventLog(store)
+        self.obligations: ObligationRepository = MemoryObligationRepository(store)
+        self.timers: TimerRepository = MemoryTimerRepository(store)
+        self.outbox: OutboxRepository = MemoryOutboxRepository(store)
+        self.runs: RunRepository = MemoryRunRepository(store)
+        self.queue: EventQueue = MemoryEventQueue(store)
 
     async def __aenter__(self) -> Self:
         await self._store.lock.acquire()
