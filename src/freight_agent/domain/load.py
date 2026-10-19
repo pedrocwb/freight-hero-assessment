@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.errors import DomainError
@@ -87,7 +87,9 @@ class Load(DomainModel):
     stage: Stage
     delay_risk: DelayRisk
     contacts: tuple[Contact, ...]
-    stops: tuple[Stop, ...]
+    # Every run reads the current stop (its appointment and timezone), the escalation
+    # path included, so a load without one could never be handled.
+    stops: tuple[Stop, ...] = Field(min_length=1)
     instructions: str = ""
     load_types: tuple[str, ...] = ()
     current_stop_sequence: int | None = None
@@ -113,6 +115,8 @@ class Load(DomainModel):
     def from_metadata(cls, data: Mapping[str, Any]) -> "Load":
         """Build a load from the JSON metadata shape given in the assignment."""
         try:
+            if not data["stops"]:
+                raise DomainError("invalid load metadata: a load needs at least one stop")
             return cls(
                 load_id=data["load_id"],
                 broker_id=data["broker"]["id"],

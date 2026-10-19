@@ -334,6 +334,73 @@ async def test_recent_events_stop_at_the_event_being_processed(
 
 
 @pytest.mark.unit
+async def test_recent_events_keep_the_reply_committed_after_a_timer_was_logged(
+    store: MemoryStore, load: Load
+) -> None:
+    """The message M is queued ahead of the timer event T. M's run sends its reply after
+    T was logged, so the reply comes after T in the log. T's run must still see it: it is
+    what the agent has already done, and without it the agent may send it again."""
+    question = _message("m1", minutes=30, body="What's the PO number?")
+    timer = _timer_due("timer_1")
+    reply = _sms("m1:0", at=_at(31))
+    await _seed(store, loads=[load], events=[question, timer, reply])
+
+    ctx = await _context(store, timer, recent_limit=30)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m1", "timer:timer_1", "act:m1:0"]
+
+
+@pytest.mark.unit
+async def test_recent_events_drop_only_the_later_run_triggers(
+    store: MemoryStore, load: Load
+) -> None:
+    """After the event, the log may hold events still queued (they get their own runs) and
+    the agent's own actions of earlier runs (memory). Only the first are cut, every kind
+    of trigger alike; the order of the log is kept."""
+    later_message = _message("m3", minutes=33, body="be there 9:40")
+    later_risk = Event(
+        event_id="risk:p9",
+        load_id=load.load_id,
+        type=EventType.RISK_CHANGED,
+        occurred_at=_at(34),
+        channel=Channel.SYSTEM,
+        data={"previous": "high", "current": "low"},
+    )
+    events = [
+        _message("m1", minutes=30),
+        _message("m2", minutes=31, body="What's the PO number?"),
+        _sms("m1:0", at=_at(32)),
+        later_message,
+        _sms("m1:1", at=_at(32)),
+        later_risk,
+        _timer_due("timer_9"),
+    ]
+    await _seed(store, loads=[load], events=events)
+
+    ctx = await _context(store, events[1], recent_limit=30)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m1", "m2", "act:m1:0", "act:m1:1"]
+
+
+@pytest.mark.unit
+async def test_recent_events_keep_the_limit_with_the_later_agent_actions(
+    store: MemoryStore, load: Load
+) -> None:
+    events = [
+        _message("m1", minutes=0),
+        _message("m2", minutes=1),
+        _message("m3", minutes=2),
+        _sms("m2:0", at=_at(3)),
+        _message("m4", minutes=4),
+    ]
+    await _seed(store, loads=[load], events=events)
+
+    ctx = await _context(store, events[2], recent_limit=3)
+
+    assert [e.event_id for e in ctx.recent_events] == ["m2", "m3", "act:m2:0"]
+
+
+@pytest.mark.unit
 async def test_recent_events_reach_back_when_newer_events_fill_the_first_page(
     store: MemoryStore, load: Load
 ) -> None:

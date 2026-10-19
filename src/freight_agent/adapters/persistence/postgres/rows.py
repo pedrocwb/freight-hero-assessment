@@ -32,7 +32,7 @@ def columns(model: BaseModel, *, jsonb: Collection[str] = ()) -> dict[str, Any]:
     for name, value in values.items():
         raw = getattr(model, name)
         if isinstance(raw, datetime):
-            params[name] = _aware(raw, f"{type(model).__name__}.{name}")
+            params[name] = aware(raw, f"{type(model).__name__}.{name}")
         elif name in jsonb:
             params[name] = Jsonb(value)
         else:
@@ -40,7 +40,8 @@ def columns(model: BaseModel, *, jsonb: Collection[str] = ()) -> dict[str, Any]:
     return params
 
 
-def _aware(value: datetime, field: str) -> datetime:
+def aware(value: datetime, field: str) -> datetime:
+    """`value` as a `timestamptz` parameter. A naive time is refused."""
     if value.tzinfo is None:
         # The database would read it in the session's zone and shift it silently.
         raise ValueError(f"{field} must be timezone-aware")
@@ -62,7 +63,7 @@ def load_from(row: DictRow) -> Load:
 
 
 def tracker_params(load_id: str, tracker: RiskTracker) -> dict[str, Any]:
-    return {"load_id": load_id, **columns(tracker)}
+    return {"load_id": load_id, **columns(tracker, jsonb=("recent_ping_ids",))}
 
 
 def tracker_from(row: DictRow) -> RiskTracker:
@@ -106,7 +107,7 @@ def run_params(run: RunRecord) -> dict[str, Any]:
         "run_id": run.run_id,
         "event_id": run.event_id,
         "load_id": run.load_id,
-        "started_at": _aware(run.started_at, "RunRecord.started_at"),
+        "started_at": aware(run.started_at, "RunRecord.started_at"),
         "status": run.status.value,
         "record": Jsonb(run.model_dump(mode="json")),
     }

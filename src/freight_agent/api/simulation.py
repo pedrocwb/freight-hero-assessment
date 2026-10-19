@@ -256,39 +256,50 @@ class SimulationService:
     # --- ingress --------------------------------------------------------------------------
 
     async def ingest_message(self, message: MessageIn, latency_s: float) -> IngestResult:
+        """A redelivered message (a message id already logged) changes nothing: the
+        runtime reports it as a duplicate, and the clock neither moves nor ticks."""
         async with self._lock:
             session = self._session
             await self._require_load(session, message.load_id)
-            runs, at = await self._arrive(session, message.occurred_at)
-            contract = message.to_contract(
-                message_id=message.message_id or str(uuid.uuid4()), occurred_at=at
+            message_id = message.message_id or str(uuid.uuid4())
+            runs, at = await self._arrive(
+                session, message.occurred_at, move=not await _logged(session, message_id)
             )
+            contract = message.to_contract(message_id=message_id, occurred_at=at)
             result = await session.simulation.runtime.ingest_message(contract)
-            runs += await self._settle(session, latency_s)
+            if not result.duplicate:
+                runs += await self._settle(session, latency_s)
             await self._publish(session, runs)
         return result
 
     async def ingest_ping(self, ping: PingIn, latency_s: float) -> IngestResult:
+        """A redelivered ping (an id the load's risk tracker remembers) changes nothing,
+        the clock included."""
         async with self._lock:
             session = self._session
             await self._require_load(session, ping.load_id)
-            runs, at = await self._arrive(session, ping.occurred_at)
-            contract = ping.to_contract(ping_id=ping.ping_id or str(uuid.uuid4()), occurred_at=at)
+            ping_id = ping.ping_id or str(uuid.uuid4())
+            runs, at = await self._arrive(
+                session, ping.occurred_at, move=not await _pinged(session, ping.load_id, ping_id)
+            )
+            contract = ping.to_contract(ping_id=ping_id, occurred_at=at)
             result = await session.simulation.runtime.ingest_ping(contract)
-            runs += await self._settle(session, latency_s)
+            if not result.duplicate:
+                runs += await self._settle(session, latency_s)
             await self._publish(session, runs)
         return result
 
     async def _arrive(
-        self, session: Session, occurred_at: datetime | None
+        self, session: Session, occurred_at: datetime | None, *, move: bool = True
     ) -> tuple[list[RunRecord], datetime]:
         """When the input happens: now by default; a later time is reached first, firing
         the timers due on the way (as an eval step does). An earlier time is kept as the
-        event's time, but the clock does not go back."""
+        event's time, but the clock does not go back. Without `move` (a redelivery) the
+        clock stays wherever the time is."""
         if occurred_at is None:
             return [], session.now()
         at = session.local(occurred_at)
-        if _not_after(at, session.clock.now()):
+        if not move or _not_after(at, session.clock.now()):
             return [], at
         return await self._run_timers_until(session, at), at
 
@@ -388,6 +399,19 @@ class SimulationService:
                 self.bus.publish("load", summary)
         self.bus.publish("clock", state)
         return state
+
+
+async def _logged(session: Session, event_id: str) -> bool:
+    """Whether the runtime would take this message as a duplicate (its id is logged)."""
+    async with session.uow() as uow:
+        return await uow.events.get(event_id) is not None
+
+
+async def _pinged(session: Session, load_id: str, ping_id: str) -> bool:
+    """Whether the runtime would take this ping as a duplicate (its tracker has the id)."""
+    async with session.uow() as uow:
+        tracker = await uow.loads.get_tracker(load_id)
+    return tracker is not None and tracker.has_seen(ping_id)
 
 
 # Compare instants: two times in one zone compare by wall clock, which DST breaks.

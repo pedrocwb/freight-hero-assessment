@@ -10,6 +10,7 @@ the API alone, and the UI runs on the Vite dev server.
 """
 
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -70,8 +71,18 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def _unexpected(request: Request, exc: Exception) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
-        logger.exception("unexpected error on %s %s", request.method, request.url.path)
-        return JSONResponse(status_code=500, content={"detail": f"internal error: {exc!r}"})
+        # The exception text can hold a connection string, a prompt or a load's data: it
+        # goes to the server log only, under an id the client can quote.
+        error_id = uuid.uuid4().hex[:12]
+        logger.error(
+            "unexpected error %s on %s %s",
+            error_id,
+            request.method,
+            request.url.path,
+            exc_info=exc,
+        )
+        detail = f"internal error {error_id}: the server log has the details"
+        return JSONResponse(status_code=500, content={"detail": detail, "error_id": error_id})
 
     for router in ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
