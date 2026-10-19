@@ -155,4 +155,16 @@ with Haiku on decide (gate still on Nano): 100 x $0.00010 + 80 x $0.00100, about
 
 ## Cassettes and replay
 
-R18_CASSETTES
+Recorded once, after every prompt and schema change, with the chosen models:
+`uv run agent eval run --suite core --mode record --cost-cap-usd 0.20` passed 22/22 and
+cost $0.0101 (running total $0.5812). The 48 files are in `evals/cassettes/`
+(`openai-gpt-4.1-nano/` for the gate, `openai-gpt-oss-120b/` for decide); none holds a
+key. `uv run agent eval run --suite core --mode replay` then passed 22/22 offline, with
+no `.env` and no key in the environment.
+
+A cassette key hashes the prompt, the tools and the schema, so any change to
+`application/prompts.py`, the SOP text, the scenarios or `domain/actions.py` needs a new
+recording (one run, about a cent).
+
+**Total spend for this work: $0.5812** of the USD 2.00 cap (the orchestrator's $0.0009
+smoke run not included).
