@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay sop-lint ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -36,10 +36,14 @@ cov:
 eval:
 	uv run agent eval run --suite core --mode scripted
 
+# The real model's recorded answers (evals/cassettes): offline, no key.
+eval-replay:
+	uv run agent eval run --suite core --mode replay
+
 sop-lint:
 	uv run agent sop lint
 
 # The gates of .github/workflows/ci.yml, in the same order.
-ci: lint typecheck arch cov eval sop-lint
+ci: lint typecheck arch cov eval eval-replay sop-lint
 
 all: lint typecheck arch cov

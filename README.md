@@ -22,9 +22,10 @@ the web UI. Docker is optional.
 
 ```bash
 make setup     # uv sync (on macOS with Homebrew Python; elsewhere: uv sync --python 3.13)
-make eval      # the 22 eval scenarios, in scripted mode
-make test      # unit, contract and property tests
-make ci        # everything CI runs: lint, types, layer rules, coverage gate, evals, SOP lint
+make eval          # the 22 eval scenarios, in scripted mode
+make eval-replay   # the same scenarios on the real models' recorded answers, offline
+make test          # unit, contract and property tests
+make ci            # everything CI runs: lint, types, layer rules, coverage gate, evals, SOP lint
 ```
 
 `make eval` runs every scenario through the real agent runtime with a virtual clock and
@@ -66,6 +67,14 @@ scenario, missing cassette or key), 3 the cost cap stopped the run. Scenarios ta
 
 Live runs need the key in `.env` (copy `.env.example`; `.env` is gitignored and a
 pre-commit hook refuses to commit it). Always pass `--cost-cap-usd`.
+
+**Models.** The gate runs on `openai/gpt-4.1-nano` and decide on `openai/gpt-oss-120b`
+(`config/models.yaml`), chosen by a live bake-off of six cheap models against thresholds
+fixed before the rounds (`evals/RESULTS.md`): 22/22 scenarios at pass^3, about $0.0002 per
+agent run, about $0.03 per load. Claude Haiku 5.5 also passed 22/22 at about five times the
+cost; try it with `--model-set haiku`. `make eval-replay` replays the chosen models'
+recorded answers offline; after a prompt, SOP, scenario or model change, re-record with
+`uv run agent eval run --mode record --cost-cap-usd 0.20` (about a cent).
 
 ## The simulation platform
 

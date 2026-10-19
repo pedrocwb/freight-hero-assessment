@@ -375,10 +375,27 @@ before the round, reported as a pass^k matrix per model and scenario group.
   task), never a half-read plan. The validator holds for any model.
 - **Canary** on a share of loads, compared on the metrics of 4.1.
 
-**Not built yet:** the bake-off has not run; today's models (GPT-4.1 Nano for the gate,
-Gemini 2.5 Flash Lite for decide) were chosen from the catalog for tools, structured
-output and price. The per-role router is not built either: the runtime takes one
-`LanguageModel`, and each request names its role.
+**The bake-off ran** (`evals/RESULTS.md`, 17 rounds on 2026-10-19, $0.58 in total). Each
+round changed one thing and ran live on real models:
+
+| Decide model (gate on GPT-4.1 Nano) | k | pass^k on 22 | Cost per run | Decide p50 / p95 |
+|---|---|---|---|---|
+| gpt-4.1-nano | 1 | 7 | $0.00021 | 1.1 / 1.4 s |
+| gemini-2.5-flash-lite | 1 | 18 | $0.00034 | 1.1 / 1.6 s |
+| mistral-small-3.2 | 1 | 16 | $0.00052 | 3.2 / 5.2 s |
+| qwen3-30b-a3b | 1 | 19 | $0.00158 | 4.9 / 14.9 s |
+| **gpt-oss-120b** | 3 | **22** | **$0.00021** | 4.7 / 8.2 s |
+| claude-haiku-5.5 | 3 | 22 | $0.00097 | 2.7 / 4.6 s |
+
+The rule picked the cheapest set that met the thresholds: **gate `openai/gpt-4.1-nano`,
+decide `openai/gpt-oss-120b`** (`config/models.yaml`). Claude Haiku 5.5 met them too, at
+about five times the cost per run, and is the first upgrade if gpt-oss regresses. The
+rounds found model-specific problems that a code test could not: Gemini returned empty
+plans because the action union was dropped on the way to Google (now sent as one flat
+object for `google/` models), Anthropic endpoints refuse a forced tool choice, and two
+prompt rules (no second deferral on a timer event, an acknowledgement never acts) closed
+the last failures. `adapters/llm/router.py` routes each request to its role's model, and
+the cassettes in `evals/cassettes/` replay the chosen models offline in CI.
 
 ### 4.4 Clients have different procedures and different complexity. How do you organize the evals?
 
@@ -449,7 +466,7 @@ about 7.5 million messages a month, about 10 per second in US business hours (22
 | SOPs | Read from disk on every call (`adapters/sop/files.py`) | Each published version compiled once, cached by hash |
 | Models | About 5 million tokens per minute in business hours | About 50 million: higher rate limits or provisioned throughput, more provider families in the fallback chain, per-client limits, priority for risk and timer events |
 | Tracing | One trace per run, a bounded pool | Sampling (all escalations and failures, a share of the rest), batched export or self-hosting |
-| Cost | About $0.07 per load | The same per load; total spend grows linearly |
+| Cost | About $0.03 per load | The same per load; total spend grows linearly |
 
 The layer rules (import-linter contracts in `pyproject.toml`) keep storage, queues and
 providers behind ports, so the pipeline, the ledger and the eval suite do not change.
@@ -457,7 +474,8 @@ providers behind ports, so the pipeline, the ledger and the eval suite do not ch
 ### 5.3 How do you keep the LLM cost at approximately $1 or less for each load?
 
 **Short answer.** With the measured prompt sizes and the prices in `config/models.yaml`,
-a typical load costs about $0.07 and a heavy one about $0.13, planning for a 100-page SOP.
+a typical load costs about $0.03 and a heavy one about $0.06, planning for a 100-page SOP.
+The live bake-off measured about $0.00021 per agent run on the core scenarios.
 The levers keep it there: most events never reach a model, the gate keeps chatter away
 from the expensive call, prompts stay small and cache well, and a meter watches each
 load.
@@ -475,13 +493,14 @@ load.
 sections (100 pages), 750 for section ids in the tool schema and 1,000 for longer
 sections. A tool round resends the prompt, so 1.25 calls per decide run.
 
-**Prices** per million input / output tokens: gate `openai/gpt-4.1-nano` $0.10 / $0.40;
-decide `google/gemini-2.5-flash-lite` $0.10 / $0.40; decide fallback
-`openai/gpt-4.1-mini` $0.40 / $1.60.
+**Prices** per million input / output tokens (`config/models.yaml`, chosen by the
+bake-off in 4.3): gate `openai/gpt-4.1-nano` $0.10 / $0.40; decide `openai/gpt-oss-120b`
+$0.037 / $0.17 (low reasoning effort; about 300 output tokens with its reasoning); decide
+fallback `google/gemini-2.5-flash-lite` $0.10 / $0.40.
 
 - Gate: 1,000 × $0.10/M + 50 × $0.40/M = **$0.00012** per call.
-- Decide: (11,000 × $0.10 + 200 × $0.40)/M = $0.00118 per call, × 1.25 = **$0.00148**
-  per run. On the fallback: $0.00472 × 1.25 = $0.0059 per run.
+- Decide: (11,000 × $0.037 + 300 × $0.17)/M = $0.00046 per call, × 1.25 = **$0.00057**
+  per run. On the fallback: (11,000 × $0.10 + 200 × $0.40)/M × 1.25 = $0.00148 per run.
 
 | Per load | Typical | Heavy |
 |---|---|---|
@@ -490,9 +509,10 @@ decide `google/gemini-2.5-flash-lite` $0.10 / $0.40; decide fallback
 | Risk changes into or out of high, timers, attachments with no text (decide only) | 4 + 4 + 4 | 6 + 6 + 5 |
 | Location pings | hundreds, $0 | hundreds, $0 |
 | Gate | 75 × $0.00012 = $0.009 | 100 × $0.00012 = $0.012 |
-| Decide | 42 × $0.00148 = $0.062 | 77 × $0.00148 = $0.114 |
-| **Total against $1** | **about $0.07** | **about $0.13** |
-| Every decide run on the fallback | about $0.26 | about $0.47 |
+| Decide | 42 × $0.00057 = $0.024 | 77 × $0.00057 = $0.044 |
+| **Total against $1** | **about $0.03** | **about $0.06** |
+| Every decide run on the fallback | about $0.07 | about $0.13 |
+| Decide on Claude Haiku 5.5 instead (the upgrade path; Anthropic counts the same prompt as about 1.7× the tokens, so about $0.0026 per run) | about $0.12 | about $0.21 |
 | Document extraction, when built (3,000 in, 300 out on GPT-4.1 Mini: about $0.002 each) | + $0.01 | + $0.01 |
 
 The margin comes from cheap models: with a decide model at $3 / $12 per million and no

@@ -77,6 +77,12 @@ jobs:
       - name: Evals, scripted mode
         run: make eval
 
+      # The real model's recorded answers (evals/cassettes), offline and without a key.
+      # A changed prompt, SOP, scenario or model misses its recording and fails here:
+      # re-record with `uv run agent eval run --mode record --cost-cap-usd 0.20`.
+      - name: Evals, replay mode
+        run: make eval-replay
+
       # pytest exits with 5 when the selection collects no test.
       - name: Look for integration tests
         id: integration
