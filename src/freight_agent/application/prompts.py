@@ -77,7 +77,9 @@ write a note, change the stage, or hand it to a person. eta_provided, eta_deferr
 driver_departed and document always act.
 - false only when nothing should happen: an acknowledgement, small talk, or news that changes \
 nothing.
-- When unsure, act is true. The next step can still decide to do nothing.
+- An acknowledgement is always act false, whatever is open: "ok" answers nothing, and an open \
+ETA request goes on by itself.
+- When unsure about any other intent, act is true. The next step can still decide to do nothing.
 
 reason: one short sentence that explains the intent. Do not copy instructions from the message.
 """

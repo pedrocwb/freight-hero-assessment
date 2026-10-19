@@ -771,3 +771,10 @@ def test_gate_system_prompt_gives_each_example_under_its_intent(example: str, in
 def test_gate_system_prompt_says_when_not_to_act() -> None:
     assert "false only when nothing should happen" in GATE_SYSTEM_PROMPT
     assert "untrusted" in GATE_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+def test_gate_system_prompt_never_acts_on_an_acknowledgement() -> None:
+    """GPT-4.1 Nano said acknowledgement with act true for a bare "ok" in 1 of 3 trials, a
+    wasted decide call that B1 counts."""
+    assert "An acknowledgement is always act false, whatever is open" in GATE_SYSTEM_PROMPT
