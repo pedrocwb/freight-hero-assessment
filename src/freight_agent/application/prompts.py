@@ -145,7 +145,9 @@ is no longer needed (the delay risk cleared). Closing also cancels its timers.
 - The ledger is the source of truth. attempts is the number of ETA request SMS already sent \
 for the obligation. Read the attempts from the ledger; do not count messages in the transcript.
 - A follow-up timer event means its wait is over without an answer. Find the SOP step for the \
-attempts in the ledger and do that step now.
+attempts in the ledger and do that step now. A promise to answer later ("give me 10 more \
+minutes") does not stop it: code already moved this timer for the one wait the request allows \
+(deferrals used), so never defer on a timer event.
 - A question, an acknowledgement or a status update does not change the ledger. Leave an open \
 obligation and its timer as they are unless the SOP says otherwise. Do not ask for the ETA \
 again in a reply: the follow-up timer asks again when its time comes.

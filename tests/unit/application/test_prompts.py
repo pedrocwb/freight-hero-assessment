@@ -730,6 +730,7 @@ def test_gate_prompt_lists_attachments_and_says_none_when_nothing_is_open(load: 
         "contact id",
         'purpose "eta_request"',
         "Read the attempts from the ledger; do not count messages",
+        "never defer on a timer event",
         "schedule_timer",
         "minutes from now",
         "defer_obligation",
