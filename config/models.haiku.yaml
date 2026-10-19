@@ -1,0 +1,65 @@
+# Bake-off candidate set "haiku" (`--model-set haiku`): Claude Haiku 5.5 on gate and
+# decide, pinned to Anthropic's own endpoint. The other roles are as in config/models.yaml;
+# see that file for what each setting means.
+#
+# anthropic/claude-haiku-5.5 in the public catalog on 2026-10-19: USD 0.10 per 1M input,
+# 0.50 output, 0.01 cache read (0.125 cache write), 1,000,000-token context. It lists
+# tools, tool_choice, structured_outputs and reasoning, and no temperature, so both roles
+# set `temperature: null`. No reasoning_effort: Anthropic does not think on a forced tool
+# call, which is how the gate answers and how decide's last call answers.
+# The fallbacks send no temperature either (null applies to the whole chain).
+#
+# Measured caveat: with require_parameters on, OpenRouter has no Anthropic endpoint for a
+# forced tool_choice (a named tool or "required"; both 404). Decide's rounds use "auto"
+# (adapters/llm/openrouter.py) and Haiku answered in them every time, but the gate is one
+# forced call, so in the bake-off every gate call fell back to GPT-4.1 Nano. The runs of
+# this set are therefore "gate Nano, decide Haiku".
+
+roles:
+  gate:
+    model: anthropic/claude-haiku-5.5
+    fallbacks: [openai/gpt-4.1-nano]
+    temperature: null
+    max_tokens: 256
+    provider:
+      order: [anthropic]
+      allow_fallbacks: false
+
+  decide:
+    model: anthropic/claude-haiku-5.5
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: null
+    max_tokens: 2048
+    provider:
+      order: [anthropic]
+      allow_fallbacks: false
+
+  judge:
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 1024
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  driver_sim:
+    model: google/gemini-2.5-flash-lite
+    fallbacks: [openai/gpt-4.1-nano]
+    temperature: 0.7
+    max_tokens: 400
+
+pricing:
+  anthropic/claude-haiku-5.5: {input: 0.10, output: 0.50, cached_input: 0.01, context_length: 1000000}
+  openai/gpt-4.1-nano: {input: 0.10, output: 0.40, cached_input: 0.025, context_length: 1047576}
+  google/gemini-2.5-flash-lite: {input: 0.10, output: 0.40, cached_input: 0.01, context_length: 1048576}
+  openai/gpt-4.1-mini: {input: 0.40, output: 1.60, cached_input: 0.10, context_length: 1047576}
+  qwen/qwen3-30b-a3b-instruct-2507: {input: 0.10, output: 0.30, context_length: 262144}
+  openai/gpt-oss-120b: {input: 0.037, output: 0.17, context_length: 131072}
+
+bakeoff_candidates:
+  - openai/gpt-4.1-nano
+  - google/gemini-2.5-flash-lite
+  - qwen/qwen3-30b-a3b-instruct-2507
+  - openai/gpt-oss-120b
+  - anthropic/claude-haiku-5.5
