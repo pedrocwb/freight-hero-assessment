@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     sops_dir: Path = Path("sops")
     evals_dir: Path = Path("evals")
     cassettes_dir: Path = Path("evals/cassettes")
+    web_dist: Path = Path("web/dist")  # the built UI the API serves, when it exists
 
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "a live model")

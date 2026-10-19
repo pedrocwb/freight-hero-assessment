@@ -10,7 +10,6 @@ the API alone, and the UI runs on the Vite dev server.
 """
 
 import logging
-import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -36,8 +35,6 @@ CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 API_PREFIX = "/api"
 # The UI bundle `vite build` writes. A relative path resolves against the working
 # directory, the repository root for `uv run agent serve` and /app in the image.
-WEB_DIST_VARIABLE = "WEB_DIST"
-DEFAULT_WEB_DIST = Path("web/dist")
 ASSETS_DIR = "assets"
 
 
@@ -51,8 +48,8 @@ def create_app(
     """The API with a fresh simulation at the default start (`POST /api/sim/reset` moves it).
 
     `llm` replaces the model of every simulation the app builds, whatever the mode says.
-    `web_dist` is the built UI to serve; None reads it from the environment
-    (`web_dist_from_env`). A folder with no `index.html` serves nothing.
+    `web_dist` is the built UI to serve; None means `settings.web_dist` (`WEB_DIST`, from
+    the environment or `.env`). A folder with no `index.html` serves nothing.
     """
     settings = Settings() if settings is None else settings
     app = FastAPI(
@@ -78,17 +75,8 @@ def create_app(
 
     for router in ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
-    serve_web_ui(app, web_dist_from_env() if web_dist is None else web_dist)
+    serve_web_ui(app, settings.web_dist if web_dist is None else web_dist)
     return app
-
-
-def web_dist_from_env() -> Path:
-    """WEB_DIST, else `web/dist`.
-
-    Read here and not in `Settings` (which has no such field yet), so only the process
-    environment counts: docker compose passes `.env` in as environment, `uv run` does not.
-    """
-    return Path(os.environ.get(WEB_DIST_VARIABLE) or DEFAULT_WEB_DIST)
 
 
 def serve_web_ui(app: FastAPI, dist: Path) -> None:
