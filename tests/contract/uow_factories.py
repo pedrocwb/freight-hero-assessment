@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
+from freight_agent.adapters.persistence.postgres.store import open_store
 from freight_agent.ports.repositories import UnitOfWorkFactory
 
 
@@ -41,9 +43,22 @@ async def open_memory(*, max_queue_attempts: int) -> AsyncIterator[UnitOfWorkFac
     yield MemoryStore(max_queue_attempts=max_queue_attempts).unit_of_work
 
 
-# A Postgres entry needs an `open_postgres` that connects to DATABASE_URL, starts from
-# empty tables, yields the adapter's unit of work factory and closes its pool.
+@asynccontextmanager
+async def open_postgres(*, max_queue_attempts: int) -> AsyncIterator[UnitOfWorkFactory]:
+    """A schema of its own on DATABASE_URL, migrated from scratch and dropped afterwards.
+
+    Nothing outside that schema is read or written, so DATABASE_URL may point at a
+    database that holds data.
+    """
+    conninfo = os.environ["DATABASE_URL"]
+    async with (
+        scratch_schema(conninfo, prefix="contract") as schema,
+        open_store(conninfo, schema=schema, max_queue_attempts=max_queue_attempts) as store,
+    ):
+        yield store.unit_of_work
+
+
 UOW_FACTORIES: dict[str, UowFactory] = {
     "memory": UowFactory(open_memory),
-    # "postgres": UowFactory(open_postgres, requires_env=("DATABASE_URL",)),
+    "postgres": UowFactory(open_postgres, requires_env=("DATABASE_URL",)),
 }

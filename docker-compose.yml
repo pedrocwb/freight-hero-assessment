@@ -1,0 +1,28 @@
+# Local stack. For now only the database; the api, worker and web services come later.
+#
+#   docker compose up -d postgres
+#   DATABASE_URL=postgresql://agent:agent@localhost:5432/agent  (the .env.example default)
+#
+# The image matches CI's integration job and ships the pgvector extension.
+name: freight-agent
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
