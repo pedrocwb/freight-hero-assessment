@@ -355,8 +355,8 @@ def test_postgres_is_built_from_the_database_url_once_its_adapter_exists(
     received: list[str] = []
     uow_factory = MemoryStore().unit_of_work
 
-    def factory(database_url: SecretStr) -> UnitOfWorkFactory:
-        received.append(database_url.get_secret_value())
+    def factory(database_url: str) -> UnitOfWorkFactory:
+        received.append(database_url)
         return uow_factory
 
     _fake_module(monkeypatch, bootstrap.POSTGRES, factory)
@@ -364,6 +364,20 @@ def test_postgres_is_built_from_the_database_url_once_its_adapter_exists(
 
     assert build_runtime_deps(settings).uow_factory is uow_factory
     assert received == [DATABASE_URL]
+
+
+@pytest.mark.unit
+def test_postgres_uses_the_real_adapter_and_opens_no_connection_while_building(
+    tmp_path: Path,
+) -> None:
+    from freight_agent.adapters.persistence.postgres import PostgresUnitOfWorkFactory
+
+    settings = _settings(tmp_path, persistence="postgres", database_url=DATABASE_URL)
+
+    factory = build_runtime_deps(settings).uow_factory
+
+    assert isinstance(factory, PostgresUnitOfWorkFactory)
+    assert factory.pool.closed  # opens on the first unit of work, in the caller's loop
 
 
 @pytest.mark.unit

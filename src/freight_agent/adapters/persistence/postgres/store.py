@@ -3,9 +3,13 @@
     async with open_store(os.environ["DATABASE_URL"]) as store:
         deps = RuntimeDeps(uow_factory=store.unit_of_work, ...)
 
+A synchronous composition root (`bootstrap.build_runtime`) uses `unit_of_work_factory`
+instead: its pool opens on the first unit of work, inside the caller's event loop.
+
 Which URL to pass is in the package docstring (`postgres/__init__.py`).
 """
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from types import TracebackType
@@ -151,6 +155,70 @@ class PostgresUnitOfWork:
 
     async def commit(self) -> None:
         self._committed = True
+
+
+class _LazyUnitOfWork(PostgresUnitOfWork):
+    def __init__(self, factory: "PostgresUnitOfWorkFactory") -> None:
+        super().__init__(factory.pool, factory.begin, factory.max_queue_attempts)
+        self._factory = factory
+
+    async def __aenter__(self) -> Self:
+        await self._factory.ensure_open()
+        return await super().__aenter__()
+
+
+class PostgresUnitOfWorkFactory:
+    """A `UnitOfWorkFactory` whose pool opens on first use.
+
+    `bootstrap.build_runtime` is synchronous and cannot await `pool.open()`: the API and
+    the worker build the runtime first and serve afterwards, in their event loop, where
+    the first unit of work opens the pool. `close()` belongs in their shutdown.
+    """
+
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        schema: str | None = None,
+        max_queue_attempts: int = 3,
+        min_size: int = 1,
+        max_size: int = 10,
+    ) -> None:
+        self.begin = begin_command(schema)  # an invalid schema name fails here, not later
+        self.max_queue_attempts = max_queue_attempts
+        self.pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+            conninfo,
+            min_size=min_size,
+            max_size=max_size,
+            kwargs=CONNECTION_KWARGS,
+            check=AsyncConnectionPool.check_connection,
+            open=False,
+        )
+        self._opened = False
+        self._lock = asyncio.Lock()
+
+    def __call__(self) -> PostgresUnitOfWork:
+        return _LazyUnitOfWork(self)
+
+    async def ensure_open(self) -> None:
+        if self._opened:
+            return
+        async with self._lock:
+            if not self._opened:
+                await self.pool.open(wait=True)
+                self._opened = True
+
+    async def close(self) -> None:
+        if self._opened:
+            await self.pool.close()
+            self._opened = False
+
+
+def unit_of_work_factory(
+    conninfo: str, *, schema: str | None = None, max_queue_attempts: int = 3
+) -> PostgresUnitOfWorkFactory:
+    """The entry point `bootstrap` loads by name for `PERSISTENCE=postgres`."""
+    return PostgresUnitOfWorkFactory(conninfo, schema=schema, max_queue_attempts=max_queue_attempts)
 
 
 async def _commit(conn: AsyncConnection[Any]) -> None:

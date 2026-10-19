@@ -19,3 +19,11 @@ index and transaction-scoped advisory locks only (the locking rules are in
 Modules: `store` (pool and unit of work), `repositories`, `rows` (mapping to and from
 domain models), `connection` (settings and the transaction session), `migrate`.
 """
+
+from freight_agent.adapters.persistence.postgres.store import (
+    PostgresUnitOfWorkFactory,
+    open_store,
+    unit_of_work_factory,
+)
+
+__all__ = ["PostgresUnitOfWorkFactory", "open_store", "unit_of_work_factory"]

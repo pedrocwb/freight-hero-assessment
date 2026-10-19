@@ -85,10 +85,8 @@ class LazyAdapter:
         return getattr(module, self.attribute, None)
 
 
-# Both are being written by other cards. The names and signatures the root expects:
-# `unit_of_work_factory(database_url: SecretStr) -> UnitOfWorkFactory`
+# `unit_of_work_factory(conninfo: str) -> UnitOfWorkFactory`, its pool opened on first use.
 POSTGRES = LazyAdapter("freight_agent.adapters.persistence.postgres", "unit_of_work_factory")
-# `LangSmithTracer(*, api_key: SecretStr, project: str)`, a `Tracer`
 
 
 # --- language model ------------------------------------------------------------
@@ -183,7 +181,7 @@ def _postgres(settings: Settings) -> UnitOfWorkFactory:
             "PERSISTENCE=postgres, but the Postgres adapter is not available yet "
             f"({POSTGRES.module}.{POSTGRES.attribute}): set PERSISTENCE=memory"
         )
-    return factory(settings.require_database_url())
+    return factory(settings.require_database_url().get_secret_value())
 
 
 PERSISTENCE: Mapping[PersistenceKind, PersistenceBuilder] = MappingProxyType(
