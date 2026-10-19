@@ -5,16 +5,20 @@ reads this snapshot instead of querying the repositories again, so a run sees
 one consistent view of the load's memory.
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import cast
 
-from freight_agent.domain.events import Event
-from freight_agent.domain.load import Load
+from freight_agent.domain.errors import DomainError
+from freight_agent.domain.events import Event, EventType
+from freight_agent.domain.load import Channel, Load, Role
 from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.ping_filter import RiskTracker
-from freight_agent.domain.timers import Timer
+from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import OutboundRecord
-from freight_agent.ports.repositories import UnitOfWork
+from freight_agent.ports.repositories import EventLog, UnitOfWork
 
 
 @dataclass(frozen=True)
@@ -49,5 +53,128 @@ async def load_run_context(
     recent_limit: int,
     outbound_window_minutes: int,
 ) -> RunContext:
-    """Read the load, its ledger, timers, recent events and recent outbound messages."""
-    raise NotImplementedError  # card APP-2
+    """Read the load, its ledger, timers, recent events and recent outbound messages.
+
+    Raises `DomainError` when the event names a load that was never registered:
+    there is no SOP, contact list or ledger to act on.
+    """
+    load = await uow.loads.get(event.load_id)
+    if load is None:
+        raise DomainError(f"unknown load {event.load_id!r} for event {event.event_id!r}")
+
+    obligations = sorted(
+        await uow.obligations.list_for_load(load.load_id),
+        key=lambda o: (o.opened_at, o.obligation_id),
+    )
+    timers = await uow.timers.list_for_load(load.load_id)
+    pending = sorted(
+        (t for t in timers if t.status is TimerStatus.PENDING),
+        key=lambda t: (t.due_at, t.timer_id),
+    )
+    recent = await uow.events.recent(load.load_id, recent_limit)
+    since = now - timedelta(minutes=outbound_window_minutes)
+    outbound_scan = await _events_since(uow.events, load.load_id, since, recent, recent_limit)
+
+    return RunContext(
+        event=event,
+        load=load,
+        now=now,
+        obligations=tuple(obligations),
+        pending_timers=tuple(pending),
+        recent_events=tuple(recent),
+        recent_outbound=_outbound_records(outbound_scan, load, since),
+        event_timer=await _event_timer(uow, event),
+        tracker=await uow.loads.get_tracker(load.load_id),
+        already_processed=await uow.runs.for_event(event.event_id) is not None,
+    )
+
+
+async def _event_timer(uow: UnitOfWork, event: Event) -> Timer | None:
+    """The timer a TIMER_DUE event names. None when it names none or it no longer exists."""
+    if event.type is not EventType.TIMER_DUE:
+        return None
+    timer_id = event.data.get("timer_id")
+    if not isinstance(timer_id, str):
+        return None
+    return await uow.timers.get(timer_id)
+
+
+async def _events_since(
+    events: EventLog, load_id: str, since: datetime, page: Sequence[Event], size: int
+) -> Sequence[Event]:
+    """The newest events of the load, enough of them to hold every agent action since `since`.
+
+    `recent_limit` is sized for the model's prompt, not for the rate window: a burst
+    of chatter could push an SMS of the last hour out of the page, and the rate limit
+    would never count it. So the page grows until it reaches an agent action older
+    than the window, or the whole history. Agent actions are logged in run order with
+    the run's clock time, so every agent action before that one is older too. One
+    query is enough in the usual case, because the first page is the one already read.
+    """
+    while len(page) >= size and not _reaches_before(page, since):
+        size = max(2 * size, 1)
+        page = await events.recent(load_id, size)
+    return page
+
+
+def _reaches_before(page: Sequence[Event], since: datetime) -> bool:
+    return any(_is_agent_action(e) and e.occurred_at < since for e in page)
+
+
+def _is_agent_action(event: Event) -> bool:
+    return event.type is EventType.AGENT_ACTION
+
+
+def _outbound_records(
+    events: Sequence[Event], load: Load, since: datetime
+) -> tuple[OutboundRecord, ...]:
+    """One record per recipient of each SMS, email and broker Slack post since `since`.
+
+    The window has no upper bound: an action stamped after `now` (clock skew) still
+    counts, and over-counting only makes the rate limit stricter.
+    """
+    return tuple(
+        OutboundRecord(contact_id=contact_id, channel=channel, at=event.occurred_at)
+        for event in events
+        if _is_agent_action(event) and event.occurred_at >= since
+        for contact_id, channel in _recipients(event, load)
+    )
+
+
+def _recipients(event: Event, load: Load) -> tuple[tuple[str, Channel], ...]:
+    """Who an agent action reached, read from its outbox payload (docs/decisions.md).
+
+    A malformed payload yields nothing instead of failing the run: a bad log entry
+    must not block every later run of the load.
+    """
+    kind: object = event.data.get("kind")
+    raw: object = event.data.get("payload")
+    payload: Mapping[str, object] = (
+        cast(Mapping[str, object], raw) if isinstance(raw, Mapping) else {}
+    )
+    if kind == OutboxKind.SMS:
+        return tuple((c, Channel.SMS) for c in _strings([payload.get("contact_id")]))
+    if kind == OutboxKind.EMAIL:
+        return tuple((c, Channel.EMAIL) for c in _strings(payload.get("to_contact_ids")))
+    if kind == OutboxKind.BROKER_SLACK:
+        return tuple((c, Channel.SLACK) for c in _strings([_broker_on_slack(load)]))
+    return ()
+
+
+def _broker_on_slack(load: Load) -> str | None:
+    """The contact a broker Slack post counts against.
+
+    The post goes to the broker's channel, not to a person, so it is attributed to
+    the first broker contact that is on Slack: one record per post keeps counts by
+    channel exact. A load with no broker on Slack records nothing.
+    """
+    brokers = load.contacts_with_role(Role.BROKER)
+    return next((c.id for c in brokers if Channel.SLACK in c.channels), None)
+
+
+def _strings(value: object) -> tuple[str, ...]:
+    """The strings in a list or tuple. Anything else, or any other item, is dropped."""
+    if not isinstance(value, list | tuple):
+        return ()
+    items = cast(Sequence[object], value)
+    return tuple(item for item in items if isinstance(item, str))
