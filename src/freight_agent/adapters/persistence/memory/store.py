@@ -30,6 +30,13 @@ from freight_agent.ports.repositories import (
 )
 
 
+def _id_key(value: str) -> tuple[str, int]:
+    """Natural order for ids such as `out_9` < `out_10`: ties on time are broken by id,
+    and plain text order would deliver the tenth action of a run before the ninth."""
+    prefix, _, number = value.rpartition("_")
+    return (prefix, int(number)) if number.isdigit() else (value, -1)
+
+
 @dataclass
 class _State:
     loads: dict[str, Load] = field(default_factory=dict)
@@ -122,7 +129,7 @@ class MemoryObligationRepository:
     async def list_for_load(self, load_id: str) -> list[Obligation]:
         items = [o for o in self._s.state.obligations.values() if o.load_id == load_id]
         # The id breaks ties, as in every other list: a database has no insertion order.
-        return sorted(items, key=lambda o: (o.opened_at, o.obligation_id))
+        return sorted(items, key=lambda o: (o.opened_at, _id_key(o.obligation_id)))
 
     async def save(self, obligation: Obligation) -> None:
         self._s.state.obligations[obligation.obligation_id] = obligation
@@ -140,7 +147,7 @@ class MemoryTimerRepository:
 
     def _pending(self) -> list[Timer]:
         pending = [t for t in self._s.state.timers.values() if t.status is TimerStatus.PENDING]
-        return sorted(pending, key=lambda t: (t.due_at, t.timer_id))
+        return sorted(pending, key=lambda t: (t.due_at, _id_key(t.timer_id)))
 
     async def due(self, now: datetime) -> list[Timer]:
         return [t for t in self._pending() if t.due_at <= now]
@@ -154,7 +161,7 @@ class MemoryTimerRepository:
 
     async def list_for_load(self, load_id: str) -> list[Timer]:
         items = [t for t in self._s.state.timers.values() if t.load_id == load_id]
-        return sorted(items, key=lambda t: (t.created_at, t.timer_id))
+        return sorted(items, key=lambda t: (t.created_at, _id_key(t.timer_id)))
 
 
 class MemoryOutboxRepository:
@@ -171,14 +178,14 @@ class MemoryOutboxRepository:
 
     async def pending(self, limit: int = 100) -> list[OutboxItem]:
         items = [i for i in self._s.state.outbox.values() if i.status is OutboxStatus.PENDING]
-        return sorted(items, key=lambda i: (i.created_at, i.outbox_id))[:limit]
+        return sorted(items, key=lambda i: (i.created_at, _id_key(i.outbox_id)))[:limit]
 
     async def save(self, item: OutboxItem) -> None:
         self._s.state.outbox[item.outbox_id] = item
 
     async def list_for_load(self, load_id: str) -> list[OutboxItem]:
         items = [i for i in self._s.state.outbox.values() if i.load_id == load_id]
-        return sorted(items, key=lambda i: (i.created_at, i.outbox_id))
+        return sorted(items, key=lambda i: (i.created_at, _id_key(i.outbox_id)))
 
 
 class MemoryRunRepository:
@@ -194,11 +201,11 @@ class MemoryRunRepository:
     async def for_event(self, event_id: str) -> RunRecord | None:
         matching = [r for r in self._s.state.runs.values() if r.event_id == event_id]
         # The last of the event's runs in `list_for_load` order, ties included.
-        return max(matching, key=lambda r: (r.started_at, r.run_id)) if matching else None
+        return max(matching, key=lambda r: (r.started_at, _id_key(r.run_id))) if matching else None
 
     async def list_for_load(self, load_id: str) -> list[RunRecord]:
         items = [r for r in self._s.state.runs.values() if r.load_id == load_id]
-        return sorted(items, key=lambda r: (r.started_at, r.run_id))
+        return sorted(items, key=lambda r: (r.started_at, _id_key(r.run_id)))
 
 
 class MemoryEventQueue:

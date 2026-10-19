@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from freight_agent.domain.actions import Plan, Purpose
 from freight_agent.domain.intents import GateDecision
-from freight_agent.domain.load import Channel, DelayRisk
+from freight_agent.domain.load import Channel, DelayRisk, Stage
 from freight_agent.domain.obligations import ObligationKind, ObligationStatus
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.runs import RunStatus
@@ -72,6 +72,7 @@ class ActionMatcher(_Spec):
     purpose: Purpose | None = Field(
         default=None, description="Why an SMS or email was sent (payload purpose)"
     )
+    stage: Stage | None = Field(default=None, description="The new stage of a stage_update")
     count: int | None = Field(
         default=None, description="Exact number of matches; default at least 1"
     )

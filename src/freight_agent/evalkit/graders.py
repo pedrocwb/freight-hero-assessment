@@ -286,6 +286,8 @@ def _matches(matcher: ActionMatcher, pattern: re.Pattern[str] | None, item: Outb
         return False
     if matcher.purpose is not None and item.payload.get("purpose") != matcher.purpose.value:
         return False
+    if matcher.stage is not None and item.payload.get("stage") != matcher.stage.value:
+        return False
     return matcher.urgent is None or item.payload.get("urgent") == matcher.urgent
 
 
@@ -335,6 +337,8 @@ def _describe_matcher(matcher: ActionMatcher) -> str:
         parts.append("urgent" if matcher.urgent else "not urgent")
     if matcher.purpose is not None:
         parts.append(f"with purpose {matcher.purpose.value}")
+    if matcher.stage is not None:
+        parts.append(f"to stage {matcher.stage.value}")
     return " ".join(parts)
 
 
