@@ -37,6 +37,8 @@ class ValidationConfig(DomainModel):
     sms_max_per_window: int = 3
     sms_window_minutes: int = 60
     deferral: DeferralPolicy = DeferralPolicy()
+    # A safety net over every SOP: the SOP still sets the real number of requests per client.
+    max_eta_attempts: int = 2
 
 
 class ValidationContext(DomainModel):
