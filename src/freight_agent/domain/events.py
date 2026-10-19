@@ -16,6 +16,19 @@ class EventType(StrEnum):
     TIMER_DUE = "timer_due"
     ATTACHMENT_RECEIVED = "attachment_received"
     HERO_UPDATE = "hero_update"
+    AGENT_ACTION = "agent_action"  # the agent's own action, logged as memory; never starts a run
+
+
+# Event types that are queued and start a run.
+RUN_TRIGGERS = frozenset(
+    {
+        EventType.INBOUND_MESSAGE,
+        EventType.RISK_CHANGED,
+        EventType.TIMER_DUE,
+        EventType.ATTACHMENT_RECEIVED,
+        EventType.HERO_UPDATE,
+    }
+)
 
 
 class Direction(StrEnum):
@@ -39,6 +52,8 @@ class Event(DomainModel):
     `data` carries type-specific fields:
     - RISK_CHANGED: {"previous": "low", "current": "high"}
     - TIMER_DUE: {"timer_id": "...", "obligation_id": "...", "kind": "eta_request"}
+    - AGENT_ACTION: {"kind": "<outbox kind>", "payload": {...}, "run_id": "...",
+      "outbox_id": "..."}; direction is OUTBOUND
     """
 
     event_id: str

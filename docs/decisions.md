@@ -134,7 +134,18 @@ The executor applies approved actions in plan order, inside the run's unit of wo
 | `close_obligation` | Close the open obligation of that kind with the status; every pending timer of it becomes `cancelled`. |
 
 Outbox `idempotency_key` = `{event_id}:{index}`, with `index` the action's position in the
-approved list. Outbox `payload` keys, used by the dispatcher and by the eval graders:
+approved list.
+
+**The agent's own actions are memory.** For every outbox item, the executor also appends
+an `agent_action` event to the event log, in the same unit of work:
+`event_id = act:{idempotency_key}`, `direction = outbound`, `occurred_at = now`,
+`body` = the text (SMS, Slack, TMS note), the email body, or the Hero task title and
+description, and `data = {"kind", "payload", "run_id", "outbox_id"}`. Channel by kind:
+`sms` → `sms`, `email` → `email`, `broker_slack` → `slack`, `hero_task` and
+`internal_slack` → `hero`, `tms_note` and `stage_update` → `system`. These events are never
+queued (`domain.events.RUN_TRIGGERS`). The context loader reads them back: they are part of
+the recent events the model sees, and `recent_outbound` (for rate limits) is built from the
+`sms`, `email` and `slack` ones inside the window. Outbox `payload` keys, used by the dispatcher and by the eval graders:
 
 | Kind | Payload |
 |---|---|
