@@ -362,7 +362,11 @@ class AgentRuntime:
     async def _fail(self, attempt: _Attempt, exc: Exception) -> _Finished:
         error = f"{type(exc).__name__}: {exc}"
         logger.warning(
-            "run %s failed on event %s: %s", attempt.run_id, attempt.event.event_id, error
+            "run %s failed on event %s: %s",
+            attempt.run_id,
+            attempt.event.event_id,
+            error,
+            exc_info=exc,
         )
         record = self._record(attempt, Verdict(status=RunStatus.FAILED, error=error))
         event_id = attempt.event.event_id
