@@ -281,11 +281,14 @@ class _View:
         return f"{self.clock(moment)} ({self.relative(moment)})"
 
     def person(self, contact_id: str | None) -> str:
+        """A contact's id comes from the load metadata. Any other id is whatever the outside
+        world sent, so it is quoted like message text."""
         if contact_id is None:
             return "unknown sender"
         contact = self.ctx.load.contact(contact_id)
-        role = contact.role.value if contact is not None else "not a contact of this load"
-        return f"{contact_id} ({role})"
+        if contact is None:
+            return f"{_quote(contact_id)} (not a contact of this load)"
+        return f"{contact_id} ({contact.role.value})"
 
 
 # Decide prompt blocks.
@@ -411,9 +414,18 @@ def _active_timer(view: _View, obligation: Obligation) -> str:
     if firing is not None and firing.timer_id == timer_id:
         return f"follow-up timer due {view.when(firing.due_at)}, firing now (this event)"
     timer = next((t for t in view.ctx.pending_timers if t.timer_id == timer_id), None)
-    if timer is None:
-        return "no pending follow-up timer"
-    return f"follow-up timer due {view.when(timer.due_at)}"
+    if timer is not None:
+        return f"follow-up timer due {view.when(timer.due_at)}"
+    # Not pending: the timer has fired. Events of a load run in order, so if its timer_due
+    # event is not in the history yet, it waits behind this event: a new timer now would
+    # make that follow-up stale and push the SOP back by a whole wait.
+    ran = next((e for e in view.ctx.recent_events if e.event_id == f"timer:{timer_id}"), None)
+    if ran is None:
+        return "follow-up due now: it runs right after this event; do not schedule another"
+    return (
+        f"follow-up timer fired at {view.clock(ran.occurred_at)} and that run is over; "
+        "no follow-up timer"
+    )
 
 
 def _timers_block(view: _View) -> str:
@@ -463,10 +475,7 @@ def _event_block(view: _View) -> str:
             lines.append(f"text: {_quote(event.body)}")
             if event.attachments:
                 lines.append("attachments (read one with read_document):")
-                lines.extend(
-                    f"- {a.attachment_id}: {a.filename} ({a.content_type})"
-                    for a in event.attachments
-                )
+                lines.extend(f"- {_attachment(a)}" for a in event.attachments)
             else:
                 lines.append("attachments: none")
     return "\n".join(lines)
@@ -553,7 +562,21 @@ def _kind_of(event: Event) -> str:
 def _attachments_inline(attachments: Sequence[Attachment]) -> str:
     if not attachments:
         return "none"
-    return ", ".join(f"{a.filename} ({a.content_type}, id {a.attachment_id})" for a in attachments)
+    return ", ".join(_attachment(a) for a in attachments)
+
+
+def _attachment(attachment: Attachment) -> str:
+    """As a JSON object: the filename and the type are chosen by the sender, like message
+    text, and the id comes from outside too. The storage reference stays out of the
+    prompt; read_document returns it."""
+    return json.dumps(
+        {
+            "id": attachment.attachment_id,
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _quote(text: str, limit: int | None = None) -> str:
