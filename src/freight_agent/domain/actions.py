@@ -110,7 +110,20 @@ OUTBOUND_TYPES = frozenset({"send_sms", "send_email", "post_broker_slack"})
 
 
 class Plan(DomainModel):
-    """Structured output of the decide model. An empty plan is a valid no-op."""
+    """Structured output of the decide model. An empty plan is a valid no-op.
 
-    actions: tuple[Action, ...] = ()
-    rationale: str = ""
+    The rationale comes first: small models fill fields in schema order, and given the
+    actions first they returned an empty list, then a rationale naming the right actions.
+    """
+
+    rationale: str = Field(
+        default="",
+        description=(
+            "Write this before the actions: the SOP section and the step that apply, and "
+            "the actions that step needs now (or why none)."
+        ),
+    )
+    actions: tuple[Action, ...] = Field(
+        default=(),
+        description="Every action the rationale names, in order. Empty only when none.",
+    )

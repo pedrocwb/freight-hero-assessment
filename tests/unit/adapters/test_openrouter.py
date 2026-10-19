@@ -259,6 +259,18 @@ async def test_the_answer_tool_is_portable_across_providers() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("flat", [False, True])
+async def test_the_plan_asks_for_the_rationale_before_the_actions(flat: bool) -> None:
+    """Small models wrote "send the driver an SMS" in the rationale after an empty action
+    list: the reasoning comes first, then the actions it names."""
+    params = answer_tool(Plan, flatten_unions=flat)["function"]["parameters"]
+
+    assert list(params["properties"]) == ["rationale", "actions"]
+    assert "before" in params["properties"]["rationale"]["description"]
+    assert "rationale" in params["properties"]["actions"]["description"]
+
+
+@pytest.mark.unit
 async def test_a_flat_answer_tool_has_no_union_at_all() -> None:
     """No `anyOf` either: Gemini through OpenRouter drops a union under `items`, and the
     model then sends `actions: []` whatever its rationale says."""
