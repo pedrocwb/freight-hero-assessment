@@ -1,0 +1,83 @@
+# C3 (vague): "soon" is not an ETA. The request stays open and the follow-up still runs.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
+#                  follow-up timer T1 due 07:31.
+#   step 1  07:20  driver SMS "on my way, there soon".
+#           07:21  run: gate -> eta_provided (the gate leaves "is it precise enough?" to the
+#                  ETA procedure), decide. eta_received: "soon" and "on my way" give no
+#                  time, so send nothing, write nothing, leave the request open. Empty
+#                  plan: status noop. The ledger and T1 are unchanged.
+#   step 2  07:31  T1 fires (zero latency): intent eta_follow_up_due from code, decide
+#                  only. Northline, after 1 ETA request: SMS the driver again (attempts 2)
+#                  and follow up in 30 minutes (timer due 08:01).
+id: c3_vague_eta
+title: A vague answer ("soon") keeps the ETA request open and the follow-up runs
+suite: core
+tags: [regression, sop:delay_risk_high, sop:eta_received]
+description: >
+  The agent must not close the request on an answer with no time in it. Nothing is sent
+  or written at 07:21, and the 07:31 follow-up still asks again.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+
+  - at: "07:20"
+    note: A vague reply. Not an ETA; send nothing and write nothing.
+    message: {channel: sms, sender: drv_20931, body: "on my way, there soon"}
+    script:
+      gate:
+        - {intent: eta_provided, act: true, reason: A vague reply to our ETA request; the ETA procedure judges it.}
+      decide:
+        - actions: []
+          rationale: eta_received, "soon" gives no time, so it is not an ETA; send nothing, write nothing and keep the request open for the 07:31 follow-up.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+
+  - at: "07:31"
+    note: The follow-up timer fires as planned; second ETA request.
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Following up from Northline Logistics. What time will you arrive at the Riverbend plant pickup?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (Northline), after 1 ETA request and no ETA, SMS the driver again and follow up in 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 2}
+      timers: {pending: 1, due_at: "08:01"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}

@@ -1,0 +1,54 @@
+# D4: a situation no SOP covers. The driver asks who pays a lumper in cash. No section
+# says who pays lumpers, and the load details do not say either, so the agent must not
+# improvise an answer: it hands the question to a Hero.
+#
+# Expected timeline (Client A, load 481207 at_delivery, 2026-10-14, America/Los_Angeles):
+#   step 0  09:40  driver SMS "lumper wants cash to unload, who pays?".
+#           09:41  run: gate -> question (it asks us something), decide.
+#                  driver_questions: the answer is not in the load details, so do not
+#                  guess and do not reply with a promise; create a Hero task with the
+#                  question, who asked and what they need. escalation lists questions
+#                  about pay as Hero work, and communication_rules forbids promising a
+#                  payment. One Hero task; no SMS may say that anyone will pay.
+#
+# Live note: a gate that reads the message as `other` reaches no section with an
+# explicit intent, and decisions.md escalates the run to a Hero ("no SOP for this
+# situation") without a decide call. Both paths end in one Hero task, so the
+# expectations hold for both; run_status and llm_calls differ and are not asserted.
+id: d4_lumper_no_sop
+title: A lumper payment question no SOP answers goes to a Hero, with no promise
+suite: core
+tags: [capability, sop:driver_questions, sop:escalation, sop:communication_rules]
+description: >
+  The agent must know what it does not know. Lumper payment is not in any SOP or in the
+  load details; the right action is a Hero task, and the driver must not be told that
+  anyone will pay.
+load: fixtures/load_481207.json
+load_overrides:
+  stage: at_delivery
+date: 2026-10-14
+start: "09:30"
+steps:
+  - at: "09:40"
+    note: The driver is at the receiver and the lumper asks for cash.
+    message: {channel: sms, sender: drv_20931, body: "lumper wants cash to unload, who pays?"}
+    script:
+      gate:
+        - {intent: question, act: true, reason: The driver asks who pays the lumper at the receiver.}
+      decide:
+        - actions:
+            - type: create_hero_task
+              title: Tell the driver who pays the lumper at Valley DC
+              description: "Load 481207, delivery at Valley DC (Reno). At 09:40 the driver said by SMS that the lumper wants cash to unload and asked who pays. The SOP and the load details do not cover lumper fees, and nothing was answered yet. Confirm with Northline Logistics who pays, then tell the driver."
+              urgent: true
+          rationale: driver_questions, the load details do not say who pays the lumper, so create a Hero task and do not guess or promise.
+    expect:
+      actions:
+        - {kind: hero_task, count: 1}
+      obligations:
+        eta_request: null
+    forbid:
+      - {kind: sms, regex: '\b(will|''ll|going to)\s+(be\s+)?(pay|cover|reimburs)'}
+      - {kind: sms, regex: '\bgo ahead\b[^.?!]{0,20}\bpay'}
+      - {kind: sms, regex: '\b(approved|authori[sz]ed)\b'}
+      - {kind: email}

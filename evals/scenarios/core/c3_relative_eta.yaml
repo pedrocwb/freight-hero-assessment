@@ -1,0 +1,76 @@
+# C3: a relative ETA ("30 mins") becomes a local clock time counted from the message time.
+#
+# Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
+#   step 0  07:00  ping, risk low -> high.
+#           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
+#                  follow-up timer T1 due 07:31.
+#   step 1  07:20  driver SMS "30 mins".
+#           07:21  run (60 s latency): gate -> eta_provided, decide. eta_received: a
+#                  duration is added to the time of the message, so the TMS note says
+#                  07:50 (07:20 + 30 min). 07:51, the processing time plus 30, would be
+#                  wrong. Close eta_request as satisfied, send no reply. Closing cancels T1.
+#   step 2  07:31  nothing fires: no run, no reminder SMS.
+id: c3_relative_eta
+title: A relative ETA is converted from the message time
+suite: core
+tags: [capability, sop:delay_risk_high, sop:eta_received]
+description: >
+  The driver answers "30 mins". The TMS note must hold the clock time 07:50, counted from
+  when the driver wrote, not from when the agent ran. Time arithmetic is a known weak
+  spot of small models, so this starts as a capability scenario.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    note: Risk goes high; the agent asks the driver for the ETA at 07:01.
+    ping: {delay_risk: high}
+    script:
+      decide:
+        - actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
+            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
+          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+
+  - at: "07:20"
+    note: The driver answers with a duration; the run happens at 07:21.
+    message: {channel: sms, sender: drv_20931, body: "30 mins"}
+    script:
+      gate:
+        - {intent: eta_provided, act: true, reason: The driver gives a duration until arrival in reply to our ETA request.}
+      decide:
+        - actions:
+            - {type: close_obligation, kind: eta_request, status: satisfied}
+            - {type: write_tms_note, text: "ETA 07:50 at the Riverbend plant pickup (driver, by SMS at 07:20: 30 mins)."}
+          rationale: eta_received, a duration counts from the message time, 07:20 plus 30 minutes is 07:50; close the request and send no reply.
+    expect:
+      actions:
+        - {kind: tms_note, regex: '\b0?7:50\b', count: 1}
+      obligations:
+        eta_request: {status: satisfied, attempts: 1}
+      timers: {pending: 0}
+    forbid:
+      - {kind: tms_note, regex: '\b0?7:51\b'}
+      - {kind: sms}
+      - {kind: hero_task}
+
+  - at: "07:31"
+    note: The cancelled timer never fires.
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: satisfied, attempts: 1}
+      timers: {pending: 0}
+      runs: 0
+      llm_calls: 0
