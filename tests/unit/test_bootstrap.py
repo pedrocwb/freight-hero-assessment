@@ -3,6 +3,7 @@ where a test sets a fake one."""
 
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -414,6 +415,34 @@ def test_langsmith_traces_when_tracing_is_on_and_the_key_is_set(tmp_path: Path) 
     # Building it reaches no network: the SDK client is created on the first export.
     assert isinstance(tracer, LangSmithTracer)
     assert tracer._project == "freight-evals"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.unit
+def test_tracing_on_also_switches_on_langgraph_and_langchain_tracing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT"):
+        monkeypatch.delenv(name, raising=False)
+    settings = _settings(
+        tmp_path, langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY, langsmith_project="p"
+    )
+
+    build_tracer(settings)
+
+    assert os.environ["LANGSMITH_TRACING"] == "true"
+    assert os.environ["LANGSMITH_API_KEY"] == LANGSMITH_KEY
+    assert os.environ["LANGSMITH_PROJECT"] == "p"
+
+
+@pytest.mark.unit
+def test_tracing_off_leaves_the_environment_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+
+    build_tracer(_settings(tmp_path, langsmith_api_key=LANGSMITH_KEY))
+
+    assert "LANGSMITH_TRACING" not in os.environ
 
 
 @pytest.mark.unit

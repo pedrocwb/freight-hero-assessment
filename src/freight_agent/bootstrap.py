@@ -17,6 +17,7 @@ warning that names no secret.
 
 import importlib
 import logging
+import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -208,11 +209,25 @@ def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = 
     if not is_set(key):
         logger.warning("LANGSMITH_TRACING is on but LANGSMITH_API_KEY is not set: no tracing")
         return NullTracer()
+    enable_native_tracing(settings)
     return LangSmithTracer(
         langsmith_client_factory(key.get_secret_value()),
         project_name=settings.langsmith_project,
         sop_version=sop_version,
     )
+
+
+def enable_native_tracing(settings: Settings) -> None:
+    """Let LangGraph and LangChain trace too: each graph node and each model call, with
+    its prompt, nested in LangSmith. They read the process environment, and `Settings`
+    may have read the key from `.env`, so the switch is copied there. A value already in
+    the environment wins."""
+    key = settings.langsmith_api_key
+    if not is_set(key):
+        return
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ.setdefault("LANGSMITH_API_KEY", key.get_secret_value())
+    os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
 
 
 # --- runtime -------------------------------------------------------------------
