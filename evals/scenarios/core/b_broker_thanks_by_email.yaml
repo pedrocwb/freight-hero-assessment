@@ -1,0 +1,44 @@
+# Scenario B5: the broker writes "Thanks!" in the load's main email thread (load 481207,
+# Client A).
+#
+# When not to act, on another channel and from another role: the broker is our client
+# and is in the thread. A thank-you needs no reply, no note and no task, and the agent
+# must not answer an email just because it arrived.
+#
+# Timing (docs/decisions.md, "Eval timing"): the run of an injected event happens 60 s
+# after it. Times are America/Los_Angeles, 2026-10-13.
+#
+# Step 0, 07:05. Email from the broker brk_0087 (a contact of the load, so the prefilter
+#   lets it through): "Thanks!". Ledger: nothing open, no timers.
+#   07:06 run 1: noop, 1 model call (gate: acknowledgement, act false). The run ends at
+#   the gate: no SOP resolution, no decide, no outbox item.
+#   After: still no obligation and no timer.
+
+id: b_broker_thanks_by_email
+title: "B5: the broker says thanks by email, so the agent does nothing"
+suite: core
+tags: [regression, sop:acknowledgements]
+description: >-
+  A thank-you from the broker in the main email thread ends at the gate with no action and
+  one model call.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+
+steps:
+  - at: "07:05"
+    note: "B5: the broker's \"Thanks!\" by email; the gate ends the run"
+    message:
+      channel: email
+      sender: brk_0087
+      body: "Thanks!"
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: null
+      timers: {pending: 0}
+      run_status: [noop]
+      llm_calls: 1
+    script:
+      gate:
+        - {intent: acknowledgement, act: false, reason: "The broker only says thanks; nothing is asked."}

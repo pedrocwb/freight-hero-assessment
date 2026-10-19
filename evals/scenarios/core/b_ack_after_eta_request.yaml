@@ -1,0 +1,108 @@
+# Scenario B2: the driver answers the ETA request with "ok" (load 481207, Client A).
+#
+# The adversarial case of when not to act. "ok" right after "What time will you arrive?"
+# looks like an answer, but it is not an ETA: the request must stay open, keep its one
+# attempt and keep its 07:31 follow-up. Closing it as satisfied, asking again now, or
+# moving the timer would all be wrong. The 07:31 step proves the follow-up still happens.
+#
+# Timing (docs/decisions.md, "Eval timing"): the run of an injected event happens 60 s
+# after it; timers fire with zero latency. Times are America/Los_Angeles, 2026-10-13.
+# Only inbound messages call the gate model.
+#
+# Step 0, 07:00. Ping, delay risk low -> high (intent delay_risk_high, from code).
+#   07:01 run 1: acted, 1 model call (decide).
+#   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
+#   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
+#
+# Step 1, 07:05. SMS from the driver: "ok".
+#   07:06 run 2: noop. The script's gate says acknowledgement, act false, so the run ends
+#   at the gate with 1 model call. The model-call count is not asserted here: with an
+#   ETA request open, a gate that lets decide look ("when unsure, act is true") is also
+#   correct, as long as decide returns an empty plan; the run is noop either way.
+#   After: unchanged. eta_request open, attempts 1. Pending timers: T1 at 07:31.
+#
+# Step 2, 07:31. No injection: T1 fires.
+#   07:31 run 3 (timer_due, eta_follow_up_due): acted, 1 model call (decide).
+#   The ledger says attempts 1 and no ETA arrived ("ok" is not one): the second request.
+#   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
+#   After: eta_request open, attempts 2. Pending timers: T2 at 08:01.
+
+id: b_ack_after_eta_request
+title: "B2: the driver says ok to the ETA request, so nothing changes and the follow-up still runs"
+suite: core
+tags: [regression, sop:acknowledgements, sop:delay_risk_high]
+description: >-
+  "ok" after the ETA request is an acknowledgement, not an ETA: no action, the request
+  stays open with one attempt and its 07:31 follow-up, which then asks again.
+load: fixtures/load_481207.json
+date: 2026-10-13
+start: "06:55"
+
+steps:
+  - at: "07:00"
+    note: "The risk goes high; at 07:01 the ETA request and a 30-minute timer"
+    ping: {delay_risk: high}
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+      llm_calls: 1
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), first step: text the driver for the ETA and follow
+            up in 30 minutes.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: "Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?"
+            - type: schedule_timer
+              kind: eta_request
+              due_in_minutes: 30
+
+  - at: "07:05"
+    note: "B2: \"ok\" is not an ETA; nothing is sent and the ledger does not change"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: "ok"
+    expect:
+      no_actions: true
+      obligations:
+        eta_request: {status: open, attempts: 1}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [noop]
+    script:
+      gate:
+        - {intent: acknowledgement, act: false, reason: "The driver only says ok; it is not an ETA."}
+
+  - at: "07:31"
+    note: "The follow-up still happens: no ETA after 30 minutes, so the second request"
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, count: 1}
+      obligations:
+        eta_request: {status: open, attempts: 2}
+      timers: {pending: 1, due_at: "08:01"}
+      run_status: [acted]
+      llm_calls: 1
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
+    script:
+      decide:
+        - rationale: >-
+            delay_risk_high (Northline), second step: the driver said ok but gave no ETA in
+            30 minutes, so text the driver again and wait 30 more minutes.
+          actions:
+            - type: send_sms
+              contact_id: drv_20931
+              purpose: eta_request
+              text: "Following up from Northline Logistics: what time will you arrive at the Riverbend plant pickup?"
+            - type: schedule_timer
+              kind: eta_request
+              due_in_minutes: 30
