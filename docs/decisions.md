@@ -186,7 +186,7 @@ the recent events the model sees, and `recent_outbound` (for rate limits) is bui
 |---|---|
 | Message | the integration layer's `message_id` |
 | Risk change | `risk:{ping_id}` |
-| Timer due | `timer:{timer_id}` |
+| Timer due | `timer:{timer_id}`; `occurred_at` is the firing time and `data.due_at` the due time |
 
 Ids for runs, obligations, timers and outbox items come from `IdGenerator` with the
 prefixes `run`, `obl`, `timer`, `out`.

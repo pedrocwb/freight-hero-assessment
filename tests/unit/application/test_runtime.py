@@ -405,8 +405,14 @@ async def test_fire_due_timers_turns_due_timers_into_events(load: Load) -> None:
     assert [t.status for t in snapshot.timers] == [TimerStatus.FIRED]
     event = next(e for e in snapshot.events if e.type is EventType.TIMER_DUE)
     assert event.event_id == "timer:timer_1"
-    assert (event.channel, event.occurred_at) == (Channel.SYSTEM, at(7, 31))
-    assert event.data == {"timer_id": "timer_1", "obligation_id": "obl_1", "kind": "eta_request"}
+    # Stamped when it fired (07:40); the due time stays in the data, for timer lag.
+    assert (event.channel, event.occurred_at) == (Channel.SYSTEM, at(7, 40))
+    assert event.data == {
+        "timer_id": "timer_1",
+        "obligation_id": "obl_1",
+        "due_at": at(7, 31).isoformat(),
+        "kind": "eta_request",
+    }
 
 
 async def test_a_timer_event_already_logged_is_not_queued_again(load: Load) -> None:

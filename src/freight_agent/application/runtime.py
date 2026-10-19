@@ -235,28 +235,32 @@ class AgentRuntime:
         A fired timer is marked FIRED in the same unit of work, so it fires once.
         Whether it may still act is the prefilter's question (a stale timer).
         """
+        now = self._deps.clock.now()
         async with self._uow() as uow:
-            due = await uow.timers.due(self._deps.clock.now())
+            due = await uow.timers.due(now)
             for timer in due:
                 await uow.timers.save(timer.mark(TimerStatus.FIRED))
-                event = await self._timer_event(uow, timer)
+                event = await self._timer_event(uow, timer, fired_at=now)
                 if await uow.events.append(event):
                     await uow.queue.enqueue(event)
             await uow.commit()
         return len(due)
 
     @staticmethod
-    async def _timer_event(uow: UnitOfWork, timer: Timer) -> Event:
+    async def _timer_event(uow: UnitOfWork, timer: Timer, *, fired_at: datetime) -> Event:
+        """Stamped with the firing time; `data.due_at` keeps the due time, so timer lag
+        (fired minus due) is measurable."""
         obligation = await uow.obligations.get(timer.obligation_id)
         return Event(
             event_id=f"timer:{timer.timer_id}",
             load_id=timer.load_id,
             type=EventType.TIMER_DUE,
-            occurred_at=timer.due_at,
+            occurred_at=fired_at,
             channel=Channel.SYSTEM,
             data={
                 "timer_id": timer.timer_id,
                 "obligation_id": timer.obligation_id,
+                "due_at": timer.due_at.isoformat(),
                 "kind": obligation.kind.value if obligation is not None else None,
             },
         )
