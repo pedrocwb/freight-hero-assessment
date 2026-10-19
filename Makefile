@@ -32,15 +32,14 @@ arch:
 cov:
 	uv run pytest -m "not integration and not eval_live" --cov --cov-report=term-missing
 
-# Scripted mode: no network and no model. `agent eval run` lands with card EVK-3.
+# Scripted mode: no network and no model.
 eval:
 	uv run agent eval run --suite core --mode scripted
 
-# `agent sop lint` lands with card EVK-3.
 sop-lint:
 	uv run agent sop lint
 
 # The gates of .github/workflows/ci.yml, in the same order.
-ci: lint typecheck arch cov eval
+ci: lint typecheck arch cov eval sop-lint
 
 all: lint typecheck arch cov

@@ -36,6 +36,7 @@ class RunRecord(DomainModel):
     status: RunStatus
     gate: GateDecision | None = None
     sop_section_ids: tuple[str, ...] = ()
+    sop_version: str | None = None  # content hash of the SOP files the run read
     plan: Plan | None = None
     violations: tuple[Violation, ...] = ()
     usage: tuple[Usage, ...] = ()

@@ -28,7 +28,7 @@ from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, Sche
 
 CassetteMode = Literal["replay", "record"]
 
-RECORD_COMMAND = "uv run agent eval run --mode live --record"
+RECORD_COMMAND = "uv run agent eval run --mode record"
 FORMAT_VERSION = 1  # bump when the file layout changes, so old files read as corrupt, not wrong
 
 

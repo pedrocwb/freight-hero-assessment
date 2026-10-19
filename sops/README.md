@@ -134,9 +134,6 @@ From the project folder, run:
 uv run agent sop lint
 ```
 
-This command is being added. Until it is available, ask the engineering team to run the
-check for you.
-
 The check lists every problem with the file name and how to fix it: a missing `id`, an
 unknown intent or stage, a header that cannot be read, two files with the same id in one
 folder, an `extend` with nothing to extend. It also warns when no eval scenario covers a

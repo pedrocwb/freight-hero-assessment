@@ -2,11 +2,11 @@
 # Actions tab, because every run spends money. The results (transcripts, pass^k and cost
 # per scenario) are uploaded as an artifact.
 #
-# The command lands with card EVK-3:
-#   uv run agent eval run --suite core --mode live --k 3 --model-set cheap --cost-cap-usd 2
-# `--k` runs each scenario k times (pass^k needs every trial to pass), `--model-set` names a
-# set in config/models.yaml and `--cost-cap-usd` aborts the run once the spend passes it.
-# If EVK-3 names a flag differently, update the run step below.
+# The command:
+#   uv run agent eval run --suite core --mode live --k 3 --model-set default --cost-cap-usd 2
+# `--k` runs each scenario k times (pass^k needs every trial to pass). `--model-set default`
+# is config/models.yaml; any other NAME is config/models.NAME.yaml (a bake-off candidate
+# set, for example). `--cost-cap-usd` aborts the run once the spend passes it (exit 3).
 name: Evals (live)
 
 on:
@@ -21,9 +21,9 @@ on:
         type: number
         default: 3
       model_set:
-        description: Model set from config/models.yaml
+        description: "Model set: default = config/models.yaml, NAME = config/models.NAME.yaml"
         type: string
-        default: cheap
+        default: default
       cost_cap_usd:
         description: Abort once the run has spent this many USD
         type: string

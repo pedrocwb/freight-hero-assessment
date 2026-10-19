@@ -81,7 +81,11 @@ def resolve_sop_node(sop: SopRepository) -> Node:
             stage=load.stage,
         )
         visible = effective_sections(sections, client_id=load.broker_id, load_types=load.load_types)
-        update: RunUpdate = {"sop": resolved, "visible_sections": visible}
+        update: RunUpdate = {
+            "sop": resolved,
+            "sop_version": sop.version(),
+            "visible_sections": visible,
+        }
         if not any(s.intents for s in resolved.sections):
             update["verdict"] = Verdict.escalated(escalation.sop_gap(ctx, intent))
         return update

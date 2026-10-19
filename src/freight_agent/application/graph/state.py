@@ -51,6 +51,7 @@ class RunState:
     prefilter: PrefilterResult | None = None
     gate: GateResult | None = None
     sop: ResolvedSop | None = None
+    sop_version: str | None = None
     visible_sections: tuple[ResolvedSection, ...] = ()  # back the read_sop_section tool
     plan: Plan | None = None
     validation: ValidationOutcome | None = None
@@ -76,6 +77,7 @@ class RunUpdate(TypedDict, total=False):
     prefilter: PrefilterResult | None
     gate: GateResult
     sop: ResolvedSop
+    sop_version: str
     visible_sections: tuple[ResolvedSection, ...]
     plan: Plan
     validation: ValidationOutcome

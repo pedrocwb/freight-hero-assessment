@@ -393,6 +393,7 @@ class AgentRuntime:
             status=verdict.status,
             gate=state.gate_decision if state else None,
             sop_section_ids=state.section_ids if state else (),
+            sop_version=state.sop_version if state else None,
             plan=state.plan if state else None,
             violations=state.violations if state else (),
             usage=state.usage if state else (),

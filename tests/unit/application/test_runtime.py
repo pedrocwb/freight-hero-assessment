@@ -470,3 +470,14 @@ async def test_tick_returns_every_run_and_delivers_the_outbox(load: Load) -> Non
     assert [o.kind for o in (await world.snapshot()).outbox] == [OutboxKind.SMS]
     assert len(world.sent("sms")) == 1
     assert await world.runtime.process_next() is None
+
+
+@pytest.mark.unit
+async def test_every_run_that_reads_the_sop_records_its_version(load: Load) -> None:
+    """An action can always be traced to the exact SOP text it followed."""
+    world = await World(load).start()
+
+    (run,) = await world.high_risk_at_seven()
+
+    assert run.sop_version == "test"
+    assert "delay_risk_high" in run.sop_section_ids
