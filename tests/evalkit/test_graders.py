@@ -863,3 +863,36 @@ def test_invariants_report_every_kind_of_failure_together() -> None:
         "invariant.budget.tokens",
         "invariant.budget.latency_ms",
     ]
+
+
+# --- expect.runs and purpose --------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_runs_zero_means_no_run_at_all() -> None:
+    spec = expect(runs=0)
+
+    assert grade(spec, observe()) == []
+    failures = grade(spec, observe(runs=[run(RunStatus.SKIPPED, skip_reason="stale_timer")]))
+    assert checks(failures) == ["expect.runs"]
+    assert "expected 0 run(s), got 1" in failures[0].message
+
+
+@pytest.mark.unit
+def test_runs_counts_exactly() -> None:
+    two = [run(RunStatus.ACTED), run(RunStatus.NOOP, run_id="run_2")]
+
+    assert grade(expect(runs=2), observe(runs=two)) == []
+    assert checks(grade(expect(runs=1), observe(runs=two))) == ["expect.runs"]
+
+
+@pytest.mark.unit
+def test_action_purpose_matches_the_payload_purpose() -> None:
+    reply = item(OutboxKind.SMS, contact_id=DRIVER, text="PO is 55821", purpose="reply")
+    eta = sms()
+
+    assert grade(step(forbid=[{"kind": "sms", "purpose": "eta_request"}]), observe(reply)) == []
+    failures = grade(step(forbid=[{"kind": "sms", "purpose": "eta_request"}]), observe(eta))
+    assert checks(failures) == ["forbid[0]"]
+    assert "with purpose eta_request" in failures[0].message
+    assert grade(expect(actions=[{"kind": "sms", "purpose": "reply"}]), observe(reply)) == []

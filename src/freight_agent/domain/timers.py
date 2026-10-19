@@ -1,6 +1,6 @@
 """Follow-up timers and the rules that make stale timers harmless."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from freight_agent.domain.base import DomainModel
@@ -39,7 +39,14 @@ def is_stale(timer: Timer, obligation: Obligation | None) -> bool:
 def follow_up_due_at(
     *, requested: datetime, deferred_until: datetime | None, grace: timedelta
 ) -> datetime:
-    """Never chase before the SOP cadence, and never before the contact's promise plus grace."""
+    """Never chase before the SOP cadence, and never before the contact's promise plus grace.
+
+    Works on UTC instants: Python adds and compares two times of the same zone by wall
+    clock, which is an hour off across a DST change. The result keeps its input's zone.
+    """
     if deferred_until is None:
         return requested
-    return max(requested, deferred_until + grace)
+    not_before = deferred_until.astimezone(UTC) + grace
+    if requested.astimezone(UTC) >= not_before:
+        return requested
+    return not_before.astimezone(deferred_until.tzinfo)

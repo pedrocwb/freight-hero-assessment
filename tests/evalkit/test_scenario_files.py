@@ -4,6 +4,7 @@ declares the SOP sections it covers."""
 from pathlib import Path
 
 import pytest
+import yaml
 
 from freight_agent.evalkit.spec import load_scenario
 
@@ -26,3 +27,16 @@ def test_scenario_ids_are_unique() -> None:
     ids = [load_scenario(p).id for p in FILES]
 
     assert len(ids) == len(set(ids))
+
+
+@pytest.mark.unit
+def test_a_repeated_key_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "dup.yaml"
+    path.write_text(
+        "id: x\ntitle: t\nsuite: core\nload: fixtures/load_481207.json\n"
+        "date: 2026-10-13\nstart: '07:00'\n"
+        "steps:\n  - at: '07:00'\n    expect:\n      runs: 0\n      runs: 1\n"
+    )
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'runs'"):
+        load_scenario(path)

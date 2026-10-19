@@ -34,7 +34,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from freight_agent.domain.actions import Plan
+from freight_agent.domain.actions import Plan, Purpose
 from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.load import Channel, DelayRisk
 from freight_agent.domain.obligations import ObligationKind, ObligationStatus
@@ -69,6 +69,9 @@ class ActionMatcher(_Spec):
     contains: tuple[str, ...] = Field(default=(), description="Case-insensitive substrings")
     regex: str | None = None
     urgent: bool | None = None
+    purpose: Purpose | None = Field(
+        default=None, description="Why an SMS or email was sent (payload purpose)"
+    )
     count: int | None = Field(
         default=None, description="Exact number of matches; default at least 1"
     )
@@ -108,6 +111,9 @@ class Expectation(_Spec):
     run_status: tuple[RunStatus, ...] = Field(default=(), description="Statuses of the step's runs")
     llm_calls: int | None = Field(
         default=None, description="Exact number of model calls in the step"
+    )
+    runs: int | None = Field(
+        default=None, description="Exact number of runs in the step; 0 means no run at all"
     )
 
 
@@ -159,6 +165,28 @@ class Scenario(_Spec):
         return self
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """A repeated key is an error: plain YAML keeps the last one and silently drops
+    the expectation written first."""
+
+
+def _mapping_without_duplicates(loader: yaml.SafeLoader, node: yaml.MappingNode) -> Any:
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)  # pyright: ignore[reportUnknownMemberType]
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r}", key_node.start_mark
+            )
+        seen.add(key)
+    return loader.construct_mapping(node)
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_without_duplicates
+)
+
+
 def load_scenario(path: Path) -> Scenario:
     with path.open(encoding="utf-8") as handle:
-        return Scenario.model_validate(yaml.safe_load(handle))
+        return Scenario.model_validate(yaml.load(handle, Loader=_StrictLoader))
