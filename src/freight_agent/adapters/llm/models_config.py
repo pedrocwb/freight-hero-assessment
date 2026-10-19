@@ -1,4 +1,4 @@
-"""Which model serves each role, what it costs, and the OpenRouter key.
+"""Which model serves each role and what it costs.
 
 `config/models.yaml` is the only place a model is chosen: switching a model is a change
 to that file. Each role names a primary model and an ordered fallback list. This adapter
@@ -8,14 +8,16 @@ serves one model per instance; walking the fallback list is the resilient wrappe
 Prices are USD per 1M tokens, copied from the public OpenRouter catalog. They are
 estimates for budgets and reports: the billed price depends on the endpoint OpenRouter
 routes to, which is why the evals can pin a provider.
+
+The OpenRouter key is not here: it is a secret of the app `Settings`
+(`freight_agent.settings`), which the composition root passes to the live models.
 """
 
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from freight_agent.ports.llm import ModelRole
 
@@ -134,22 +136,3 @@ def load_models_config(path: Path | str) -> ModelsConfig:
         return ModelsConfig.model_validate(raw)
     except ValidationError as exc:
         raise ValueError(f"{path}: {exc}") from exc
-
-
-class Settings(BaseSettings):
-    """Secrets for the live model, from the environment or `.env`.
-
-    The key is a `SecretStr`: it never shows in a repr, a log line or a dump. It is
-    optional here so scripted and replay runs load settings without one; a live model
-    asks for it with `require_openrouter_key`.
-    """
-
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
-    openrouter_api_key: SecretStr | None = None
-
-    def require_openrouter_key(self) -> SecretStr:
-        key = self.openrouter_api_key
-        if key is None or not key.get_secret_value().strip():
-            raise ValueError("OPENROUTER_API_KEY is not set (environment or .env)")
-        return key
