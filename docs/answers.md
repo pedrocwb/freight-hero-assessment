@@ -11,10 +11,10 @@ that is designed but not in the code.
 
 | Built on `main` | Not built yet |
 |---|---|
-| Domain rules (ledger, timers, ping filter, SOP merge, validator), the run graph and `AgentRuntime`, the in-memory store, SOP files and lint, the OpenRouter, cassette, resilient and scripted model adapters, the LangSmith tracer, operational metrics, the eval spec, runner and graders, 22 core scenarios | The composition root and the CLI commands (`agent eval run`, `agent sop lint`), the k-trial runner and reports, recorded cassettes, the Postgres adapter, the API and simulation platform, document extraction, the LLM judge |
+| Domain rules (ledger, timers, ping filter, SOP merge, validator), the run graph and `AgentRuntime` with a claim lease, the in-memory and Postgres stores (one contract suite), SOP files and lint, the OpenRouter, cassette, resilient, scripted and per-role models, the composition root, the LangSmith tracer, operational metrics, the eval harness (spec, runner, graders, k-trial suites, reports, negative control), 22 core scenarios, the `agent` CLI, the simulation platform (API and web UI), Docker compose, the live model bake-off | Document extraction, the LLM judge for wording, the always-on worker and scheduler, the per-client canary, a rolling summary of old events, a Telegram SMS channel |
 
-All 22 core scenarios pass in scripted mode through `evalkit/runner.py` and
-`evalkit/graders.py` (checked with a throwaway script; the command is not on `main` yet).
+`make eval` runs all 22 core scenarios in scripted mode; `evals/RESULTS.md` has the live
+rounds on real models (k = 3) that chose the models in `config/models.yaml`.
 
 ## 1. Agent architecture
 
@@ -171,10 +171,10 @@ guardrails hold whatever the text says.
 | Safeguard | State |
 |---|---|
 | Plain Markdown with six header settings; `sops/README.md` is the editor's guide. | Built |
-| Lint (`adapters/sop/lint.py`): bad header, unknown setting, intent or stage, a duplicate id, an `extend` with nothing to extend, and a warning for a section no scenario covers. A real message: "the setting \`intens\` is not known (did you mean \`intents\`?). Use only these settings: id, title, description, intents, stages, mode." `tests/unit/test_sop_seed.py` fails the build on a lint error. | Built; the `agent sop lint` command is **not built yet** |
+| Lint (`adapters/sop/lint.py`): bad header, unknown setting, intent or stage, a duplicate id, an `extend` with nothing to extend, and a warning for a section no scenario covers. A real message: "the setting \`intens\` is not known (did you mean \`intents\`?). Use only these settings: id, title, description, intents, stages, mode." `tests/unit/test_sop_seed.py` fails the build on a lint error. | Built: `uv run agent sop lint`, also a CI step |
 | Layers: a client change cannot touch the standard or another client. | Built |
-| Version: `FileSopRepository.version()` is a 12-character sha256 of every file; `LangSmithTracer` takes it as an option and adds it to each run's trace. | Built; storing it on the run record and pinning it per obligation (`Obligation.sop_version` exists) is **not built yet** |
-| Required evals: the whole suite, all clients, live mode (4.2). | Designed; the eval CLI is **not built yet** |
+| Version: `FileSopRepository.version()` is a 12-character sha256 of every file; every run record stores the version it read (`RunRecord.sop_version`) and the LangSmith trace carries it. | Built; pinning it per obligation (`Obligation.sop_version` exists) is **not built yet** |
+| Required evals: the whole suite, all clients, live mode (4.2): `uv run agent eval run --mode live --k 3`. | Built as a command; making it a required check before merge is a repository setting |
 | Review: a person who knows the client reads the change and the eval results. A standard-layer change reaches every client, so it needs a second approver. | Designed; today a pull request |
 | Canary per client: the new version serves a share of that client's new loads (by a hash of `load_id`); its escalation, no-op and block rates are compared with the old version; rollback points back. | **Not built yet** |
 | Guardrails in code (`domain/rules.py`): at most 2 ETA requests, an SMS rate limit, only the load's contacts on their channels, no contact details in outbound text. | Built |
@@ -207,9 +207,10 @@ log; open obligations and timers are rows in a ledger. `load_run_context`
 - **The ledger holds only facts** (`domain/obligations.py`), never a pointer into the
   SOP text, and the process keeps nothing between runs.
 
-**Not built yet:** a rolling summary of events older than the last 30, and the Postgres
-adapter. The in-memory store (`adapters/persistence/memory/store.py`) passes the same
-contract suite (`tests/contract/`).
+The Postgres adapter (`adapters/persistence/postgres/`) and the in-memory store pass the
+same contract suite (`tests/contract/`), and the 22 core scenarios leave the same state on
+both at every step (`tests/integration/test_postgres_scenarios.py`). **Not built yet:** a
+rolling summary of events older than the last 30.
 
 ### 3.2 At 07:13, how does the agent remember that the ETA request is still open?
 
@@ -287,9 +288,10 @@ Closing an obligation cancels its timers (`b_eta_received_cancels_follow_up`). "
 you in 5 minutes" at 07:30 replaces the 07:31 timer with one at 07:37, and the old
 timer's event is skipped as stale (`g1_deferral_stale_timer`).
 
-**Not built yet:** the always-on scheduler. In this repository `tick()` fires timers and
-the eval runner moves a `VirtualClock`; production would poll with
-`FOR UPDATE SKIP LOCKED` or use EventBridge Scheduler or Temporal timers.
+**Not built yet:** the always-on scheduler process. In this repository `tick()` fires
+timers (the platform and the eval runner call it on a `VirtualClock`); the Postgres
+adapter already claims due timers with `SKIP LOCKED`, so several workers can run it.
+Production would call it on a schedule, or use EventBridge Scheduler or Temporal timers.
 
 ## 4. Evals
 
@@ -314,9 +316,10 @@ outside the load's contacts.
 | live | `OpenRouterModel` behind `ResilientModel` | Releases and model changes: k = 3 trials, and a scenario passes only if all three pass (pass^3), because a customer sees every run |
 
 **Negative control.** A grader that never fails proves nothing: each grader check has a
-case where it must fail (`tests/evalkit/test_graders.py`), and the runner fails a step
-with an unused or missing script entry. **Not built yet:** a deliberately wrong agent
-that must fail the whole core suite.
+case where it must fail (`tests/evalkit/test_graders.py`), the runner fails a step with an
+unused or missing script entry, and `tests/evalkit/test_negative_control.py` runs the real
+core suite with deliberately wrong agents (an SMS for "ok", a third ETA request, an email
+to Client B's dispatcher, an ignored deferral) and asserts exactly which scenarios fail.
 
 **At run time:** the validator, `MUST_ACT` intents the gate cannot skip, the prefilter,
 escalation paths, and idempotent delivery.
@@ -327,9 +330,11 @@ load, timer lag, stalled obligations and dead letters, and `health_summary` give
 WARN or CRITICAL. A LangSmith trace per run (`adapters/observability/langsmith.py`)
 fails open.
 
-**Not built yet:** the k-trial runner and `agent eval run` (`.github/workflows/evals-live.yml`
-is ready for it), recorded cassettes, the LLM judge for wording, replay of logged loads,
-and turning Hero corrections into scenarios.
+`uv run agent eval run` runs k trials per scenario, reports pass@k and pass^k per
+scenario and tag, stops at a cost cap and writes a report with the git sha, SOP version,
+models, prompt hash and a comparison with a baseline (`evalkit/suite.py`,
+`evalkit/report.py`). **Not built yet:** the LLM judge for wording, replay of logged
+loads, and turning Hero corrections into scenarios.
 
 ### 4.2 A client changes its procedure. How do you make sure that other behavior does not break?
 
@@ -422,6 +427,8 @@ The 240-second deadline leaves 60 seconds for the queue wait and delivery. The s
 ceilings in `docs/architecture.html` ("Budgets") add up to about 76 seconds; they are
 targets until `Usage.latency_ms` gives measured values from live runs.
 
+A claim lease (`EventQueue.reclaim_expired`, `RuntimeConfig.claim_lease_s`) returns an
+event whose worker died mid-run to the queue, counted as a failed attempt.
 **Not built yet:** the worker process with autoscaling on queue age, an always-on
 delivery dispatcher (today `tick()` calls `dispatch_outbox`), and per-client concurrency
 limits.
@@ -435,10 +442,10 @@ about 7.5 million messages a month, about 10 per second in US business hours (22
 
 | Part | Today | At 10× |
 |---|---|---|
-| Queue | In-memory per-load FIFO | SQS FIFO with `MessageGroupId = load_id` (order per load, parallel across loads), or Temporal with one workflow per load; workers scale on queue age |
+| Queue | Per-load FIFO in memory or Postgres (`SKIP LOCKED` claims, one in flight per load) | SQS FIFO with `MessageGroupId = load_id` (order per load, parallel across loads), or Temporal with one workflow per load; workers scale on queue age |
 | Timers | Rows fired by `tick()` | EventBridge Scheduler or Temporal timers, or polling with `FOR UPDATE SKIP LOCKED` |
-| Pings | One transaction per ping; redeliveries caught in process (`_RecentPings`) | A stream partitioned by load keeps the tracker and last ping id; only transitions reach Postgres |
-| Postgres | Not built | Neon or RDS. The events table partitioned by month on `occurred_at`; closed loads archived to S3; a pooler; read replicas for the platform and metrics |
+| Pings | One transaction per ping; redeliveries caught by the ping ids kept with the tracker (`RiskTracker.recent_ping_ids`) | A stream partitioned by load keeps the tracker and last ping id; only transitions reach Postgres |
+| Postgres | Built (`adapters/persistence/postgres/`), works through Neon's pooler | Neon or RDS. The events table partitioned by month on `occurred_at`; closed loads archived to S3; a pooler; read replicas for the platform and metrics |
 | SOPs | Read from disk on every call (`adapters/sop/files.py`) | Each published version compiled once, cached by hash |
 | Models | About 5 million tokens per minute in business hours | About 50 million: higher rate limits or provisioned throughput, more provider families in the fallback chain, per-client limits, priority for risk and timer events |
 | Tracing | One trace per run, a bounded pool | Sampling (all escalations and failures, a share of the rest), batched export or self-hosting |
