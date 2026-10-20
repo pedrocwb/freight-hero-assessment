@@ -21,7 +21,12 @@ import typer
 from freight_agent.settings import LlmMode, Settings
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from freight_agent.evalkit.graders import Budget
+    from freight_agent.evalkit.langsmith_experiment import LangSmithExperiment
+    from freight_agent.evalkit.metadata import RunMetadata
+    from freight_agent.evalkit.spec import Scenario
     from freight_agent.evalkit.suite import ModelFactory
 
 app = typer.Typer(no_args_is_help=True, help="Freight load agent.", add_completion=False)
@@ -110,6 +115,15 @@ def eval_run(
         int | None,
         typer.Option(min=1, help="Fail a trial when one run's model calls take longer."),
     ] = None,
+    langsmith: Annotated[
+        bool,
+        typer.Option(
+            "--langsmith",
+            help="Record the run as a LangSmith experiment (live and record modes only): the "
+            "suite's scenarios as a dataset, one row per trial with its steps and model calls, "
+            "and the graders' verdicts as feedback. Needs LANGSMITH_API_KEY.",
+        ),
+    ] = False,
 ) -> None:
     """Run a suite, grade it, write results.json and report.md, and exit with the verdict.
 
@@ -132,6 +146,7 @@ def eval_run(
             baseline=compare,
             out=out,
             budget=_budget(max_tokens_per_run, max_latency_ms_per_run),
+            langsmith=langsmith,
         )
     except UsageProblem as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -152,6 +167,7 @@ def _run(
     baseline: Path | None,
     out: Path | None,
     budget: "Budget | None",
+    langsmith: bool = False,
 ) -> int:
     from freight_agent.adapters.sop.files import FileSopRepository
     from freight_agent.evalkit.metadata import collect_metadata
@@ -166,13 +182,21 @@ def _run(
     )
     from freight_agent.evalkit.suite import SuiteError, SuiteRunner, discover, select
 
+    if langsmith and mode not in ("live", "record"):
+        raise UsageProblem(
+            "--langsmith records live runs only: scripted and replay runs measure the code, "
+            "not the model (use --mode live)"
+        )
+    if langsmith and settings.langsmith_api_key is None:
+        raise UsageProblem("--langsmith needs LANGSMITH_API_KEY (environment or .env)")
     models_config = models_config_for(settings, model_set)
     # The flags win over the environment, and the metadata shows what actually ran.
     settings = settings.model_copy(update={"models_config": models_config, "llm_mode": mode})
     if not settings.sops_dir.is_dir():
         raise UsageProblem(f"the SOP folder {settings.sops_dir} does not exist (SOPS_DIR)")
     try:
-        scenarios = select(discover(settings.evals_dir, suite), tags=tags, ids=ids)
+        suite_scenarios = discover(settings.evals_dir, suite)
+        scenarios = select(suite_scenarios, tags=tags, ids=ids)
         before = read_baseline(baseline) if baseline is not None else None
     except (SuiteError, ReportError) as exc:
         raise UsageProblem(str(exc)) from exc
@@ -187,10 +211,23 @@ def _run(
         repo=Path.cwd(),
         settings=settings.describe(),
     )
+    experiment = (
+        _langsmith_experiment(settings, suite, suite_scenarios, metadata, k, cost_cap_usd)
+        if langsmith
+        else None
+    )
     runner = SuiteRunner(
-        evals_dir=settings.evals_dir, sop=sop, mode=mode, model_factory=factory, budget=budget
+        evals_dir=settings.evals_dir,
+        sop=sop,
+        mode=mode,
+        model_factory=factory,
+        budget=budget,
+        observer=experiment,
     )
     typer.echo(f"{suite}: {len(scenarios)} scenarios, mode {mode}, k={k}")
+    if experiment is not None:
+        linked = f", agent {settings.langsmith_project}" if experiment.linked_to_agent else ""
+        typer.echo(f"langsmith experiment: {experiment.name}{linked}")
     result = asyncio.run(
         runner.run(
             scenarios,
@@ -205,7 +242,50 @@ def _run(
     folder = write_run(result, out or settings.evals_dir / "results", comparison)
     typer.echo("")
     typer.echo(render_summary(result, comparison, report=folder / REPORT_FILE))
+    if experiment is not None:
+        url = experiment.finish(result)
+        typer.echo(f"langsmith: {experiment.name}" + (f"\n  {url}" if url else ""))
     return int(result.exit_code)
+
+
+def _langsmith_experiment(
+    settings: Settings,
+    suite: str,
+    scenarios: "Sequence[Scenario]",
+    metadata: "RunMetadata",
+    k: int,
+    cost_cap_usd: float,
+) -> "LangSmithExperiment":
+    """The experiment, created before the first trial: a live run never spends money for
+    an experiment LangSmith cannot store."""
+    import os
+
+    from langsmith import Client
+
+    from freight_agent.evalkit.langsmith_experiment import (
+        LangSmithExperiment,
+        LangSmithUnavailable,
+    )
+
+    key = settings.langsmith_api_key
+    assert key is not None  # checked with the other flags
+    client = Client(
+        api_key=key.get_secret_value(), api_url=os.environ.get("LANGSMITH_ENDPOINT") or None
+    )
+    experiment = LangSmithExperiment(
+        client,  # pyright: ignore[reportArgumentType]
+        suite=suite,
+        dataset_scenarios=scenarios,
+        metadata=metadata,
+        k=k,
+        cost_cap_usd=cost_cap_usd,
+        agent=settings.langsmith_project,  # the agent page of the tracing project
+    )
+    try:
+        experiment.start()
+    except LangSmithUnavailable as exc:
+        raise UsageProblem(f"LangSmith: {exc}; nothing was run") from exc
+    return experiment
 
 
 def models_config_for(settings: Settings, model_set: str) -> Path:

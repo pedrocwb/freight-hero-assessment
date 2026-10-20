@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, computed_field
 
 from freight_agent.evalkit.graders import Budget, check_invariants, grade_step
 from freight_agent.evalkit.metadata import RunMetadata
+from freight_agent.evalkit.observe import NullObserver, Observer
 from freight_agent.evalkit.results import Failure, ScenarioResult
 from freight_agent.evalkit.runner import (
     Mode,
@@ -336,6 +337,7 @@ class SuiteRunner:
 
     `scripted` mode feeds each trial the scenario's own script; the other modes need a
     `model_factory`. `record` runs like `live` (the factory's model records as it goes).
+    An `observer` (`evalkit.observe`) sees every trial and step, for experiment tracking.
     """
 
     def __init__(
@@ -347,6 +349,7 @@ class SuiteRunner:
         model_factory: ModelFactory | None = None,
         budget: Budget | None = None,
         runtime_factory: RuntimeFactory | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if mode == "scripted" and model_factory is not None:
             raise ValueError("scripted mode feeds the scenario scripts; do not pass a model")
@@ -354,6 +357,7 @@ class SuiteRunner:
             raise ValueError(f"{mode} mode needs a model factory")
         self._mode: LlmMode = mode
         self._budget = budget
+        self._observer: Observer = observer or NullObserver()
         inner = runtime_factory or build_runtime
         trial_model = TrialModel(model_factory) if model_factory is not None else None
 
@@ -370,6 +374,7 @@ class SuiteRunner:
             mode=_RUNNER_MODES[mode],
             model=trial_model,
             runtime_factory=factory,
+            observer=self._observer,
         )
 
     async def run(
@@ -393,12 +398,14 @@ class SuiteRunner:
         for index, scenario in enumerate(scenarios):
             trials: list[ScenarioResult] = []
             for trial in range(1, k + 1):
-                try:
-                    outcome = await self._runner.run(scenario, trial=trial)
-                except Exception as exc:  # outside the trial's own guard: building its model
-                    error = f"{type(exc).__name__}: {exc}"
-                    outcome = RunOutcome(scenario_id=scenario.id, trial=trial, error=error)
-                result = grade(scenario, outcome, budget=self._budget)
+                async with self._observer.trial(scenario, trial) as span:
+                    try:
+                        outcome = await self._runner.run(scenario, trial=trial)
+                    except Exception as exc:  # outside the trial's own guard: building its model
+                        error = f"{type(exc).__name__}: {exc}"
+                        outcome = RunOutcome(scenario_id=scenario.id, trial=trial, error=error)
+                    result = grade(scenario, outcome, budget=self._budget)
+                    span.graded(result)
                 trials.append(result)
                 spent += result.cost_usd
                 if cost_cap_usd is not None and spent > cost_cap_usd:

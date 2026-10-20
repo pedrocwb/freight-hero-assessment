@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay sop-lint ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith sop-lint ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -39,6 +39,11 @@ eval:
 # The real model's recorded answers (evals/cassettes): offline, no key.
 eval-replay:
 	uv run agent eval run --suite core --mode replay
+
+# The real models, pass^3, recorded as a LangSmith experiment. Spends about $0.03 from
+# OPENROUTER_API_KEY; needs LANGSMITH_API_KEY. Not part of `make ci`.
+eval-langsmith:
+	uv run agent eval run --suite core --mode live --k 3 --cost-cap-usd 0.10 --langsmith
 
 sop-lint:
 	uv run agent sop lint

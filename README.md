@@ -68,6 +68,34 @@ scenario, missing cassette or key), 3 the cost cap stopped the run. Scenarios ta
 Live runs need the key in `.env` (copy `.env.example`; `.env` is gitignored and a
 pre-commit hook refuses to commit it). Always pass `--cost-cap-usd`.
 
+**LangSmith experiments.** `--langsmith` records a live (or record) run as a LangSmith
+experiment; `make eval-langsmith` runs the core suite at pass^3 that way:
+
+```bash
+uv run agent eval run --suite core --mode live --k 3 --cost-cap-usd 0.10 --langsmith
+```
+
+- The suite's scenarios are synced to the dataset `freight-agent-<suite>` first: one example
+  per scenario (inputs: the load, the clock, each step's message or ping; reference outputs:
+  each step's `expect` and `forbid`), rewritten only when a scenario file changes. The
+  dataset gets the workspace's `Agent` resource tag named after `LANGSMITH_PROJECT`, so it
+  and its experiments show on that agent's Datasets & Experiments page.
+- The run is one experiment on that dataset, named `<suite>-<mode>-<model set>-<UTC time>`,
+  with the run's metadata (models, git sha, SOP version, prompt and config hashes, k).
+- Each trial is one row, linked to its example. Under it are the scenario's steps, the
+  agent's LangGraph nodes and the real model calls (`gate · openai/gpt-4.1-nano`), with
+  their prompts, answers and tokens.
+- The graders' verdicts are feedback on each row: `passed` (the failed checks are its
+  comment), `checks_failed`, `cost_usd`, `model_calls` and `pass_hat_k`. The experiment
+  itself gets pass^k and pass@k, overall and per group, plus cost and exit code.
+
+The graders and the exit code stay the harness's own (`results.json` and `report.md` are
+written as always); LangSmith is where runs are compared side by side. Scripted and replay
+runs are refused: they measure the code, not the model. The flag needs
+`LANGSMITH_API_KEY`, and the dataset and experiment are created before the first trial, so
+a run never spends model money for an experiment LangSmith cannot store. After that,
+LangSmith errors are logged and never change the verdict.
+
 **Models.** The gate runs on `openai/gpt-4.1-nano` and decide on `openai/gpt-oss-120b`
 (`config/models.yaml`), chosen by a live bake-off of six cheap models against thresholds
 fixed before the rounds (`evals/RESULTS.md`): 22/22 scenarios at pass^3, about $0.0002 per
@@ -139,7 +167,7 @@ Copy `.env.example` to `.env`. Every value is optional for the quick start.
 | `LLM_MODE` | `replay` | `scripted`, `replay`, `live` or `record` |
 | `PERSISTENCE` | `memory` | `memory` or `postgres` |
 | `DATABASE_URL`, `DATABASE_URL_DIRECT` | unset | pooled URL for the app, direct URL for migrations |
-| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run |
+| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run. `LANGSMITH_API_KEY` also enables `agent eval run --langsmith` |
 | `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `CASSETTES_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals, cassettes and the built UI live |
 
 Secrets are read as secrets: they are never printed, logged or returned by the API

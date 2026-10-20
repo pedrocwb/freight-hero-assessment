@@ -35,6 +35,7 @@ from typing import Any, cast
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall
+from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel, SecretStr, ValidationError
@@ -174,8 +175,16 @@ class OpenRouterModel:
         tool_choice: str,
     ) -> AIMessage:
         model = self._chat.bind_tools(tools, tool_choice=tool_choice)
+        # Names the call in a LangSmith trace ("gate · openai/gpt-4.1-nano"); without an
+        # active trace (the platform, plain live evals) the config changes nothing.
+        role = request.role.value
+        config: RunnableConfig = {
+            "run_name": f"{role} · {self.model_id}",
+            "tags": [f"role:{role}"],
+            "metadata": {"role": role, "ls_provider": "openrouter", "ls_model_name": self.model_id},
+        }
         try:
-            reply = await model.ainvoke(list(messages))
+            reply = await model.ainvoke(list(messages), config=config)
         except Exception as exc:  # the SDK, httpx and LangChain raise many types
             text = f"{type(exc).__name__}: {exc}"
             redacted = self._redact(text)  # before the cut, which could split the key
