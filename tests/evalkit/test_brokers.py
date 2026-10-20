@@ -150,9 +150,9 @@ async def test_the_version_names_the_base_and_the_brokers_sections() -> None:
     one = broker_index(BASE, export(section("detention")))
     two = broker_index(BASE, export(section("detention", intents=("x",))))
 
-    assert isinstance(one, BrokerSopIndex)
+    assert isinstance(one, BrokerSopIndex) and isinstance(two, BrokerSopIndex)
     assert one.content_version.startswith("base+acme:")
-    assert one.content_version != getattr(two, "content_version")
+    assert one.content_version != two.content_version
     assert await one.version("acme") == one.content_version
 
 
