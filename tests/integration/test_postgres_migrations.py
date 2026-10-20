@@ -40,6 +40,12 @@ PORT_TABLES = {
     "event_queue",
     "schema_migrations",
 }
+# The tables the wave 3 migrations must create, by the number each card reserved
+# (`docs/decisions.md`, "Wave 3 file ownership"). Checked once the file is in the repo.
+WAVE_3_TABLES = {
+    3: {"brokers", "broker_versions"},  # card W3-BRK
+    4: {"sop_documents", "sop_drafts", "sop_versions", "sop_sections"},  # card W3-KNW
+}
 
 
 def _new_schema() -> str:
@@ -61,8 +67,13 @@ def scripts(tmp_path: Path) -> Path:
 
 
 async def _query(schema: str, query: str) -> list[tuple[object, ...]]:
+    """`query` with the schema name as its one parameter."""
+    return await _fetch(query, (schema,))
+
+
+async def _fetch(query: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
     async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
-        cursor = await conn.execute(query.encode(), (schema,))
+        cursor = await conn.execute(query.encode(), params)
         return await cursor.fetchall()
 
 
@@ -89,6 +100,41 @@ async def test_the_repo_migrations_create_every_port_table_and_a_rerun_changes_n
 
     assert await apply_migrations(DATABASE_URL, schema=schema) == []
     assert await _versions(schema) == [m.version for m in first]
+
+
+async def test_the_wave_3_migrations_create_the_tables_of_their_cards(schema: str) -> None:
+    applied = {m.version for m in await apply_migrations(DATABASE_URL, schema=schema)}
+    present = {version: tables for version, tables in WAVE_3_TABLES.items() if version in applied}
+    if not present:
+        pytest.skip("no wave 3 migration in migrations/ yet (cards W3-BRK and W3-KNW)")
+
+    tables = await _tables(schema)
+
+    for version, expected in present.items():
+        assert expected <= tables, f"migration {version:04d} misses {sorted(expected - tables)}"
+
+
+async def test_the_vector_extension_and_its_columns_live_in_public(schema: str) -> None:
+    """A scratch schema sets `search_path` to itself only, so the knowledge migration
+    puts `vector` in `public` and names its type there (F9): a migration that worked only
+    on the default schema would break every contract and scenario test."""
+    applied = {m.version for m in await apply_migrations(DATABASE_URL, schema=schema)}
+    if 4 not in applied:
+        pytest.skip("migration 0004 (card W3-KNW) is not in migrations/ yet")
+
+    extension = await _fetch(
+        "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace "
+        "WHERE e.extname = 'vector'"
+    )
+    assert extension == [("public",)]
+    columns = await _query(
+        schema,
+        "SELECT format_type(a.atttypid, a.atttypmod), tn.nspname FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace cn ON cn.oid = c.relnamespace "
+        "JOIN pg_type t ON t.oid = a.atttypid JOIN pg_namespace tn ON tn.oid = t.typnamespace "
+        "WHERE cn.nspname = %s AND c.relname = 'sop_sections' AND a.attname = 'embedding'",
+    )
+    assert columns == [("vector(1536)", "public")]
 
 
 async def test_runs_that_race_apply_each_migration_once(schema: str, scripts: Path) -> None:
