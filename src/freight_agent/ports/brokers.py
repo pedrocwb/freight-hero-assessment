@@ -1,8 +1,15 @@
 """The broker catalog store, on the unit of work.
 
-Owner: card W3-BRK. C0 wrote the contract; the memory implementation is in
+Owner: card W3-BRK. The memory implementation is in
 `adapters/persistence/memory/brokers.py`, the Postgres one in
-`adapters/persistence/postgres/brokers.py` (migration 0003).
+`adapters/persistence/postgres/brokers.py` (migration 0003); `tests/contract/
+test_brokers.py` holds both to this contract.
+
+The store never numbers a version: the caller does. A configuration change saves the
+broker at `config_version + 1` with `rollout.previous_version` set to the old one
+(`PUT /api/brokers/{id}`, publishing an SOP); a rollout change (a canary, a rollback)
+saves the current version again with a new `rollout`. Read with a unit of work and
+change with `Broker.revised`, which validates, in the same one.
 """
 
 import builtins
