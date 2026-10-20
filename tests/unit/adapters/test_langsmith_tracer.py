@@ -17,7 +17,7 @@ from freight_agent.adapters.observability.langsmith import (
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.domain.actions import Plan, Purpose, SendSms
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.domain.runs import RunRecord, RunStatus, Usage
+from freight_agent.domain.runs import RunRecord, RunStatus, TrajectoryStep, Usage
 from freight_agent.domain.validation import Severity, Violation
 from freight_agent.ports.tracing import Tracer
 
@@ -134,7 +134,7 @@ async def test_a_run_exports_one_trace_and_returns_its_url() -> None:
     tracer: Tracer = _tracer(client)
     assert await tracer.record_run(_run()) == URL
     assert sorted(r["name"] for r in client.runs) == sorted(
-        ["risk:p1", "gate", "decide", "validate"]
+        ["risk:p1", "gate", "agent", "validate"]
     )
     (requested, project) = client.url_requests[0]
     assert requested.id == client.root["id"]
@@ -360,13 +360,18 @@ async def test_gate_child_is_an_llm_run_with_its_decision_and_usage() -> None:
 
 
 @pytest.mark.unit
-async def test_decide_and_validate_children_follow_the_gate() -> None:
+async def test_agent_and_validate_children_follow_the_gate() -> None:
     client = FakeClient()
     await _tracer(client).record_run(_run(violations=(HIGH,)))
-    decide = client.child("decide")
+    decide = client.child("agent")  # a record from before wave 3: its role says decide
     assert decide["run_type"] == "llm"
     assert decide["inputs"] == {"sop_section_ids": ["communication_rules", "delay_risk_high"]}
-    assert decide["outputs"] == {"plan": PLAN.model_dump(mode="json")}
+    assert decide["outputs"] == {
+        "intent": "delay_risk_high",
+        "plan": PLAN.model_dump(mode="json"),
+        "sections_searched": [],
+        "rejections": 0,
+    }
     assert decide["extra"]["metadata"]["ls_model_name"] == "decide-model"
     assert decide["start_time"] == (T0 + timedelta(milliseconds=800)).astimezone(UTC)
     assert decide["end_time"] == (T0 + timedelta(milliseconds=3800)).astimezone(UTC)
@@ -444,6 +449,94 @@ async def test_a_run_without_a_plan_has_no_decide_or_validate_step() -> None:
     await _tracer(client).record_run(run)
     assert sorted(r["name"] for r in client.runs) == ["gate", "risk:p1"]
     assert client.root["error"] == "LlmError: timeout"
+
+
+# --- the agent loop (wave 3) ---------------------------------------------------
+
+TRAJECTORY = (
+    TrajectoryStep(
+        tool="search_sop", args={"query": "lumper"}, result="1. escalation", accepted=None
+    ),
+    TrajectoryStep(
+        tool="send_email",
+        args={"to_contact_ids": ["x@outside.example"]},
+        result="rejected by recipient_is_contact",
+        accepted=False,
+        cost_usd=0.002,
+    ),
+    TrajectoryStep(
+        tool="create_hero_task", args={"title": "t"}, result="accepted as action #1", accepted=True
+    ),
+)
+
+
+def _loop_run(**overrides: Any) -> RunRecord:
+    usage = (
+        Usage(role="gate", model="gate-model", latency_ms=800),
+        Usage(role="agent", model="agent-model", latency_ms=3000, cost_usd=0.01),
+    )
+    fields: dict[str, Any] = {
+        "usage": usage,
+        "intent": "other",
+        "trajectory": TRAJECTORY,
+        "rejections": 1,
+        "sections_searched": ("escalation",),
+        "broker_id": "acme",
+        "broker_config_version": 2,
+    }
+    return _run(**{**fields, **overrides})
+
+
+@pytest.mark.unit
+async def test_each_tool_call_is_a_tool_run_under_the_agent_step_in_order() -> None:
+    client = FakeClient()
+    await _tracer(client).record_run(_loop_run())
+    agent = client.child("agent")
+    assert agent["extra"]["metadata"]["ls_model_name"] == "agent-model"
+    tools = [r for r in client.runs if r.get("parent_run_id") == agent["id"]]
+    assert [(t["name"], t["run_type"]) for t in tools] == [
+        ("search_sop", "tool"),
+        ("send_email", "tool"),
+        ("create_hero_task", "tool"),
+    ]
+    search, email, hero = tools
+    assert search["inputs"] == {"query": "lumper"}
+    assert search["outputs"] == {"result": "1. escalation", "accepted": None}
+    assert email["error"] == "refused: rejected by recipient_is_contact"
+    assert email["tags"] == ["refused"]
+    email_metadata = email["extra"]["metadata"]
+    assert (email_metadata["accepted"], email_metadata["cost_usd"]) == (False, 0.002)
+    assert hero.get("error") is None and hero["outputs"]["accepted"] is True
+    # The calls share the agent's span, end to end.
+    assert search["start_time"] == agent["start_time"]
+    assert search["end_time"] == email["start_time"]
+    assert hero["end_time"] == agent["end_time"]
+
+
+@pytest.mark.unit
+async def test_the_root_carries_the_intent_broker_version_and_refusals() -> None:
+    client = FakeClient()
+    await _tracer(client, broker_of=_broker).record_run(_loop_run())
+    root = client.root
+    metadata = root["extra"]["metadata"]
+    assert metadata["intent"] == "other"
+    assert metadata["tools"] == ["search_sop", "send_email", "create_hero_task"]
+    assert metadata["rejections"] == 1
+    assert metadata["sections_searched"] == ["escalation"]
+    assert (metadata["broker_id"], metadata["broker_config_version"]) == ("acme", 2)
+    assert (root["outputs"]["intent"], root["outputs"]["rejections"]) == ("other", 1)
+    assert {"intent:other", "broker:acme", "refused"} <= set(root["tags"])
+    assert "intent:delay_risk_high" not in root["tags"]
+
+
+@pytest.mark.unit
+async def test_an_agent_run_with_a_trajectory_and_no_plan_still_shows_its_calls() -> None:
+    client = FakeClient()
+    await _tracer(client).record_run(_loop_run(plan=None))
+    names = sorted(r["name"] for r in client.runs)
+    assert names == sorted(
+        ["risk:p1", "gate", "agent", "search_sop", "send_email", "create_hero_task"]
+    )
 
 
 # --- choosing a tracer ---------------------------------------------------------

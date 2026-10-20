@@ -13,6 +13,7 @@ problem.
 
 import dataclasses
 import hashlib
+import importlib
 import json
 import platform
 import subprocess
@@ -24,8 +25,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.llm.models_config import load_models_config
-from freight_agent.application import prompts, tools
 from freight_agent.application.runtime import RuntimeConfig
+from freight_agent.evalkit import judge
 
 # What `evalkit.runner.build_runtime` runs the agent with. Hashed, not imported from the
 # runner, because the runner builds it inline.
@@ -33,6 +34,18 @@ EVAL_RUNTIME_CONFIG = RuntimeConfig(reraise_unexpected=True)
 
 _HASH_LENGTH = 12
 _GIT_TIMEOUT_S = 10
+
+# The modules whose source shapes what a model reads: the prompt templates and the code
+# that fills them, and the tool descriptions. Wave 3 moves the tools from `tools` to
+# `agent_tools` (card W3-AGT) and adds the document and knowledge prompts; a module that
+# does not exist (yet, or any more) is left out of the hash.
+PROMPT_MODULES = (
+    "freight_agent.application.prompts",
+    "freight_agent.application.tools",
+    "freight_agent.application.agent_tools",
+    "freight_agent.application.prompts_documents",
+    "freight_agent.application.prompts_knowledge",
+)
 
 # Runs a git command in a folder: its stdout, or None when git is missing or fails.
 GitRunner = Callable[[Path, list[str]], str | None]
@@ -55,6 +68,7 @@ class RunMetadata(BaseModel):
     config_sha256: str | None = None  # the runtime and validation config
     python: str | None = None
     settings: dict[str, str] = {}  # `Settings.describe()`: secrets show only as set or unset
+    broker: str | None = None  # `acme@v2` when the run played a broker export
 
 
 def collect_metadata(
@@ -67,6 +81,7 @@ def collect_metadata(
     repo: Path,
     settings: Mapping[str, str] | None = None,
     git: GitRunner | None = None,
+    broker: str | None = None,
 ) -> RunMetadata:
     git = git or run_git
     sha, dirty = git_state(repo, git)
@@ -84,6 +99,7 @@ def collect_metadata(
         config_sha256=config_sha256(EVAL_RUNTIME_CONFIG),
         python=platform.python_version(),
         settings=dict(settings or {}),
+        broker=broker,
     )
 
 
@@ -114,13 +130,21 @@ def git_state(repo: Path, git: GitRunner = run_git) -> tuple[str | None, bool | 
     return sha.strip(), (None if status is None else bool(status.strip()))
 
 
-def prompts_sha256() -> str:
+def prompts_sha256(modules: tuple[str, ...] = PROMPT_MODULES) -> str:
     """Hash of the prompt sources: the templates and the rendering code that fills them
-    shape the prompt alike, and so do the tool descriptions the decide model reads."""
+    shape the prompt alike, and so do the tool descriptions the agent reads and the
+    judge's prompt."""
     digest = hashlib.sha256()
-    for module in (prompts, tools):
+    for name in modules:
+        try:
+            module = importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if exc.name != name:  # the module exists and one of its own imports is missing
+                raise
+            continue
         source = Path(module.__file__ or "").read_bytes()
         digest.update(module.__name__.encode() + b"\0" + source)
+    digest.update(b"judge\0" + judge.prompt_fingerprint().encode())
     return digest.hexdigest()[:_HASH_LENGTH]
 
 

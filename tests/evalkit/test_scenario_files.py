@@ -7,7 +7,13 @@ import pytest
 import yaml
 
 from freight_agent.domain.actions import Plan
-from freight_agent.evalkit.spec import Expectation, MessageStep, ScriptedLlm, load_scenario
+from freight_agent.evalkit.spec import (
+    AgentTurn,
+    Expectation,
+    MessageStep,
+    ScriptedLlm,
+    load_scenario,
+)
 
 EVALS = Path(__file__).resolve().parents[2] / "evals"
 FILES = sorted((EVALS / "scenarios").rglob("*.yaml"))
@@ -54,7 +60,7 @@ def test_decide_is_the_older_name_of_agent_and_comes_first() -> None:
 
     assert [p.rationale for p in script.agent] == ["first", "second"]
     assert script.decide == script.agent
-    assert ScriptedLlm(agent=(Plan(),)).agent == (Plan(),)
+    assert ScriptedLlm.model_validate({"agent": [Plan()]}).agent == (AgentTurn(),)  # a turn
     assert ScriptedLlm.model_validate({"decide": None}).agent == ()
 
 

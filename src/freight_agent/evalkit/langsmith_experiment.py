@@ -16,9 +16,14 @@
   and under each step the real model calls. LangChain traces those into the current run
   through LangSmith's context, with the prompts, answers and tokens.
 - **Feedback** on each trial: `passed` (with the failed checks as the comment),
-  `checks_failed`, `cost_usd`, `model_calls`; and `pass_hat_k` on every trial of a scenario
-  once its k trials ran (1 when all passed). The experiment itself gets the run's totals:
-  pass^k and pass@k overall and per group, cost and exit code.
+  `checks_failed`, `cost_usd`, `model_calls`; the agent loop's `rejections` (refused tool
+  calls) and `tools_used` (tool calls, the tools as the comment); `judge_score` (the mean
+  verdict of the judged steps, their reasons as the comment) when a step was judged; and
+  `pass_hat_k` on every trial of a scenario once its k trials ran (1 when all passed). The
+  experiment itself gets the run's totals: pass^k and pass@k overall and per group, cost,
+  exit code, refused tool calls per run and the mean judge score.
+- **Each step's outputs** carry its runs as the graders see them: intent, broker version,
+  the trajectory (tool, arguments, accepted or refused), sections read, and the verdict.
 
 Live only (the CLI refuses the other modes): scripted and replay runs measure the code and
 are free to repeat locally; an experiment measures the model.
@@ -32,6 +37,7 @@ import hashlib
 import json
 import logging
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -40,6 +46,9 @@ from typing import Any, Protocol
 from langsmith import run_helpers
 from langsmith.run_trees import RunTree
 
+from freight_agent.domain.runs import RunRecord
+from freight_agent.evalkit.graders import run_intent, sections_read
+from freight_agent.evalkit.judge import JudgeVerdict
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.observe import StepSpan, TrialSpan
 from freight_agent.evalkit.results import ScenarioResult, StepObservation
@@ -112,8 +121,9 @@ def dataset_name(suite: str) -> str:
 
 
 def example_inputs(scenario: Scenario) -> dict[str, Any]:
-    """What the agent is given. The script is left out: live runs ignore it."""
-    return {
+    """What the agent is given. The script is left out: live runs ignore it. The broker
+    file is there only when the scenario names one, so older examples keep their hash."""
+    inputs: dict[str, Any] = {
         "scenario_id": scenario.id,
         "title": scenario.title,
         "description": scenario.description,
@@ -124,6 +134,9 @@ def example_inputs(scenario: Scenario) -> dict[str, Any]:
         "start": scenario.start,
         "steps": [_step_input(step) for step in scenario.steps],
     }
+    if scenario.broker_file is not None:
+        inputs["broker_file"] = scenario.broker_file
+    return inputs
 
 
 def example_outputs(scenario: Scenario) -> dict[str, Any]:
@@ -446,6 +459,7 @@ class LangSmithExperiment:
             ("checks_failed", float(len(result.failures) + (result.error is not None)), None),
             ("cost_usd", result.cost_usd, None),
             ("model_calls", float(sum(o.llm_calls for o in result.observations)), None),
+            *_loop_feedback(result),
         ]
         for key, score, comment in scores:
             self._send_feedback(run.id, key, score, comment)
@@ -484,6 +498,13 @@ class LangSmithExperiment:
         for group in result.groups:
             if group.tag in ("regression", "capability"):
                 totals[f"pass_hat_k_{group.tag}"] = group.pass_hat_k
+        trials = [t for s in result.scenarios for t in s.trials]
+        runs = [run for t in trials for run in _runs(t)]
+        if runs:
+            totals["rejections_per_run"] = sum(r.rejections for r in runs) / len(runs)
+        scores = [score for t in trials for score in _judge_scores(t)]
+        if scores:
+            totals["judge_score"] = sum(scores) / len(scores)
         project_id = _get(self._project, "id")
         for key, score in totals.items():
             _safe(
@@ -568,25 +589,75 @@ class _StepRun:
 
 
 def _observation_summary(o: StepObservation) -> dict[str, Any]:
-    """What a step did, in the terms the graders use: outbox items and runs."""
-    return {
+    """What a step did, in the terms the graders use: outbox items, runs and the verdict."""
+    summary: dict[str, Any] = {
         "at": o.at.strftime("%H:%M:%S"),
         "llm_calls": o.llm_calls,
         "outbox": [{"kind": item.kind.value, **item.payload} for item in o.outbox],
-        "runs": [
-            {
-                "event_id": run.event_id,
-                "status": run.status.value,
-                "intent": None if run.gate is None else run.gate.intent,
-                "skip_reason": run.skip_reason,
-                "sop_section_ids": list(run.sop_section_ids),
-                "plan": None if run.plan is None else run.plan.model_dump(mode="json"),
-                "violations": [v.model_dump(mode="json") for v in run.violations],
-                "cost_usd": run.cost_usd,
-            }
-            for run in o.runs
-        ],
+        "runs": [_run_summary(run) for run in o.runs],
     }
+    if o.judge is not None:
+        summary["judge"] = o.judge.model_dump(mode="json", exclude={"usage"})
+    return summary
+
+
+def _run_summary(run: RunRecord) -> dict[str, Any]:
+    return {
+        "event_id": run.event_id,
+        "status": run.status.value,
+        "intent": run_intent(run),
+        "gate_intent": None if run.gate is None else run.gate.intent,
+        "broker_id": run.broker_id,
+        "broker_config_version": run.broker_config_version,
+        "skip_reason": run.skip_reason,
+        "sop_section_ids": list(run.sop_section_ids),
+        "sections_read": sections_read([run]),
+        "trajectory": [step.model_dump(mode="json") for step in run.trajectory],
+        "rejections": run.rejections,
+        "plan": None if run.plan is None else run.plan.model_dump(mode="json"),
+        "violations": [v.model_dump(mode="json") for v in run.violations],
+        "cost_usd": run.cost_usd,
+    }
+
+
+def _runs(result: ScenarioResult) -> list[RunRecord]:
+    return [run for o in result.observations for run in o.runs]
+
+
+def _verdicts(result: ScenarioResult) -> list[tuple[int, JudgeVerdict]]:
+    """The judged steps' verdicts, by step index."""
+    return [
+        (o.step_index, o.judge.verdict)
+        for o in result.observations
+        if o.judge is not None and o.judge.verdict is not None
+    ]
+
+
+def _judge_scores(result: ScenarioResult) -> list[float]:
+    return [verdict.score for _, verdict in _verdicts(result)]
+
+
+def _loop_feedback(result: ScenarioResult) -> list[tuple[str, float, str | None]]:
+    """The agent loop's feedback on a trial: refused calls, tool calls, the judge's mean."""
+    runs = _runs(result)
+    calls = Counter(step.tool for run in runs for step in run.trajectory)
+    refused = Counter(
+        step.tool for run in runs for step in run.trajectory if step.accepted is False
+    )
+    feedback: list[tuple[str, float, str | None]] = [
+        ("rejections", float(sum(r.rejections for r in runs)), _counts(refused)),
+        ("tools_used", float(sum(calls.values())), _counts(calls)),
+    ]
+    verdicts = _verdicts(result)
+    if verdicts:
+        mean = sum(v.score for _, v in verdicts) / len(verdicts)
+        reasons = [f"step {i}: {v.score:.2f}: {'; '.join(v.reasons)}" for i, v in verdicts]
+        feedback.append(("judge_score", mean, "\n".join(reasons)))
+    return feedback
+
+
+def _counts(counter: Counter[str]) -> str | None:
+    return ", ".join(f"{name} x{n}" for name, n in sorted(counter.items())) or None
 
 
 def _what(step: Step) -> str:
