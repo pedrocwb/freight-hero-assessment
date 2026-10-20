@@ -41,11 +41,6 @@ def words(text: str) -> set[str]:
     return set(_WORD.findall(text.lower()))
 
 
-def content_hash(sections: Iterable[SopSection]) -> str:
-    """Short sha256 of the sections' content, in order (`domain.sop.version_hash`)."""
-    return version_hash(sections)
-
-
 def word_search(sections: Sequence[ResolvedSection], query: str, k: int) -> tuple[SearchHit, ...]:
     """The `k` sections sharing the most words with `query`, best first (ties by id)."""
     wanted = words(query)
@@ -81,7 +76,7 @@ class MemorySopIndex:
         brokers: Iterable[Broker] = (),
     ) -> None:
         self._sections = tuple(sections)
-        self._version = version if version is not None else content_hash(self._sections)
+        self._version = version if version is not None else version_hash(self._sections)
         self._brokers = {broker.broker_id: broker for broker in brokers}
 
     @classmethod

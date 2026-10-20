@@ -292,7 +292,7 @@ class FlakySop(FakeSop):
     def __init__(self, failures: int, error: Exception | None = None) -> None:
         super().__init__(SECTIONS)
         self.failures = failures
-        self.error = error or RuntimeError("SOP store unreachable")
+        self.error = error or RuntimeError("SOP index unreachable")
 
     async def by_applies(
         self, broker_id: str, load_types: Sequence[str], intent: str, stage: Stage
@@ -313,7 +313,7 @@ async def test_an_unexpected_error_is_retried_and_a_success_leaves_no_failed_run
     runs = await world.tick(at(7, 1))
 
     assert [r.status for r in runs] == [RunStatus.FAILED, RunStatus.ACTED]
-    assert runs[0].error == "RuntimeError: SOP store unreachable"
+    assert runs[0].error == "RuntimeError: SOP index unreachable"
     assert runs[0].run_id != runs[1].run_id
     snapshot = await world.snapshot()
     assert [r.status for r in snapshot.runs] == [RunStatus.ACTED]  # the retry is not skipped
@@ -330,7 +330,7 @@ async def test_an_event_that_keeps_failing_becomes_a_dead_letter(load: Load) -> 
     assert await dead_letters(world) == ["risk:p1"]
     snapshot = await world.snapshot()
     assert [(r.status, r.error) for r in snapshot.runs] == [
-        (RunStatus.FAILED, "RuntimeError: SOP store unreachable")
+        (RunStatus.FAILED, "RuntimeError: SOP index unreachable")
     ]
     assert snapshot.outbox == ()
     assert await world.tick(at(7, 2)) == []
@@ -343,7 +343,7 @@ async def test_reraise_unexpected_releases_the_event_then_raises(load: Load) -> 
     world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
 
     world.clock.set(at(7, 1))
-    with pytest.raises(RuntimeError, match="SOP store unreachable"):
+    with pytest.raises(RuntimeError, match="SOP index unreachable"):
         await world.runtime.process_next()
 
     assert await queue_size(world) == 1  # released, ready for a retry

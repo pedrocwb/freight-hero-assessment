@@ -20,7 +20,7 @@ editing this file:
 | Page reader (DOC) | `adapters.documents.pdfium.PdfiumPageReader` | with the pipeline |
 
 Until one exists, the runtime behaves as before wave 3: it reads no document. The runs
-read the SOP files of `SOPS_DIR`.
+read the SOP files of `SOPS_DIR`, and each client's catalog there.
 """
 
 import importlib
