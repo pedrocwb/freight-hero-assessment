@@ -3,7 +3,6 @@
 from fastapi import APIRouter
 
 from freight_agent.api.routes import (
-    broker_evals,
     brokers,
     documents,
     evals,
@@ -25,5 +24,4 @@ ROUTERS: tuple[APIRouter, ...] = (
     ops.router,
     brokers.router,
     documents.router,
-    broker_evals.router,
 )

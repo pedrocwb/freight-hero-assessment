@@ -363,15 +363,3 @@ class DocumentView(_Body):
     @classmethod
     def of(cls, document: Document) -> "DocumentView":
         return cls.model_validate(document.model_dump(exclude={"blob_ref"}))
-
-
-# --- broker evals (card W3-EVK) --------------------------------------------------------------
-
-
-class BrokerEvalRunRequest(_Body):
-    """`POST /api/brokers/{broker_id}/evals/run`: a suite on the broker's current version."""
-
-    suite: str = "core"
-    mode: LlmMode = "scripted"
-    k: int = Field(default=1, ge=1, le=10, description="Trials per scenario")
-    cost_cap_usd: float = Field(default=0.10, ge=0, description="Stops a live run past it")
