@@ -309,6 +309,7 @@ class SopDraftIn(_Body):
     sections: tuple[DraftSection, ...]
     proposed_intents: tuple[ProposedIntent, ...] = ()
     proposed_requirements: tuple[DocumentRequirement, ...] = ()
+    proposed_obligations: tuple[ObligationDef, ...] = ()
 
 
 class SopPublishIn(_Body):

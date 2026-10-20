@@ -379,7 +379,12 @@ _DOCUMENT_TYPES = (
         title="Proof of delivery",
         description="Signed at delivery: who received the load, when, and any exceptions.",
         fields=(
-            FieldDef(name="receiver", description="The receiver's name", check="stop_name"),
+            FieldDef(
+                name="receiver",
+                description="The receiving facility (consignee) name, not the person who signed",
+                check="stop_name",
+            ),
+            FieldDef(name="po_numbers", description="The PO numbers listed", check="po_number"),
             FieldDef(
                 name="signed",
                 description="The receiver's signature is present",

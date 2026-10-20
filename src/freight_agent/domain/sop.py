@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from freight_agent.domain.base import DomainModel
-from freight_agent.domain.broker import DocumentRequirement, IntentDef
+from freight_agent.domain.broker import DocumentRequirement, IntentDef, ObligationDef
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Stage
 
@@ -260,12 +260,18 @@ class ProposedIntent(IntentDef):
 
 
 class SopDraft(DomainModel):
-    """The one draft of a broker's SOP (None: the standard layer), edited until published."""
+    """The one draft of a broker's SOP (None: the standard layer), edited until published.
+
+    Besides sections, the compile step proposes catalog changes the SOP implies: new
+    intents, document requirements, and obligations (a new kind such as `pod`, or new
+    timing for `eta_request`). Publishing applies the accepted ones to the broker.
+    """
 
     broker_id: str | None
     sections: tuple[DraftSection, ...] = ()
     proposed_intents: tuple[ProposedIntent, ...] = ()
     proposed_requirements: tuple[DocumentRequirement, ...] = ()
+    proposed_obligations: tuple[ObligationDef, ...] = ()
     document_ids: tuple[str, ...] = ()  # the uploads the draft was compiled from
     updated_at: datetime
 
