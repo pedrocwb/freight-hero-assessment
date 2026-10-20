@@ -5,8 +5,8 @@
 # The command:
 #   uv run agent eval run --suite core --mode live --k 3 --model-set default --cost-cap-usd 2
 # `--k` runs each scenario k times (pass^k needs every trial to pass). `--model-set default`
-# is config/models.yaml; any other NAME is config/models.NAME.yaml (a bake-off candidate
-# set, for example). `--cost-cap-usd` aborts the run once the spend passes it (exit 3).
+# is config/models.yaml; any other NAME is config/models.NAME.yaml (another model set
+# to compare). `--cost-cap-usd` aborts the run once the spend passes it (exit 3).
 name: Evals (live)
 
 on:

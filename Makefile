@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith bakeoff sop-lint diagrams ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith sop-lint diagrams ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -58,25 +58,6 @@ eval-replay:
 # OPENROUTER_API_KEY; needs LANGSMITH_API_KEY. Not part of `make ci`.
 eval-langsmith:
 	uv run agent eval run --suite core --mode live --k 3 --cost-cap-usd 0.10 --langsmith
-
-# The wave 3 bake-off of the agent role (evals/RESULTS.md, "Wave 3"): k=1 screening of each
-# candidate set (config/models.NAME.yaml) on every suite, live, as LangSmith experiments.
-# Spends from OPENROUTER_API_KEY and needs LANGSMITH_API_KEY. The caps per suite add up to
-# $0.40 per model set ($1.20 for the three); a suite that passes its cap stops with exit 3
-# and the next one starts. Then `--k 3` on the best two, by hand. Not part of `make ci`.
-BAKEOFF_SETS ?= gptoss haiku gemini
-BAKEOFF_K ?= 1
-BAKEOFF_CAP_core ?= 0.30
-BAKEOFF_CAP_agent ?= 0.05
-BAKEOFF_CAP_docs ?= 0.05
-bakeoff:
-	@status=0; for set in $(BAKEOFF_SETS); do for suite in $(EVAL_SUITES); do \
-		case $$suite in core) cap=$(BAKEOFF_CAP_core);; agent) cap=$(BAKEOFF_CAP_agent);; \
-			docs) cap=$(BAKEOFF_CAP_docs);; *) cap=0.05;; esac; \
-		echo "== bake-off: --model-set $$set, suite $$suite, cap \$$$$cap"; \
-		uv run agent eval run --suite $$suite --mode live --k $(BAKEOFF_K) --model-set $$set \
-			--cost-cap-usd $$cap --langsmith || { code=$$?; [ $$code -gt $$status ] && status=$$code; }; \
-	done; done; exit $$status
 
 sop-lint:
 	uv run agent sop lint

@@ -111,7 +111,6 @@ class EmbeddingConfig(_Config):
 class ModelsConfig(_Config):
     roles: dict[ModelRole, RoleConfig]
     pricing: dict[str, ModelPricing]
-    bakeoff_candidates: tuple[str, ...] = Field(min_length=3, max_length=5)
     embedding: EmbeddingConfig | None = None
 
     @model_validator(mode="after")
@@ -122,7 +121,7 @@ class ModelsConfig(_Config):
         used = [m for role in self.roles.values() for m in (role.model, *role.fallbacks)]
         if self.embedding is not None:
             used.append(self.embedding.model)
-        unpriced = sorted({m for m in (*used, *self.bakeoff_candidates) if m not in self.pricing})
+        unpriced = sorted({m for m in used if m not in self.pricing})
         if unpriced:
             raise ValueError(f"models with no pricing entry: {', '.join(unpriced)}")
         return self
@@ -142,9 +141,7 @@ def load_models_config(path: Path | str) -> ModelsConfig:
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(
-            f"{path}: expected a mapping with roles, pricing, bakeoff_candidates and embedding"
-        )
+        raise ValueError(f"{path}: expected a mapping with roles, pricing and embedding")
     try:
         return ModelsConfig.model_validate(raw)
     except ValidationError as exc:

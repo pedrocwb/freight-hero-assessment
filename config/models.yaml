@@ -1,4 +1,4 @@
-# Models per role, their fallbacks, prices and the bake-off candidates.
+# Models per role, their fallbacks and prices.
 #
 # Switching a model is a change to this file. Rule from the plan: cheap, light models
 # first; prompt and SOP improvement rounds run on them before any model is upgraded.
@@ -40,13 +40,12 @@ roles:
     # The role was `decide` before wave 3. The agent loop (card W3-AGT) runs on it: read
     # and action tools for at most the broker's `limits.max_steps` rounds and
     # `limits.max_cost_usd`, then the AgentOutcome as a forced tool call. The wave 3
-    # bake-off (`make bakeoff`, evals/RESULTS.md "Wave 3") decides this model again on the
-    # loop; until then it is the wave 2 choice, made on the single plan:
+    # bake-off (evals/RESULTS.md "Wave 3") kept the wave 2 choice, made on the single plan:
     # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
     # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
     # about $0.024 for a long load (100 messages, 80 decide calls). Claude Haiku 5.5 also
-    # passed 22/22 at about 5 times the cost (config/models.haiku.yaml). gpt-oss always
-    # reasons; low effort keeps the decide call near 5 s (p95 8 to 11 s).
+    # passed 22/22 at about 5 times the cost. gpt-oss always reasons; low effort keeps the
+    # decide call near 5 s (p95 8 to 11 s).
     # Pinned to DeepInfra at bf16, the cheapest full-precision endpoint; fp4/int4 ones
     # are cheaper still but were not measured. The fallback is another family and takes
     # `reasoning` too: the chain sends every fallback the same settings, and GPT-4.1
@@ -148,20 +147,6 @@ pricing:
     input: 0.02
     output: 0
     context_length: 8192
-
-# The bake-off candidates (evals/RESULTS.md has the runs; config/models.NAME.yaml has each
-# candidate's set, run with --model-set NAME). Five at most: Mistral Small 3.2 was
-# measured too (config/models.mistral.yaml) and left the list when Claude Haiku 5.5 joined.
-# Open-weight ones (Qwen, gpt-oss) are served by several providers at different
-# quantizations: pin `provider.order` and `quantizations` when one goes on a role.
-# gpt-oss-120b always reasons: give it reasoning_effort: low. Claude Haiku 5.5 takes no
-# temperature: set it to null.
-bakeoff_candidates:
-  - openai/gpt-4.1-nano
-  - google/gemini-2.5-flash-lite
-  - qwen/qwen3-30b-a3b-instruct-2507
-  - openai/gpt-oss-120b
-  - anthropic/claude-haiku-5.5
 
 # The SOP index's embedding model (live and record only; scripted, replay and CI use a
 # deterministic fake, adapters/knowledge/fake_embedder.py). dim is the vector column's.

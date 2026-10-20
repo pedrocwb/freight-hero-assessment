@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # What the app reads at run time, at the Settings defaults (relative to /app): the SOP
 # tree, the scenarios, their fixtures (load metadata, the Acme SOP, the POD and BOL PDFs)
-# and cassettes, the model sets and the built UI.
+# and cassettes, the models config and the built UI.
 COPY sops ./sops
 COPY evals ./evals
 COPY config ./config

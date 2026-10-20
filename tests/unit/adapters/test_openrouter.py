@@ -854,7 +854,6 @@ def test_models_for_role_builds_one_model_per_entry_of_the_chain() -> None:
             "acme/tiny": ModelPricing(input=0.05, output=0.2),
             "acme/mid": ModelPricing(input=0.2, output=0.8),
         },
-        bakeoff_candidates=("acme/small", "acme/tiny", "acme/mid"),
     )
     built: list[str] = []
 

@@ -27,7 +27,6 @@ def _config(**overrides: Any) -> dict[str, Any]:
             "acme/tiny": {"input": 0.05, "output": 0.2},
             "acme/mid": {"input": 0.2, "output": 0.8},
         },
-        "bakeoff_candidates": ["acme/small", "acme/tiny", "acme/mid"],
     }
     raw.update(overrides)
     return raw
@@ -40,14 +39,13 @@ def _write(tmp_path: Path, raw: dict[str, Any]) -> Path:
 
 
 @pytest.mark.unit
-def test_the_shipped_config_has_every_role_priced_and_three_to_five_candidates() -> None:
+def test_the_shipped_config_has_every_role_priced() -> None:
     config = load_models_config(SHIPPED)
 
     assert set(config.roles) == set(ModelRole)
     for role in ModelRole:
         for entry in config.role(role).chain():
             assert config.pricing_for(entry.model).output > 0
-    assert 3 <= len(config.bakeoff_candidates) <= 5
 
 
 @pytest.mark.unit
@@ -68,7 +66,6 @@ def test_loads_a_valid_file(tmp_path: Path) -> None:
     assert gate.fallbacks == ("acme/tiny",)
     assert gate.temperature == 0
     assert gate.max_tokens == 256
-    assert config.bakeoff_candidates == ("acme/small", "acme/tiny", "acme/mid")
 
 
 @pytest.mark.unit
@@ -86,25 +83,6 @@ def test_a_model_without_pricing_is_an_error(tmp_path: Path) -> None:
     raw["roles"]["agent"]["fallbacks"] = ["acme/unpriced"]
 
     with pytest.raises(ValueError, match="acme/unpriced"):
-        load_models_config(_write(tmp_path, raw))
-
-
-@pytest.mark.unit
-def test_a_bakeoff_candidate_without_pricing_is_an_error(tmp_path: Path) -> None:
-    raw = _config(bakeoff_candidates=["acme/small", "acme/tiny", "acme/ghost"])
-
-    with pytest.raises(ValueError, match="acme/ghost"):
-        load_models_config(_write(tmp_path, raw))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("count", [2, 6])
-def test_the_bakeoff_has_three_to_five_candidates(tmp_path: Path, count: int) -> None:
-    pricing = {f"acme/m{i}": {"input": 0.1, "output": 0.1} for i in range(count)}
-    raw = _config(bakeoff_candidates=list(pricing))
-    raw["pricing"].update(pricing)
-
-    with pytest.raises(ValueError, match="bakeoff_candidates"):
         load_models_config(_write(tmp_path, raw))
 
 

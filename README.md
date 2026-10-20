@@ -121,15 +121,9 @@ LangSmith errors are logged and never change the verdict.
 `openai/gpt-4.1-nano`; the agent loop on `openai/gpt-oss-120b`, the wave 2 bake-off's
 choice on the single-plan design (22/22 at pass^3, about $0.0002 per run); the judge,
 `extract` (documents, page images included), `compile` (SOP drafts) and the embedding
-model for SOP search. The agent role is measured again on the loop by the wave 3
-bake-off, which also gives the measured cost per load:
-
-```bash
-make bakeoff   # gptoss, haiku and gemini sets, k=1, every suite, live, LangSmith; at most $0.40 per set
-```
-
-Its thresholds are fixed in `evals/RESULTS.md` ("Wave 3: the agent loop") and its results
-are filled there. `make eval-replay` replays the chosen models' recorded answers offline;
+model for SOP search. The agent role was measured again on the loop by the wave 3
+bake-off, which also gives the measured cost per load. Its thresholds are fixed in
+`evals/RESULTS.md` ("Wave 3: the agent loop") and its results are filled there. `make eval-replay` replays the chosen models' recorded answers offline;
 after a prompt, SOP, scenario or model change, re-record each suite with
 `uv run agent eval run --suite S --mode record --cost-cap-usd 0.20`.
 
@@ -257,7 +251,7 @@ src/freight_agent/
 sops/            the seed SOPs: standard, client and client + load-type sections (Markdown)
 evals/           scenarios (core, agent, docs, per broker), broker exports, fixtures (the
                  load, the Acme SOP, POD and BOL PDFs), cassettes, results (gitignored)
-config/          models per role, prices, the embedding model, bake-off candidate sets
+config/          models per role, prices, the embedding model
 web/             React + Vite platform UI
 tests/           unit, contract, property, integration, evalkit
 ```
