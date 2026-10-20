@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from freight_agent.application.contracts import IngestResult
-from freight_agent.application.runtime import RuntimeConfig
+from freight_agent.application.runtime import RuntimeConfig, graph_deps
 from freight_agent.domain.actions import (
     CloseObligation,
     CloseStatus,
@@ -28,6 +28,7 @@ from freight_agent.domain.outbox import OutboxKind, OutboxStatus
 from freight_agent.domain.ping_filter import PingFilterConfig, RiskTracker
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import (
     ASK_AGAIN,
     ASK_ETA,
@@ -653,3 +654,52 @@ async def test_a_skipped_run_went_through_the_prefilter_alone(load: Load) -> Non
     (run,) = await world.tick(at(7, 13))
 
     assert (run.status, run.nodes, run.usage) == (RunStatus.SKIPPED, ("prefilter",), ())
+
+
+# --- the prompt versions a run records ----------------------------------------------------
+
+
+async def test_a_message_run_records_the_gate_and_the_agent_prompt_versions(load: Load) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO number?")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    world.model.push(DECIDE, plan())
+
+    (run,) = await world.tick(at(7, 13))
+
+    assert run.prompts == {"gate": PROMPTS.gate.version, "agent": PROMPTS.agent.version}
+    assert [c.request.prompt_version for c in world.model.calls] == [
+        PROMPTS.gate.version,
+        PROMPTS.agent.version,
+    ]
+    (stored,) = (await world.snapshot()).runs
+    assert stored.prompts == run.prompts
+
+
+async def test_a_run_records_only_the_prompts_it_sent(load: Load) -> None:
+    """A risk event has its intent from code (no gate prompt), an acknowledgement ends at
+    the gate (no agent prompt), and a skipped run sent nothing."""
+    world = await World(load).start()
+    (risk,) = await world.high_risk_at_seven()
+    await world.message(at(7, 20), "ok")
+    world.model.push(GATE, decision(Intent.ACKNOWLEDGEMENT, act=False))
+    await world.message(at(7, 21), "   ", message_id="msg_blank")
+
+    ack, blank = await world.tick(at(7, 22))
+
+    assert risk.prompts == {"agent": PROMPTS.agent.version}
+    assert (ack.status, ack.prompts) == (RunStatus.NOOP, {"gate": PROMPTS.gate.version})
+    assert (blank.status, blank.prompts) == (RunStatus.SKIPPED, {})
+
+
+def test_the_graph_services_run_on_the_runtimes_model_and_templates(load: Load) -> None:
+    world = World(load)
+
+    services = graph_deps(world.deps)
+
+    assert (services.gate.prompt, services.agent.prompt) == (PROMPTS.gate, PROMPTS.agent)
+    assert services.knowledge is world.deps.knowledge
+    assert services.prompt_versions() == {
+        "gate": PROMPTS.gate.version,
+        "agent": PROMPTS.agent.version,
+    }

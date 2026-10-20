@@ -29,6 +29,7 @@ from freight_agent.ports.llm import (
     SchemaT,
 )
 from tests.fakes import FakeModel, Round, act
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import (
     ASK_ETA,
     DECIDE,
@@ -746,3 +747,13 @@ async def test_a_run_whose_context_never_loaded_asks_for_no_trace_link(load: Loa
 
     assert [(r.status, r.trace_url, r.nodes) for r in runs] == [(RunStatus.FAILED, None, ())] * 3
     assert tracer.ids == []
+
+
+async def test_a_failed_gate_call_still_records_the_prompt_it_was_sent(load: Load) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "Where do I park?")
+
+    (run,) = await world.tick(at(7, 13))  # nothing queued: the gate model fails
+
+    assert run.status is RunStatus.ESCALATED
+    assert run.prompts == {"gate": PROMPTS.gate.version}

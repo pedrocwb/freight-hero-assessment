@@ -54,6 +54,7 @@ from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.ports.documents import BlobStore
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
+from freight_agent.ports.prompts import Prompts
 
 # Each tick fires every due timer, so a timer still due after this many ticks at
 # one instant means the runtime never fires it; stop instead of looping forever.
@@ -335,10 +336,13 @@ class TrialRuntime:
     blobs: MemoryBlobStore
 
 
-def build_trial_runtime(model: LanguageModel, knowledge: SopIndex, start: datetime) -> TrialRuntime:
+def build_trial_runtime(
+    model: LanguageModel, knowledge: SopIndex, start: datetime, prompts: Prompts
+) -> TrialRuntime:
     """The product runtime on a fresh memory store, with a virtual clock at `start`,
-    recording gateways, deterministic ids, the document pipeline and no trace links (in
-    an experiment the runs nest under the example's own trace)."""
+    recording gateways, deterministic ids, the document pipeline, the experiment's prompt
+    templates and no trace links (in an experiment the runs nest under the example's own
+    trace)."""
     clock = VirtualClock(start)
     counted = CountingModel(model)
     blobs = MemoryBlobStore()
@@ -351,6 +355,7 @@ def build_trial_runtime(model: LanguageModel, knowledge: SopIndex, start: dateti
         gateways=RecordingGateways().as_gateways(),
         tracer=NullTracer(),
         blobs=blobs,
+        prompts=prompts,
         # A harness error (a bug) must end the play with its own message, not become a
         # failed run that the scenario then reports as the agent's.
         config=RuntimeConfig(reraise_unexpected=True),
@@ -363,6 +368,7 @@ def build_trial_runtime(model: LanguageModel, knowledge: SopIndex, start: dateti
         blobs=blobs,
         pages=PdfiumPageReader(),
         knowledge=knowledge,
+        prompt=prompts.extract,
         timeout_s=deps.config.llm_timeout_s,
     )
     deps = replace(deps, documents=pipeline)
@@ -374,6 +380,7 @@ async def play_scenario(
     *,
     evals_dir: Path,
     knowledge: SopIndex,
+    prompts: Prompts,
     model: LanguageModel,
     on_step: Callable[[StepObservation], None] | None = None,
 ) -> Played:
@@ -382,7 +389,7 @@ async def play_scenario(
     try:
         load = read_load(evals_dir, scenario)
         files = read_attachments(evals_dir, scenario)
-        trial = build_trial_runtime(model, knowledge, scenario_start(scenario))
+        trial = build_trial_runtime(model, knowledge, scenario_start(scenario), prompts)
     except ScenarioSetupError as exc:
         return Played(scenario_id=scenario.id, error=str(exc))
     player = ScenarioPlayer(
@@ -393,7 +400,7 @@ async def play_scenario(
         model=trial.model,
         blobs=trial.blobs,
         files=files,
-        judge=Judge(model),
+        judge=Judge(model, prompts.judge),
     )
     observations: list[StepObservation] = []
     where = "register_load"

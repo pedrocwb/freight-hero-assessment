@@ -7,8 +7,10 @@ builds it by these names (`bootstrap.build_documents`):
 
     DocumentPipeline(
         uow_factory=..., clock=..., ids=..., llm=..., blobs=..., pages=..., knowledge=...,
-        timeout_s=...
+        prompt=..., timeout_s=...
     )
+
+`prompt` is the extract template (`Prompts.extract`).
 
 Per pending document, oldest first, in three phases so that no unit of work is open
 while the file is read or the model thinks (the memory store serializes units of work,
@@ -17,10 +19,11 @@ a database would hold the rows):
 1. read the load and the seal its messages reported, in one short unit of work, and its
    broker's catalog from the knowledge index, as a run does (`SopIndex.broker`);
 2. outside any transaction: the bytes from the blob store, the pages from the page
-   reader (in a thread: PDF work blocks), then one `extract` call that classifies the
-   document among the broker's `DocumentTypeDef`s and reads the type's fields. A page
-   whose text is too thin goes as an image (`LlmRequest.images`). The answer is checked
-   in code (`domain.documents.read_extraction`);
+   reader (in a thread: PDF work blocks), then one `extract` call, on the extract
+   template, that classifies the document among the broker's `DocumentTypeDef`s and
+   reads the type's fields. A page whose text is too thin goes as an image
+   (`LlmRequest.images`). The answer is checked in code
+   (`domain.documents.read_extraction`);
 3. one unit of work: append the `document_processed` event (`doc:{document_id}`), save
    the document, queue the event, and, for a clean `processed` document, close as
    `satisfied` the open obligation of each `DocumentRequirement` of its type (its
@@ -50,7 +53,11 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from freight_agent.application.prompts_documents import extract_system, extract_user
+from freight_agent.application.prompts_documents import (
+    check_extract_prompt,
+    extract_system,
+    extract_user,
+)
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.documents import (
     Document,
@@ -69,6 +76,7 @@ from freight_agent.ports.clock import Clock, IdGenerator
 from freight_agent.ports.documents import BlobStore, PageReader
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import ImageInput, LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.ports.prompts import ChatPrompt
 from freight_agent.ports.repositories import UnitOfWork, UnitOfWorkFactory
 
 logger = logging.getLogger(__name__)
@@ -116,8 +124,11 @@ class DocumentPipeline:
         blobs: BlobStore,
         pages: PageReader,
         knowledge: SopIndex,
+        prompt: ChatPrompt,
         timeout_s: float = 60.0,
     ) -> None:
+        """`PromptError` when the template does not fit (`check_extract_prompt`)."""
+        self._prompt = check_extract_prompt(prompt)
         self._uow_factory = uow_factory
         self._clock = clock
         self._ids = ids
@@ -186,14 +197,16 @@ class DocumentPipeline:
             return Reading.failed("the file has no text and no page image to read")
         request = LlmRequest(
             role=ModelRole.EXTRACT,
-            system=extract_system(types),
+            system=extract_system(self._prompt, types),
             user=extract_user(
+                self._prompt,
                 filename=document.filename,
                 content_type=document.content_type,
                 pages=pages,
                 image_pages=[p.number for p in imaged],
             ),
             timeout_s=self._timeout_s,
+            prompt_version=self._prompt.version,
             images=tuple(
                 ImageInput(data=p.image_png, media_type="image/png")
                 for p in imaged
@@ -202,12 +215,13 @@ class DocumentPipeline:
         )
         response = await self._llm.generate(request, Extraction)
         logger.info(
-            "document %s read as %s (confidence %.2f, %d image(s), $%.5f)",
+            "document %s read as %s (confidence %.2f, %d image(s), $%.5f, prompt %s)",
             document.document_id,
             response.parsed.type_id,
             response.parsed.confidence,
             len(request.images),
             response.usage.cost_usd,
+            self._prompt.version,
         )
         return read_extraction(response.parsed, types, inputs.load, reported_seal=inputs.seal)
 

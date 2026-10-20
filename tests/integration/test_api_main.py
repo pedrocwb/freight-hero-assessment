@@ -22,6 +22,7 @@ def offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in Settings.model_fields:
         monkeypatch.delenv(name.upper(), raising=False)
     monkeypatch.setenv("MODELS_CONFIG", str(ROOT / "config" / "models.yaml"))
+    monkeypatch.setenv("PROMPTS_DIR", str(ROOT / "prompts"))
     monkeypatch.chdir(tmp_path)
 
 

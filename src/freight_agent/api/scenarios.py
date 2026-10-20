@@ -171,7 +171,7 @@ class ScenarioRunner:
                 model=session.model,
                 blobs=session.blobs,
                 files=files,
-                judge=Judge(session.inner_model),
+                judge=Judge(session.inner_model, session.simulation.runtime.prompts.judge),
             )
             await self._service.start_scenario(session, player)
         except BaseException:

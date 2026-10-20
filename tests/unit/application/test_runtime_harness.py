@@ -40,6 +40,7 @@ from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.tracing import Tracer
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 LA = ZoneInfo("America/Los_Angeles")
 LOAD_ID = "481207"
@@ -185,6 +186,7 @@ class World:
             gateways=wrap_gateways(recording) if wrap_gateways else recording,
             tracer=tracer or NullTracer(),
             blobs=MemoryBlobStore(),
+            prompts=PROMPTS,
             config=config or RuntimeConfig(),
         )
         self.runtime = AgentRuntime(self.deps)

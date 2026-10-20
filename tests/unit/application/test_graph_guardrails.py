@@ -42,6 +42,7 @@ from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.evalkit.runner import build_trial_runtime
 from freight_agent.ports.llm import ModelRole
 from tests.fakes import FakeModel, Round, call
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
@@ -67,7 +68,7 @@ async def play(
 ) -> Played:
     """One inbound message on a fresh runtime, and the run a minute later."""
     trial = build_trial_runtime(
-        model, MemorySopIndex.from_files(ROOT / "sops"), when - timedelta(minutes=5)
+        model, MemorySopIndex.from_files(ROOT / "sops"), when - timedelta(minutes=5), PROMPTS
     )
     await trial.runtime.register_load(load)
     trial.clock.set(when)

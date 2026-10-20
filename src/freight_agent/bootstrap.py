@@ -13,6 +13,12 @@ key it falls back to no tracing, with a warning that names no secret. Without
 `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run that needs the
 model escalates to a Hero, saying the key is missing.
 
+The prompt templates come from the LangSmith Prompt Hub, at the references
+`config/prompts.yaml` pins (`build_prompts`), resolved once per process and checked
+against the code that renders them before anything runs. Without `LANGSMITH_API_KEY`, or
+with `PROMPTS_SOURCE=local`, they are the repository copy in `prompts/`, with a warning
+for the missing key; a pin the Hub cannot serve stops the start, naming the fix.
+
 Wave 3 adapters are found by name, through `LazyAdapter`, so a card plugs in without
 editing this file:
 
@@ -48,6 +54,9 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.prompts.hub import LangSmithPromptRegistry, langsmith_hub
+from freight_agent.adapters.prompts.local import LocalPromptRegistry
+from freight_agent.adapters.prompts.pins import load_pins
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.ports.clock import Clock
@@ -55,6 +64,7 @@ from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
+from freight_agent.ports.prompts import PromptError, PromptRegistry, Prompts
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
 from freight_agent.settings import MissingSetting, Settings, is_set
@@ -98,7 +108,7 @@ class LazyAdapter:
 
 
 # `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, knowledge=,
-# timeout_s=)` and `PdfiumPageReader()` (card W3-DOC).
+# prompt=, timeout_s=)` and `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
 
@@ -195,6 +205,38 @@ def enable_native_tracing(settings: Settings) -> None:
     os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
 
 
+# --- prompts -------------------------------------------------------------------
+
+
+def build_prompt_registry(settings: Settings) -> PromptRegistry:
+    """The Hub, at the pins of `PROMPTS_CONFIG` (every role at `PROMPTS_TAG` when it is
+    set), or the repository copy in `PROMPTS_DIR`: with `PROMPTS_SOURCE=local`, or
+    without `LANGSMITH_API_KEY` (a warning, which names no secret)."""
+    local = LocalPromptRegistry(settings.prompts_dir)
+    if settings.prompts_source == "local":
+        return local
+    key = settings.langsmith_api_key
+    if not is_set(key):
+        logger.warning(
+            "LANGSMITH_API_KEY is not set: the prompts are the repository copy in %s, "
+            "not the LangSmith Hub's pinned versions",
+            settings.prompts_dir,
+        )
+        return local
+    pins = load_pins(settings.prompts_config, tag=settings.prompts_tag)
+    hub = langsmith_hub(key.get_secret_value(), os.environ.get("LANGSMITH_ENDPOINT"))
+    return LangSmithPromptRegistry(hub, pins)
+
+
+def build_prompts(settings: Settings) -> Prompts:
+    """Every role's template. The Hub's are pulled once per process and kept (the
+    registry's cache), so a platform reset or a new runtime reads the same versions."""
+    try:
+        return Prompts.resolve(build_prompt_registry(settings))
+    except PromptError as exc:
+        raise BootstrapError(str(exc)) from None
+
+
 # --- knowledge, blobs and documents ----------------------------------------------
 
 
@@ -223,6 +265,7 @@ def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
         blobs=deps.blobs,
         pages=pages(),
         knowledge=deps.knowledge,
+        prompt=deps.prompts.extract,
         timeout_s=deps.config.llm_timeout_s,
     )
 
@@ -240,11 +283,12 @@ def build_runtime_deps(
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
     tracer: Tracer | None = None,
+    prompts: Prompts | None = None,
 ) -> RuntimeDeps:
     """Every port of the runtime, from the settings; what the caller passes wins.
 
     `gateways` defaults to recording fakes: this build has no real integrations, so
-    deliveries are recorded, not sent.
+    deliveries are recorded, not sent. `prompts` default to `build_prompts`.
     """
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
@@ -259,6 +303,7 @@ def build_runtime_deps(
         gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
         tracer=build_tracer(settings) if tracer is None else tracer,
         blobs=build_blobs(settings) if blobs is None else blobs,
+        prompts=build_prompts(settings) if prompts is None else prompts,
         config=RuntimeConfig(),
     )
     return replace(deps, documents=build_documents(deps))
@@ -274,6 +319,7 @@ def build_runtime(
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
     tracer: Tracer | None = None,
+    prompts: Prompts | None = None,
 ) -> AgentRuntime:
     """The agent, wired from the settings (see `build_runtime_deps`)."""
     return AgentRuntime(
@@ -286,6 +332,7 @@ def build_runtime(
             knowledge=knowledge,
             blobs=blobs,
             tracer=tracer,
+            prompts=prompts,
         )
     )
 

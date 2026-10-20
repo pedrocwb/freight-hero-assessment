@@ -13,17 +13,18 @@ from pydantic import ValidationError
 
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.evalkit.judge import (
-    JUDGE_SYSTEM_PROMPT,
+    JUDGE_SYSTEM_VARIABLES,
+    JUDGE_USER_VARIABLES,
     Judge,
     JudgeResult,
     JudgeSpec,
     JudgeVerdict,
     judged_texts,
-    prompt_fingerprint,
     render_judge_prompt,
 )
 from freight_agent.ports.llm import ChatRequest, LlmError, LlmRequest, ModelRole
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 T0 = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
 RUBRIC = "The SMS is polite and asks for the ETA to the pickup."
@@ -68,7 +69,7 @@ def test_every_text_is_shown_with_its_kind_and_recipient_and_stage_updates_are_n
 
 @pytest.mark.unit
 def test_the_prompt_holds_the_rubric_and_numbered_texts() -> None:
-    prompt = render_judge_prompt(f"  {RUBRIC}\n", ["one", "two"])
+    prompt = render_judge_prompt(PROMPTS.judge, f"  {RUBRIC}\n", ["one", "two"])
 
     assert prompt.startswith(f"## Rubric\n\n{RUBRIC}\n\n## Texts the agent created")
     assert "(2)\n\n1. one\n2. two\n" in prompt
@@ -80,13 +81,15 @@ async def test_the_judge_calls_the_judge_role_without_tools_and_returns_the_verd
     verdict = JudgeVerdict(reasons=("polite", "asks for the ETA"), score=0.9)
     model.push(ModelRole.JUDGE, verdict)
 
-    result = await Judge(model, timeout_s=12).grade(JudgeSpec(rubric=RUBRIC), [SMS])
+    result = await Judge(model, PROMPTS.judge, timeout_s=12).grade(JudgeSpec(rubric=RUBRIC), [SMS])
 
     (call,) = model.calls
     assert (call.role, call.schema) == (ModelRole.JUDGE, "JudgeVerdict")
     assert type(call.request) is LlmRequest  # a forced answer, not a chat with tools
     assert not isinstance(call.request, ChatRequest)
-    assert call.request.system == JUDGE_SYSTEM_PROMPT
+    assert call.request.system == PROMPTS.judge.system.format({})
+    assert call.request.system.startswith("You grade the texts that a freight load agent")
+    assert call.request.prompt_version == PROMPTS.judge.version
     assert call.request.timeout_s == 12
     assert RUBRIC in call.request.user and "Hi, what is your ETA?" in call.request.user
     assert result.verdict == verdict
@@ -99,7 +102,7 @@ async def test_the_judge_calls_the_judge_role_without_tools_and_returns_the_verd
 async def test_a_step_with_no_text_is_not_sent_to_the_model_and_fails() -> None:
     model = FakeModel()
 
-    result = await Judge(model).grade(JudgeSpec(rubric=RUBRIC), [STAGE])
+    result = await Judge(model, PROMPTS.judge).grade(JudgeSpec(rubric=RUBRIC), [STAGE])
 
     assert model.calls == []
     assert result.error == "nothing to judge: the step created no text"
@@ -111,7 +114,7 @@ async def test_a_model_failure_is_an_error_result_not_an_exception() -> None:
     model = FakeModel()
     model.push(ModelRole.JUDGE, LlmError("timed out"))
 
-    result = await Judge(model).grade(JudgeSpec(rubric=RUBRIC, min_score=0.5), [SMS])
+    result = await Judge(model, PROMPTS.judge).grade(JudgeSpec(rubric=RUBRIC, min_score=0.5), [SMS])
 
     assert result.error == "the judge model failed: LlmError: timed out"
     assert (result.verdict, result.passed) == (None, False)
@@ -123,7 +126,7 @@ async def test_other_errors_propagate_so_a_broken_harness_is_loud() -> None:
     model.push(ModelRole.JUDGE, RuntimeError("a bug"))
 
     with pytest.raises(RuntimeError, match="a bug"):
-        await Judge(model).grade(JudgeSpec(rubric=RUBRIC), [SMS])
+        await Judge(model, PROMPTS.judge).grade(JudgeSpec(rubric=RUBRIC), [SMS])
 
 
 @pytest.mark.unit
@@ -154,9 +157,6 @@ def test_a_score_outside_0_to_1_is_refused() -> None:
 
 
 @pytest.mark.unit
-def test_the_fingerprint_holds_the_prompt_and_the_verdict_schema() -> None:
-    fingerprint = prompt_fingerprint()
-
-    assert "You grade the texts" in fingerprint
-    assert '"score"' in fingerprint and '"reasons"' in fingerprint
-    assert fingerprint == prompt_fingerprint()
+def test_the_judge_template_uses_every_variable_and_its_system_message_none() -> None:
+    assert PROMPTS.judge.system.variables == JUDGE_SYSTEM_VARIABLES == frozenset()
+    assert PROMPTS.judge.user.variables == JUDGE_USER_VARIABLES

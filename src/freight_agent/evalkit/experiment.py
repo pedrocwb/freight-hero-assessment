@@ -11,10 +11,12 @@
   tag in the workspace it is simply not linked.
 - **Experiment**: `langsmith.evaluation.aevaluate` over the dataset, `num_repetitions=k`,
   with the run's reproducibility metadata (`evalkit.metadata`: git sha, the model of each
-  role, the SOP tree hash, a hash of each rendered system prompt).
+  role, the SOP tree hash, the version of each prompt template, its Hub commit, and the
+  reference it was resolved from).
 - **Target** (`ScenarioTarget`): plays one scenario, live, on a fresh in-memory runtime
-  with the virtual clock and recording gateways (`evalkit.runner.play_scenario`, the
-  player the platform uses too) and returns each step's observations. The runtime's
+  with the virtual clock, recording gateways and the run's prompt templates
+  (`evalkit.runner.play_scenario`, the player the platform uses too) and returns each
+  step's observations. The runtime's
   LangGraph runs nest under the example's trace, node by node, with every model round.
   The judge runs inside the target, right after its step, so its verdict is part of the
   outputs and the cost cap counts it.
@@ -47,6 +49,7 @@ from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.evalkit.suite import gating
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
+from freight_agent.ports.prompts import Prompts
 
 logger = logging.getLogger(__name__)
 
@@ -300,12 +303,14 @@ class ScenarioTarget:
         *,
         evals_dir: Any,
         knowledge: SopIndex,
+        prompts: Prompts,
         model_factory: Callable[[], LanguageModel],
         meter: CostMeter,
     ) -> None:
         self._scenarios = scenarios
         self._evals_dir = evals_dir
         self._knowledge = knowledge
+        self._prompts = prompts
         self._model_factory = model_factory
         self.meter = meter
 
@@ -322,6 +327,7 @@ class ScenarioTarget:
             scenario,
             evals_dir=self._evals_dir,
             knowledge=self._knowledge,
+            prompts=self._prompts,
             model=self._model_factory(),
         )
         meter.spent_usd += played.cost_usd

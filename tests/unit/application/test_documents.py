@@ -21,6 +21,10 @@ from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
+from freight_agent.application.prompts_documents import (
+    EXTRACT_SYSTEM_VARIABLES,
+    EXTRACT_USER_VARIABLES,
+)
 from freight_agent.domain.broker import (
     Broker,
     DocumentRequirement,
@@ -42,6 +46,7 @@ from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.llm import ChatRequest, ImageInput, LlmError, ModelRole
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
@@ -83,6 +88,7 @@ class World:
             blobs=self.blobs,
             pages=self.pages,
             knowledge=MemorySopIndex([], brokers=self.brokers),
+            prompt=PROMPTS.extract,
             timeout_s=12.0,
         )
 
@@ -267,7 +273,7 @@ async def test_the_extract_call_carries_the_types_and_the_text_but_no_value_of_t
     request = call.request
     assert (call.role, call.schema, request.images) == (EXTRACT, "Extraction", ())
     assert not isinstance(request, ChatRequest)  # a forced answer, no tool loop
-    assert request.timeout_s == 12.0
+    assert (request.timeout_s, request.prompt_version) == (12.0, PROMPTS.extract.version)
     assert "`pod` (Proof of delivery)" in request.system
     assert "`receiver` (text): The receiving facility (consignee)" in request.system
     assert "`rate_confirmation`" in request.system
@@ -645,3 +651,8 @@ async def test_a_document_that_cannot_be_saved_stays_pending_and_the_others_go_o
 
     assert [e.event_id for e in events] == ["doc:doc_2"]
     assert (await world.document("doc_1")).status is DocumentStatus.PENDING
+
+
+def test_the_extract_template_uses_every_variable_the_pipeline_computes() -> None:
+    assert PROMPTS.extract.system.variables == EXTRACT_SYSTEM_VARIABLES
+    assert PROMPTS.extract.user.variables == EXTRACT_USER_VARIABLES

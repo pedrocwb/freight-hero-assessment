@@ -4,6 +4,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from pydantic import Field
+
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.intents import GateDecision
@@ -71,6 +73,10 @@ class RunRecord(DomainModel):
     rejections: int = 0  # action tool calls a rule refused
     # The run graph's nodes the run went through, in order, one entry per visit.
     nodes: tuple[str, ...] = ()
+    # Role -> the version of the prompt template the run sent to that role's model: a
+    # LangSmith Hub commit, or `local:<sha256 prefix>` of the repository copy. Only the
+    # roles the run called (the gate for a message it triaged, the agent once its loop ran).
+    prompts: dict[str, str] = Field(default_factory=dict[str, str])
 
     @property
     def cost_usd(self) -> float:

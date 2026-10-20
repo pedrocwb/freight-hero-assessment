@@ -2,16 +2,17 @@
 
 Two experiments can only be compared when it is known what changed between them: the
 code (git sha, uncommitted edits), the SOP text (the tree's content hash), the model of
-each role and the prompts the models read. Each prompt is hashed as rendered, for every
-broker of the SOP tree (the gate's and the agent's prompts are rendered from the
-broker's catalog and limits), so a changed word, intent or limit shows as a changed hash.
-LangSmith records this on the experiment, next to its results.
+each role and the prompts the models read. A prompt is its template's version (the
+LangSmith Hub commit, or `local:<sha256 prefix>` of the repository copy) and the
+reference it was resolved from (`freight-agent-agent:candidate`): an experiment run on a
+candidate tag says which commit it measured, and the catalog the templates are rendered
+with is the SOP tree's, in `sop_version`. LangSmith records this on the experiment, next
+to its results.
 
 Collecting never fails a run: a value that cannot be read (no git, a broken models
 file) is recorded as unknown (`None`), and the run itself reports the real problem.
 """
 
-import hashlib
 import platform
 import subprocess
 from collections.abc import Callable
@@ -22,13 +23,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.llm.models_config import load_models_config
-from freight_agent.application.prompts import render_agent_system_prompt, render_gate_system_prompt
-from freight_agent.application.prompts_documents import extract_system
-from freight_agent.domain.broker import Broker, standard_broker
-from freight_agent.evalkit.judge import JUDGE_SYSTEM_PROMPT
-from freight_agent.ports.knowledge import SopIndex
+from freight_agent.ports.prompts import Prompts
 
-_HASH_LENGTH = 12
 _GIT_TIMEOUT_S = 10
 
 # Runs a git command in a folder: its stdout, or None when git is missing or fails.
@@ -48,27 +44,30 @@ class RunMetadata(BaseModel):
     git_dirty: bool | None = None  # uncommitted or untracked files in the checkout
     sop_version: str | None = None
     models: dict[str, list[str]] = {}  # role -> [primary, *fallbacks]
-    prompts: dict[str, str] = {}  # "<prompt>:<broker>" -> hash of the rendered text
+    prompts: dict[str, str] = {}  # role -> template version (Hub commit, or local:<hash>)
+    prompt_refs: dict[str, str] = {}  # role -> what the version was resolved from
     python: str | None = None
 
     def for_langsmith(self) -> dict[str, Any]:
-        """Flat values, as LangSmith shows and filters an experiment's metadata."""
-        data: dict[str, Any] = self.model_dump(mode="json", exclude={"models", "prompts"})
+        """Flat values, as LangSmith shows and filters an experiment's metadata:
+        `prompt_agent` is the commit, `prompt_ref_agent` the pin it came from."""
+        nested = {"models", "prompts", "prompt_refs"}
+        data: dict[str, Any] = self.model_dump(mode="json", exclude=nested)
         data.update({f"model_{role}": ", ".join(chain) for role, chain in self.models.items()})
-        data.update({f"prompt_{name}": sha for name, sha in self.prompts.items()})
+        data.update({f"prompt_{role}": version for role, version in self.prompts.items()})
+        data.update({f"prompt_ref_{role}": ref for role, ref in self.prompt_refs.items()})
         return data
 
 
-async def collect_metadata(
+def collect_metadata(
     *,
     created_at: datetime,
     suite: str,
     k: int,
     cost_cap_usd: float,
-    knowledge: SopIndex,
-    sops_dir: Path,
     sop_version: str | None,
     models_config: Path,
+    prompts: Prompts,
     repo: Path,
     git: GitRunner | None = None,
 ) -> RunMetadata:
@@ -82,28 +81,10 @@ async def collect_metadata(
         git_dirty=dirty,
         sop_version=sop_version,
         models=_models(models_config),
-        prompts=prompt_hashes(await brokers(knowledge, sops_dir)),
+        prompts=prompts.versions(),
+        prompt_refs=prompts.refs(),
         python=platform.python_version(),
     )
-
-
-async def brokers(knowledge: SopIndex, sops_dir: Path) -> list[Broker]:
-    """The standard catalog and every client folder's catalog, by id."""
-    clients = sops_dir / "clients"
-    ids = sorted(p.name for p in clients.iterdir() if p.is_dir()) if clients.is_dir() else []
-    found = [standard_broker(), *[await knowledge.broker(i) for i in ids]]
-    return [*{b.broker_id: b for b in found}.values()]
-
-
-def prompt_hashes(catalogs: list[Broker]) -> dict[str, str]:
-    """A hash of each system prompt as the models read it, per broker."""
-    prompts = {"judge": JUDGE_SYSTEM_PROMPT}
-    for broker in catalogs:
-        prompts[f"gate:{broker.broker_id}"] = render_gate_system_prompt(broker)
-        prompts[f"agent:{broker.broker_id}"] = render_agent_system_prompt(broker)
-        if broker.document_types:
-            prompts[f"extract:{broker.broker_id}"] = extract_system(broker.document_types)
-    return {name: _short_hash(text) for name, text in prompts.items()}
 
 
 def run_git(repo: Path, args: list[str]) -> str | None:
@@ -142,7 +123,3 @@ def _models(path: Path) -> dict[str, list[str]]:
         role.value: [role_config.model, *role_config.fallbacks]
         for role, role_config in config.roles.items()
     }
-
-
-def _short_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_HASH_LENGTH]

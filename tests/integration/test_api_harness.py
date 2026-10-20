@@ -98,6 +98,7 @@ def api_settings(**overrides: Any) -> Settings:
         "sops_dir": ROOT / "sops",
         "evals_dir": ROOT / "evals",
         "models_config": ROOT / "config" / "models.yaml",
+        "prompts_dir": ROOT / "prompts",
         **overrides,
     }
     return Settings(_env_file=None, **values)  # pyright: ignore[reportCallIssue]

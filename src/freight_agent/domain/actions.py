@@ -189,10 +189,11 @@ FINISH = "finish"
 
 
 class AgentOutcome(DomainModel):
-    """Call it once, at the end, after you staged every action with its action tool."""
+    """The agent's final answer, the `finish` tool: why it did what it staged."""
 
-    # The agent's final answer, `finish` (the schema's title names the answer tool), and
-    # the docstring above is what the model reads about it. The actions are not in it:
+    # The schema's title names the answer tool. What the model reads about the tool is the
+    # agent template's `finish` text (`prompts/agent.yaml`, `tools.finish`), sent with each
+    # round as `LlmRequest.answer_description`, not this docstring. The actions are not in it:
     # the agent staged each one with its action tool, where the rules judged it at the
     # call. `intent` labels the event with a catalog id when the agent read it differently
     # from the gate; `no_procedure` says no SOP section covers the event.

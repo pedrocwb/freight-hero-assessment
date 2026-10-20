@@ -16,7 +16,7 @@ working directory, which is the repository root for `uv run agent` and the API.
 """
 
 from pathlib import Path
-from typing import TypeGuard
+from typing import Literal, TypeGuard
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     evals_dir: Path = Path("evals")
     web_dist: Path = Path("web/dist")  # the built UI the API serves, when it exists
     blobs_dir: Path = Path("blobs")  # attachment bytes (`FsBlobStore`)
+
+    # Prompts: the LangSmith Hub version each role runs, or the repository copy
+    prompts_config: Path = Path("config/prompts.yaml")  # role -> Hub reference
+    prompts_dir: Path = Path("prompts")  # the repository copy, `<role>.yaml`
+    # auto: the Hub when LANGSMITH_API_KEY is set, else the copy; local: the copy
+    prompts_source: Literal["auto", "local"] = "auto"
+    prompts_tag: str | None = None  # every role at this Hub tag instead of its pin
 
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "the agent's model")

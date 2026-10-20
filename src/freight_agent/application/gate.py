@@ -2,8 +2,9 @@
 
 System events (risk change, timer, attachment, processed document) get their intent
 from code; a timer's intent is the follow-up intent of its obligation kind in the
-broker's catalog. Only inbound messages call the gate model, on a prompt rendered from
-the broker's message intents (`prompts.render_gate_system_prompt`). The catalog says
+broker's catalog. Only inbound messages call the gate model, on the gate's template
+(`ports.prompts`, `prompts/gate.yaml`) rendered with the broker's message intents
+(`prompts.gate_system_variables`) and the message. The catalog says
 which intents a message can have and which must act (`IntentDef.must_act`): those always
 go on to the agent, whatever the model said, so a weak model cannot drop a required
 action; it can only fail to skip noise. A broker with `triage` off skips the model: every
@@ -14,13 +15,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from freight_agent.application.context import RunContext
-from freight_agent.application.prompts import render_gate_prompt, render_gate_system_prompt
+from freight_agent.application.prompts import (
+    GATE_SYSTEM_VARIABLES,
+    GATE_USER_VARIABLES,
+    check_variables,
+    render_gate_prompt,
+    render_gate_system_prompt,
+)
 from freight_agent.domain.broker import Broker, standard_broker
 from freight_agent.domain.events import EventType
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import DelayRisk
 from freight_agent.domain.runs import Usage
 from freight_agent.ports.llm import LanguageModel, LlmRequest, ModelRole
+from freight_agent.ports.prompts import ChatPrompt
 
 
 def follow_up_intent(kind: str, broker: Broker | None = None) -> str | None:
@@ -46,10 +54,23 @@ class GateResult:
         return self.decision.act or self.broker.must_act(self.decision.intent)
 
 
+def check_gate_prompt(prompt: ChatPrompt) -> ChatPrompt:
+    """`prompt`, or `PromptError` when it names a variable the gate does not compute."""
+    return check_variables(prompt, system=GATE_SYSTEM_VARIABLES, user=GATE_USER_VARIABLES)
+
+
 class Gate:
-    def __init__(self, llm: LanguageModel, *, timeout_s: float = 60.0) -> None:
+    def __init__(self, llm: LanguageModel, prompt: ChatPrompt, *, timeout_s: float = 60.0) -> None:
+        """`PromptError` when the template does not fit the gate (`check_gate_prompt`)."""
         self._llm = llm
+        self.prompt = check_gate_prompt(prompt)
         self._timeout_s = timeout_s
+
+    @staticmethod
+    def calls_model(ctx: RunContext) -> bool:
+        """Whether the event goes to the gate model: a message whose meaning code does not
+        know, for a broker that triages."""
+        return system_decision(ctx) is None and ctx.broker.triage
 
     async def classify(self, ctx: RunContext) -> GateResult:
         """`LlmError` propagates: the runtime escalates a model failure to a Hero."""
@@ -60,9 +81,10 @@ class Gate:
             return GateResult(decision=_UNTRIAGED, broker=ctx.broker)
         request = LlmRequest(
             role=ModelRole.GATE,
-            system=render_gate_system_prompt(ctx.broker),
-            user=render_gate_prompt(ctx),
+            system=render_gate_system_prompt(self.prompt, ctx.broker),
+            user=render_gate_prompt(self.prompt, ctx),
             timeout_s=self._timeout_s,
+            prompt_version=self.prompt.version,
         )
         response = await self._llm.generate(request, GateDecision)
         decision = _message_decision(response.parsed, ctx.broker)

@@ -97,11 +97,18 @@ class ImageInput:
 
 @dataclass(frozen=True)
 class LlmRequest:
+    """`system` and `user` are rendered from the role's prompt template, whose version
+    (`ports.prompts.ChatPrompt.version`) the call's trace carries as `prompt_version`.
+    `answer_description` is what the model reads about the answer tool when the template
+    sets it (the agent's `finish`); None leaves the schema's docstring."""
+
     role: ModelRole
     system: str
     user: str
     timeout_s: float = 60.0  # this one call; the run deadline bounds the whole run
     images: tuple[ImageInput, ...] = ()
+    prompt_version: str | None = None
+    answer_description: str | None = None
 
 
 @dataclass(frozen=True)

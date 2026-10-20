@@ -352,7 +352,7 @@ class _Nodes:
             model=model,
             blobs=blobs,
             files=files,
-            judge=Judge(inner),
+            judge=Judge(inner, runtime.prompts.judge),
         )
         return World(
             scenario=scenario,

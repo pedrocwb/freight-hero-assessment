@@ -24,6 +24,7 @@ from tests.integration.test_api_harness import (
     open_api,
     plan,
 )
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
@@ -106,6 +107,17 @@ async def test_a_run_lists_the_graph_nodes_it_went_through(api: Api) -> None:
 
     assert run["nodes"] == ["prefilter", "gate", "knowledge", "agent", "tools", "agent", "validate"]
     assert set(run["nodes"]) <= set((await api.get("/api/graph"))["nodes"])
+
+
+async def test_a_run_shows_the_version_of_each_prompt_it_sent(api: Api) -> None:
+    """The repository copy here (no LangSmith key): `local:<sha256 prefix>`; with the Hub,
+    its commit. A risk change sends no gate prompt."""
+    await api.high_risk_at_seven()
+
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+
+    assert run["prompts"] == {"agent": PROMPTS.agent.version}
+    assert run["prompts"]["agent"].startswith("local:")
 
 
 async def test_the_trajectory_shows_each_tool_call_and_whether_it_was_accepted(
