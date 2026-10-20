@@ -162,17 +162,23 @@ class _Finished:
     trace_id: UUID | None = None  # None: the graph never ran, so there is no trace
 
 
+def graph_deps(deps: RuntimeDeps) -> GraphDeps:
+    """The run graph's services on the runtime's ports and prompt templates: what the
+    runtime streams, and what another entry point (LangGraph Studio) can compile."""
+    timeout_s = deps.config.llm_timeout_s
+    return GraphDeps(
+        gate=Gate(deps.llm, deps.prompts.gate, timeout_s=timeout_s),
+        agent=Agent(deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=timeout_s),
+        knowledge=deps.knowledge,
+    )
+
+
 class AgentRuntime:
     def __init__(self, deps: RuntimeDeps) -> None:
         self._deps = deps
-        config = deps.config
-        self._gate = Gate(deps.llm, deps.prompts.gate, timeout_s=config.llm_timeout_s)
-        self._agent = Agent(
-            deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=config.llm_timeout_s
-        )
-        self._graph = build_graph(
-            GraphDeps(gate=self._gate, agent=self._agent, knowledge=deps.knowledge)
-        )
+        services = graph_deps(deps)
+        self._gate, self._agent = services.gate, services.agent
+        self._graph = build_graph(services)
         self._executor = Executor(deps.clock, deps.ids)
 
     @property

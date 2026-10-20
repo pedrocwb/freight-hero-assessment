@@ -21,9 +21,9 @@ a database would hold the rows):
 2. outside any transaction: the bytes from the blob store, the pages from the page
    reader (in a thread: PDF work blocks), then one `extract` call, on the extract
    template, that classifies the document among the broker's `DocumentTypeDef`s and
-   reads the type's fields. A page
-   whose text is too thin goes as an image (`LlmRequest.images`). The answer is checked
-   in code (`domain.documents.read_extraction`);
+   reads the type's fields. A page whose text is too thin goes as an image
+   (`LlmRequest.images`). The answer is checked in code
+   (`domain.documents.read_extraction`);
 3. one unit of work: append the `document_processed` event (`doc:{document_id}`), save
    the document, queue the event, and, for a clean `processed` document, close as
    `satisfied` the open obligation of each `DocumentRequirement` of its type (its

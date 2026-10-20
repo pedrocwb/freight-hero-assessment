@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from freight_agent.application.contracts import IngestResult
-from freight_agent.application.runtime import RuntimeConfig
+from freight_agent.application.runtime import RuntimeConfig, graph_deps
 from freight_agent.domain.actions import (
     CloseObligation,
     CloseStatus,
@@ -690,3 +690,16 @@ async def test_a_run_records_only_the_prompts_it_sent(load: Load) -> None:
     assert risk.prompts == {"agent": PROMPTS.agent.version}
     assert (ack.status, ack.prompts) == (RunStatus.NOOP, {"gate": PROMPTS.gate.version})
     assert (blank.status, blank.prompts) == (RunStatus.SKIPPED, {})
+
+
+def test_the_graph_services_run_on_the_runtimes_model_and_templates(load: Load) -> None:
+    world = World(load)
+
+    services = graph_deps(world.deps)
+
+    assert (services.gate.prompt, services.agent.prompt) == (PROMPTS.gate, PROMPTS.agent)
+    assert services.knowledge is world.deps.knowledge
+    assert services.prompt_versions() == {
+        "gate": PROMPTS.gate.version,
+        "agent": PROMPTS.agent.version,
+    }
