@@ -58,7 +58,12 @@ class SendSms(DomainModel):
     purpose: Purpose = Purpose.REPLY
     requests: str | None = Field(
         default=None,
-        description="The obligation kind this SMS asks for; it opens or counts that obligation",
+        description=(
+            "Only when this SMS asks the contact for one of the broker's obligation kinds "
+            "(an ETA: eta_request); it opens or counts that obligation. Leave it out for "
+            "anything else: a reply, information, or a question that is not an obligation "
+            "kind (a trailer temperature, a seal number)."
+        ),
     )
 
     @model_validator(mode="before")
@@ -76,7 +81,12 @@ class SendEmail(DomainModel):
     subject: str | None = None
     purpose: Purpose = Purpose.INFO
     requests: str | None = Field(
-        default=None, description="The obligation kind this email asks for"
+        default=None,
+        description=(
+            "Only when this email asks for one of the broker's obligation kinds; leave it "
+            "out for anything else, and for the email sent once the requests are used up "
+            "(purpose escalation)."
+        ),
     )
 
     @model_validator(mode="before")

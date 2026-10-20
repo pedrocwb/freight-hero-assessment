@@ -126,7 +126,7 @@ async def test_a_suite_runs_on_a_stored_broker_and_its_published_sections(api: A
         "acme@v2",
     )
     assert "+acme:" in summary["sop_version"]
-    assert summary["total"] == 3
+    assert summary["total"] == 4  # n1, n2, t1 (scripted only) and t2
     assert summary["langsmith_url"] is None and summary["stopped"] is None
 
 
@@ -184,14 +184,15 @@ async def test_a_live_run_stops_at_its_cost_cap_and_links_its_langsmith_experime
 
     response = await api.client.post(
         "/api/brokers/standard/evals/run",
-        json={"suite": "agent", "mode": "live", "cost_cap_usd": 0.5},
+        json={"suite": "agent", "mode": "live", "cost_cap_usd": 0.2},
     )
 
     assert response.status_code == 200, response.text
     summary = response.json()
     assert summary["mode"] == "live"
     assert summary["stopped"].startswith("stopped by the cost cap")
-    assert summary["not_run"] == ["t1_gap_search_then_hero"]
+    # live runs only t2: n1, n2 and t1 are scripted-only guardrail controls
+    assert summary["not_run"] == []
     assert summary["langsmith_url"].startswith("https://ls/datasets/d1/compare?selectedSessions=")
     assert client.projects and client.feedback
 

@@ -1,7 +1,7 @@
 ---
 id: documents
 title: Documents
-description: A BOL, POD, rate confirmation, receipt or photo arrives. For now a Hero reviews every document.
+description: A document arrives, or the document check reports on one. Act only on the check's result.
 intents: [document, document_processed]
 ---
 

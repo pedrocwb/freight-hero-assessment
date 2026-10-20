@@ -486,3 +486,16 @@ async def test_the_progress_callback_sees_every_scenario(evals: Path) -> None:
     )
 
     assert seen == ["one", "two"]
+
+
+@pytest.mark.unit
+async def test_a_scripted_only_scenario_runs_only_in_scripted_mode(evals: Path) -> None:
+    write_scenario(evals, "a_guardrail", tags="[regression, scripted_only]")
+    write_scenario(evals, "b_ack")
+
+    scripted = await run_suite(evals)
+    live = await run_suite(evals, mode="live", model=factory_of(AckModel()))
+
+    assert [s.scenario_id for s in scripted.scenarios] == ["a_guardrail", "b_ack"]
+    assert [s.scenario_id for s in live.scenarios] == ["b_ack"]
+    assert any("not run in live mode" in w and "a_guardrail" in w for w in live.warnings)

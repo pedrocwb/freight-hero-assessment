@@ -21,7 +21,7 @@
 id: n2_rejection_budget
 title: An agent refused more often than its budget allows is stopped and handed to a Hero
 suite: agent
-tags: [regression, sop:status_updates, sop:escalation]
+tags: [regression, scripted_only, sop:status_updates, sop:escalation]
 description: >-
   Four refused tool calls in one run, over the broker's max_rejections of 3: the run
   escalates with the blocked task and the accepted TMS note still runs.

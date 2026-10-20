@@ -19,7 +19,7 @@
 id: t1_gap_search_then_hero
 title: A request no SOP covers is searched first, then handed to a Hero without a promise
 suite: agent
-tags: [regression, sop:escalation, sop:communication_rules]
+tags: [regression, scripted_only, sop:escalation, sop:communication_rules]
 description: >-
   A hotel request no procedure covers: the agent searches the SOP, reads the escalation
   section, says there is no procedure, and the run hands the case to a Hero with the

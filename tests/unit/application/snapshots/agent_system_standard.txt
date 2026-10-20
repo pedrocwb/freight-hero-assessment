@@ -31,7 +31,7 @@ What an event can mean for this broker. The gate's intent is a hint; the event i
 Each action tool stages one action. Stage them in the order they should happen.
 - send_sms {contact_id, text, purpose, requests}: an SMS to a contact that has the sms channel.
   - purpose "eta_request": the SMS asks for the ETA. Each one counts as one ETA attempt. Code opens the eta_request obligation with the first one and counts every later one in the ledger.
-  - requests: the obligation kind the message asks for (see Obligations). Code opens that obligation with the first request and counts every later one as an attempt. purpose "eta_request" already means requests eta_request.
+  - requests: the obligation kind the message asks for (see Obligations). Code opens that obligation with the first request and counts every later one as an attempt. purpose "eta_request" already means requests eta_request. Leave requests out when the message asks for anything that is not one of those kinds, such as a trailer temperature or a seal number.
   - purpose "reply" answers a question, "info" gives other information, "escalation" tells the contact that a person will follow up.
 - send_email {to_contact_ids, subject, body, purpose, requests}: an email in the load's main thread. Same purposes and requests as an SMS. An email written because the requests are used up (the SOP's last step) is purpose "escalation", not a request.
 - post_broker_slack {text}: a message in the broker's Slack channel.

@@ -48,6 +48,9 @@ from freight_agent.settings import LlmMode
 
 REGRESSION = "regression"
 CAPABILITY = "capability"
+# A guardrail control that injects the agent's tool calls through its script (a gullible
+# or confused agent): it tests the code's checks, not a model, so only scripted mode runs it.
+SCRIPTED_ONLY = "scripted_only"
 _FIRST_GROUPS = (REGRESSION, CAPABILITY)
 
 # Builds the model of one trial on that trial's virtual clock (circuit breakers read it).
@@ -409,6 +412,10 @@ class SuiteRunner:
         spent = 0.0
         stopped: str | None = None
         not_run: tuple[str, ...] = ()
+        skipped: list[str] = []
+        if self._mode != "scripted":
+            skipped = [s.id for s in scenarios if SCRIPTED_ONLY in s.tags]
+            scenarios = [s for s in scenarios if SCRIPTED_ONLY not in s.tags]
         for index, scenario in enumerate(scenarios):
             trials: list[ScenarioResult] = []
             for trial in range(1, k + 1):
@@ -450,11 +457,18 @@ class SuiteRunner:
             not_run=not_run,
             cost_cap_usd=cost_cap_usd,
             stopped=stopped,
-            warnings=self._warnings(k, summaries),
+            warnings=self._warnings(k, summaries, skipped),
         )
 
-    def _warnings(self, k: int, summaries: Sequence[ScenarioSummary]) -> tuple[str, ...]:
+    def _warnings(
+        self, k: int, summaries: Sequence[ScenarioSummary], skipped: Sequence[str] = ()
+    ) -> tuple[str, ...]:
         warnings: list[str] = []
+        if skipped:
+            warnings.append(
+                f"not run in {self._mode} mode (tagged {SCRIPTED_ONLY}: a guardrail control "
+                f"that scripts the agent's tool calls): {', '.join(skipped)}"
+            )
         if self._mode == "scripted" and k > 1:
             warnings.append(
                 f"scripted mode is deterministic: the {k} trials of each scenario are the "

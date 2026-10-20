@@ -166,7 +166,8 @@ _ACTIONS = """\
 opens the eta_request obligation with the first one and counts every later one in the ledger.
   - requests: the obligation kind the message asks for (see Obligations). Code opens that \
 obligation with the first request and counts every later one as an attempt. purpose \
-"eta_request" already means requests eta_request.
+"eta_request" already means requests eta_request. Leave requests out when the message asks \
+for anything that is not one of those kinds, such as a trailer temperature or a seal number.
   - purpose "reply" answers a question, "info" gives other information, "escalation" tells \
 the contact that a person will follow up.
 - send_email {to_contact_ids, subject, body, purpose, requests}: an email in the load's main \
