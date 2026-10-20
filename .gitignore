@@ -26,3 +26,5 @@ videos/**/audio/
 videos/**/probe/
 videos/assets/music/
 videos/.venv/
+# LangGraph's local Agent Server (`make studio`): its threads, runs and checkpoints.
+/.langgraph_api/

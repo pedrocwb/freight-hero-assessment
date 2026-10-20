@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint diagrams ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint diagrams studio ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -58,6 +58,22 @@ eval:
 
 sop-lint:
 	uv run agent sop lint
+
+# LangGraph Studio: the local Agent Server (`langgraph dev`, in memory) serves the scenario
+# graph of src/freight_agent/studio.py (langgraph.json), and Studio, in the LangSmith UI,
+# connects to it. Each scenario played calls the live model on OPENROUTER_API_KEY (about
+# $$0.003 for scenario A). Safari blocks the page from reaching localhost: there, run
+# `make studio STUDIO_ARGS=--tunnel` and open the URL the server prints. The SOP index
+# reads its files on every run, synchronously, which the server's blocking-call check
+# would refuse: hence --allow-blocking.
+STUDIO_PORT ?= 2024
+STUDIO_ARGS ?=
+studio:
+	@echo "Agent Server: http://127.0.0.1:$(STUDIO_PORT) (API docs at /docs). Open LangGraph Studio:"
+	@echo "  https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:$(STUDIO_PORT)"
+	@echo "Safari blocks localhost there: run 'make studio STUDIO_ARGS=--tunnel' and open the URL it prints."
+	@echo "Input: {\"scenario_id\": \"a_client_a_high_risk\"}. Each play spends money on OPENROUTER_API_KEY."
+	uv run langgraph dev --no-browser --port $(STUDIO_PORT) --allow-blocking $(STUDIO_ARGS)
 
 # Rebuilds docs/architecture.html from docs/build_diagrams.js (needs Node).
 diagrams:
