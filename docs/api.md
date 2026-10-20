@@ -1,7 +1,8 @@
 # Platform API
 
 The backend of the simulation platform: drive a load through time, play the driver, the
-dispatcher and the broker, act as the Hero team, and inspect every agent run. The code is
+dispatcher and the broker, act as the Hero team, inspect every agent run, and onboard a
+broker without code (its catalog, its SOP from a PDF, its evals, its rollout). The code is
 in `src/freight_agent/api/`; the React UI in `web/` is built against this page.
 
 ```
@@ -21,6 +22,10 @@ calls recorded in `evals/cassettes/` (a run whose call was never recorded fails 
 three attempts, becomes a dead letter that `/api/health` reports); `live` needs
 `OPENROUTER_API_KEY`; `scripted` has nothing queued interactively, so every model call
 escalates to a Hero.
+
+Brokers, SOP uploads, drafts and published versions, and documents live in the session's
+store; uploaded bytes live in the session's blob store. A reset clears them all, like the
+loads.
 
 Everything that moves the clock or feeds the agent is serialized by one lock; reads are
 not blocked by a run that is thinking.
@@ -51,8 +56,13 @@ not blocked by a run that is thinking.
 "open_obligations": int, "pending_timers": int, "cost_usd": float}`.
 
 `Run` = the `RunRecord` (`run_id`, `event_id`, `load_id`, `started_at`, `finished_at`,
-`status`, `gate`, `sop_section_ids`, `plan`, `violations`, `usage` with each call's cost,
-`skip_reason`, `error`, `trace_url`) plus `cost_usd`, the run's total.
+`status`, `gate`, `sop_section_ids`, `sop_version`, `plan`, `violations`, `usage` with each
+call's cost, `skip_reason`, `error`, `trace_url`, and from wave 3 `intent`, `broker_id`,
+`broker_config_version`, `trajectory`, `sections_searched`, `rejections`) plus `cost_usd`,
+the run's total. `trajectory` is the agent's tool calls in order: `[{"tool", "args",
+"result", "accepted" (true, false, or null for a read tool), "cost_usd"}]`;
+`rejections` counts the action calls a rule refused. Records stored before wave 3 have
+the new fields empty.
 
 ## Loads
 
@@ -127,6 +137,7 @@ now. Completing a done task again returns it unchanged.
 | GET | /api/loads/{load_id}/runs | `[Run]`, oldest first |
 | GET | /api/sops?client_id=&load_types=a,b | `{"version", "client_id", "load_types", "sections": [ResolvedSection]}` |
 | GET | /api/sops/preview?client_id=&load_types=&intent=&stage= | `ResolvedSop` = `{"sections", "catalog"}` |
+| GET | /api/sops/search?q=&broker_id=&load_types=a,b | `[SearchHit]` = `[{"section_id", "title", "description", "score"}]`, best first |
 
 `/api/sops` gives the effective sections after the layers merge (`domain.sop`
 `effective_sections`), by id; each `ResolvedSection` = `{"section_id", "title",
@@ -136,6 +147,98 @@ The preview is what the resolver gives the agent for one event (`resolve`): the 
 that apply to the intent and stage, and the catalog of every section the client sees.
 `client_id` is the load's `broker_id`. An unknown `intent` or `stage` is a 422; a SOP file
 that cannot be read is a 422 that names the file.
+
+`search` is the agent's `search_sop` tool on the same index: only the sections the broker
+`broker_id` sees (the standard layer, its own layer and its load-type layers), ranked by
+pgvector cosine distance and full-text rank fused (Postgres) or by word overlap (memory).
+
+## Brokers
+
+A broker is data: its catalog of intents, obligations, document types and document
+requirements, and the limits of its runs (`domain/broker.py`, `docs/decisions.md`
+"Brokers as data"). Every save is a new `config_version`, and every version is kept.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | /api/brokers | `BrokerIn`; `broker_id` and `name` required | `Broker`: a copy of the standard catalog with the given fields, `config_version` 1 |
+| GET | /api/brokers | | `[Broker]`, the current version of each, by broker id |
+| GET | /api/brokers/standard | | the standard catalog every broker starts from (and a load whose broker was never saved runs on) |
+| GET | /api/brokers/{broker_id} | | `Broker`, the current version; 404 for an unknown broker |
+| PUT | /api/brokers/{broker_id} | `BrokerIn`; a field left out keeps its value | `Broker`, saved as `config_version + 1` |
+| GET | /api/brokers/{broker_id}/versions | | `[BrokerVersion]`, oldest first |
+| POST | /api/brokers/{broker_id}/rollout | `{"percent": 0-100, "previous_version": int \| null}` | `Broker`; 409 when `previous_version` was never saved |
+
+`BrokerIn` = `{"broker_id", "name", "triage", "intents", "obligations", "document_types",
+"documents", "limits"}`, every field optional on `PUT`. `Broker` adds `sop_version`,
+`config_version` and `rollout` = `{"percent", "previous_version"}`.
+
+| Field | Shape |
+|---|---|
+| `intents` | `[{"intent_id", "title", "description", "examples", "priority", "must_act", "noop_eligible", "system"}]`; ids in snake_case, unique; the standard system intents cannot change |
+| `obligations` | `[{"kind", "title", "description", "follow_up_minutes", "max_attempts", "follow_up_intent", "on_exhausted": ["dispatcher_email" \| "hero_task" \| "broker_slack"]}]`; an empty `follow_up_intent` means `<kind>_follow_up_due` |
+| `document_types` | `[{"type_id", "title", "description", "fields": [{"name", "description", "kind", "check"}]}]`; `check` is `none`, `po_number`, `mc_number`, `stop_name`, `date_in_window`, `seal_number` or `signature` |
+| `documents` | `[{"type_id", "at_stage", "within_minutes", "opens_obligation"}]` |
+| `limits` | `{"validation", "max_steps", "max_cost_usd", "max_rejections"}`; `max_steps: 0` is one plan in the answer and no action tools |
+
+A catalog that does not validate (an id that is not snake_case, a duplicate, a changed
+system intent, a follow-up intent that is not in the catalog) is refused with the reason.
+
+`BrokerVersion` = `{"config_version", "name", "sop_version", "rollout", "current",
+"intents", "obligations"}`: `intents` and `obligations` list the ids and kinds of that
+version, and `current` marks the one `GET /api/brokers/{broker_id}` returns.
+
+**Rollout.** `percent` of the broker's loads run on the current version, the rest on
+`previous_version`; a load keeps its version across runs (a sha256 of its `load_id`).
+Publishing an SOP version sets `{percent: 100, previous_version: <the version it
+replaces>}`; `percent: 0` is a rollback. Each run records the `broker_config_version` it
+used.
+
+## Knowledge base: a broker's SOP
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | /api/brokers/{broker_id}/sops | multipart, one file: the broker's procedure as a PDF (any layout), Markdown or text | `SopUploadResult` = `{"document_id", "pages", "status": "compiled" \| "stored" \| "failed"}` |
+| GET | /api/brokers/{broker_id}/sops/draft | | `SopDraft` plus `lint`: the problems a publish would report now |
+| PUT | /api/brokers/{broker_id}/sops/draft | `{"sections", "proposed_intents", "proposed_requirements", "proposed_obligations"}`, the whole draft | the saved draft, as `GET` returns it |
+| POST | /api/brokers/{broker_id}/sops/publish | `{"percent": 100}`; below 100 starts a canary | `{"version", "config_version", "lint"}` |
+| GET | /api/brokers/{broker_id}/sops/versions | | `[{"broker_id", "version", "published_at", "published_by", "section_ids", "lint"}]`, oldest first |
+
+- **Upload** stores the file in the blob store, reads its pages (a page with too little
+  text goes to the model as an image) and compiles it on the `compile` role into the
+  broker's draft. `compiled`: the draft has the sections; `stored`: the file is kept but
+  not compiled; `failed`: it could not be read. Compiling a new file needs a live model
+  (`LLM_MODE=live`, about $0.05 for the 3-page Acme SOP).
+- **The draft** (`SopDraft`): `sections` (`section_id`, `layer`, `load_type`, `title`,
+  `description`, `intents`, `stages`, `mode`, the verbatim `body`, the `source` pages,
+  `proposed`), `proposed_intents` (each an intent definition with its `evidence` and
+  `accepted`: true, false or null while undecided), `proposed_requirements`,
+  `proposed_obligations`, the `document_ids` it came from and `updated_at`.
+- **Publish** lints the draft first: a section whose intents or stages are not in the
+  catalog (with the accepted proposals), or an intent with no section, refuses the publish
+  with the problems. Then it embeds the sections, stores an immutable version (`version`
+  is the content hash) and saves the broker with the accepted intents, requirements and
+  obligations, the `sop_version`, `config_version + 1` and the rollout.
+
+## Attachments and documents
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | /api/loads/{load_id}/attachments | multipart: the file, and the message that carries it (sender and channel; `/docs` lists the fields) | `{"attachment_id", "document_id", "event_id"}` |
+| GET | /api/documents/{document_id} | | `Document`; 404 for an unknown document |
+| GET | /api/loads/{load_id}/documents | | `[Document]`, oldest first |
+
+An upload stores the bytes, ingests a message with that attachment (as `/api/v1/events`
+would, with its own `event_id`) and saves the document as `pending`. The next tick
+(`POST /api/sim/tick`, or any advance) reads it before it runs the queue: one `extract`
+call classifies it and extracts the fields of its type, and code checks them against the
+load. The document then has its status, and a `document_processed` event
+(`doc:{document_id}`) runs the agent, which acts on it; the message's own run does not.
+
+`Document` = `{"document_id", "load_id", "attachment_id", "broker_id", "filename",
+"content_type", "status": "pending" | "processed" | "needs_review" | "failed", "type_id",
+"confidence", "extracted", "checks": [{"field", "expected", "found", "ok"}], "text",
+"pages", "received_at", "processed_at"}`. `processed` means every check passed;
+`needs_review` that one failed, a field is missing or the confidence is low.
 
 ## Evals
 
@@ -148,7 +251,16 @@ A run uses `evalkit` (`ScenarioRunner`, then `grade_step` and `check_invariants`
 trial) in a worker thread with its own event loop, so it never blocks the simulation; it
 may take seconds. `k` is 1 to 10 trials per scenario. `scripted` plays each scenario's own
 script; `replay` uses the recorded cassettes, and a missing recording fails the trial with
-the reason. Live runs are for the CLI. An unknown suite or scenario is a 404.
+the reason. Live runs are for the CLI. An unknown suite or scenario is a 404. The suites
+are the folders of `evals/scenarios/`: `core`, `agent`, `docs`, and one per broker.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | /api/brokers/{broker_id}/evals/run | `{"suite": "core", "mode": "scripted", "k": 1, "cost_cap_usd": 0.10}` | `SuiteSummary` |
+
+A broker's run plays the suite on the broker's current version: its catalog and its
+published sections, as `agent eval run --broker-file` does from an export. It is the check
+before a rollout reaches more loads.
 
 ```json
 {
@@ -201,8 +313,9 @@ should refetch what it shows on the next `clock` event.
 
 Errors are `{"detail": "..."}` with a 4xx: 400 bad input (invalid metadata, an unknown
 timezone, the clock going back, a mode that cannot be built), 404 unknown load, task,
-suite or scenario, 409 a load that exists, 422 a body or query that does not validate
-(FastAPI's `detail` is then a list of problems) or a SOP file that cannot be read. An
+suite, scenario, broker or document, 409 a load that exists or a rollout to a version that
+was never saved, 422 a body or query that does not validate (FastAPI's `detail` is then a
+list of problems) or a SOP file that cannot be read. An
 unexpected error is a 500 with `{"detail": "internal error <id>: the server log has the
 details", "error_id": "<id>"}`: no internals reach the client, and the id finds the logged
 traceback.

@@ -10,6 +10,9 @@ low reasoning effort). The only cheap set that met every threshold; about $0.000
 agent run and about $0.02 to $0.03 of inference for a long load. Claude Haiku 5.5 also met
 every threshold on decide, at about 5 times the cost per run.
 
+These rounds measured the single-plan design (decide). Wave 3 replaced it with a tool loop
+on the `agent` role; that role is measured again in "Wave 3: the agent loop" at the end.
+
 ## Selection thresholds (fixed before round 1)
 
 A model set is chosen only if, on the full core suite at `--k 3`, live:
@@ -168,3 +171,98 @@ recording (one run, about a cent).
 
 **Total spend for this work: $0.5812** of the USD 2.00 cap (the orchestrator's $0.0009
 smoke run not included).
+
+## Wave 3: the agent loop
+
+**To be filled by the bake-off (card W3-BAKE).** Nothing below is measured yet: the tables
+are empty on purpose, and `config/models.yaml` keeps the wave 2 choice until this section
+names a winner.
+
+What changed since the rounds above: the `decide` role became `agent`, one model call that
+runs a tool loop inside the guardrails (read tools, one action tool per action type, each
+action checked by the rules at the call; `docs/answers.md` 1.1). The prompts are frozen
+before round 1 of this section. Three suites run: core (22 scenarios), agent (the loop's
+guardrails: `n1_outside_email_refused`, `n2_rejection_budget`, `t1_gap_search_then_hero`)
+and docs (`p1_pod_clean_delivers`, `p2_pod_exceptions_needs_review`,
+`p3_pod_overdue_follow_up`).
+
+### Candidates
+
+| Set | Agent model | Endpoint | Gate | Why it is a candidate |
+|---|---|---|---|---|
+| `gptoss` | `openai/gpt-oss-120b` | DeepInfra, bf16, low reasoning effort | GPT-4.1 Nano | The wave 2 winner on the single plan |
+| `haiku` | `anthropic/claude-haiku-5.5` | Anthropic | GPT-4.1 Nano | Passed 22/22 at k=3 in wave 2 with no fix; the first upgrade |
+| `gemini` | `google/gemini-2.5-flash` | Google | GPT-4.1 Nano | A stronger tool user than Flash Lite, at a price between the two |
+
+Only the agent role differs between the sets (`config/models.NAME.yaml`); the gate, the
+judge, `extract` and `compile` are the default set's.
+
+### Selection thresholds (fixed before round 1)
+
+A set is chosen only if, live, at `--k 3`:
+
+1. **A and B scenarios at pass^3 = 100%** (as in wave 2).
+2. **No required action dropped by the gate** (as in wave 2).
+3. **Cost well under $1 per load:** average cost per model-calling run of the core suite at
+   most $0.0015 (as in wave 2), so a long load of 150 runs stays under about $0.25.
+4. **Few refused tool calls:** on average at most 0.5 refused action calls per agent run
+   (`RunRecord.rejections`), over every suite. A model that keeps proposing actions the
+   rules refuse wastes rounds and money, and ends in `BLOCKED_TITLE` escalations.
+5. **The loop searches when the procedure is missing:** `t1_gap_search_then_hero` calls
+   `search_sop` (`expect.tools_used`) in every trial.
+
+Among the sets that meet all five, the cheapest wins (measured cost, not list price);
+latency breaks a tie. The other groups, the agent and docs suites and the judge's scores
+are reported and must not regress between rounds.
+
+### Procedure and budget
+
+1. `make bakeoff`: k=1 screening of the three sets on every suite, live, as LangSmith
+   experiments (caps per set: core $0.30, agent $0.05, docs $0.05).
+2. Stop rule: if the k=1 screening has spent more than $0.90, the third candidate is
+   dropped.
+3. `--k 3` on the best two: `uv run agent eval run --suite S --mode live --k 3
+   --model-set NAME --cost-cap-usd 0.40 --langsmith`, for each suite.
+4. The winner goes into `config/models.yaml`. Then the re-record with it: `uv run agent
+   eval run --suite S --mode record --cost-cap-usd 0.20` for core, agent and docs (the
+   judge recorded in its own step: it has no fallback, so a judge outage would abort a
+   recording), the cassettes committed, `make eval-replay` green, and the CI replay step
+   blocking again.
+
+Estimate $0.6 to $1.3 in total; **hard cap $3** on the Freight Hero key, counting every
+live call (probes included).
+
+### Rounds
+
+| # | Agent model (set) | Change before the run | Scope | Pass^k | A B C D E G | agent | docs | Cost | Total |
+|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | |
+
+### Bake-off
+
+| Agent model | k | Core pass^k | A | B | C | D | E | G | Agent suite | Docs suite | Mean refusals per run | t1 searches | Cost / run | Agent p50 / p95 | Thresholds |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| gpt-oss-120b | | | | | | | | | | | | | | | |
+| claude-haiku-5.5 | | | | | | | | | | | | | | | |
+| gemini-2.5-flash | | | | | | | | | | | | | | | |
+
+"Cost / run" is per agent run that called a model (gate, agent or both), with every round
+of the loop. Latency is the agent call, all its rounds, p50 / p95.
+
+### Document extraction (`extract` role)
+
+One call per fixture of `evals/fixtures/docs/` (about $0.01 in total), against its
+`*.expected.json`, before the docs suite is recorded.
+
+| Fixture | Model | Type right | Fields right | Checks as expected | Cost |
+|---|---|---|---|---|---|
+| `pod_clean.pdf` | | | | | |
+| `pod_exceptions.pdf` | | | | | |
+| `pod_scanned.pdf` (vision) | | | | | |
+| `bol.pdf` | | | | | |
+
+### Choice
+
+To be filled: the agent model, the `extract` model, the cost per load measured on the
+loop (it replaces the estimate in `docs/answers.md` 5.3), and the cassettes recorded with
+them.

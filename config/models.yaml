@@ -37,8 +37,11 @@ roles:
       allow_fallbacks: false
 
   agent:
-    # The role was `decide` before wave 3; the agent loop (card W3-AGT) runs on it.
-    # Tools (read_sop_section, read_document) plus the Plan as a forced tool call.
+    # The role was `decide` before wave 3. The agent loop (card W3-AGT) runs on it: read
+    # and action tools for at most the broker's `limits.max_steps` rounds and
+    # `limits.max_cost_usd`, then the AgentOutcome as a forced tool call. The wave 3
+    # bake-off (`make bakeoff`, evals/RESULTS.md "Wave 3") decides this model again on the
+    # loop; until then it is the wave 2 choice, made on the single plan:
     # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
     # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
     # about $0.024 for a long load (100 messages, 80 decide calls). Claude Haiku 5.5 also

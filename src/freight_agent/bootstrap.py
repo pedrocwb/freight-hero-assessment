@@ -15,11 +15,18 @@ error. Tracing that is switched on without its key falls back to no tracing, wit
 warning that names no secret.
 
 Wave 3 adapters are found by name too, so a card plugs in without editing this file:
-`adapters.knowledge.postgres.knowledge_index` (card W3-KNW) serves the SOP index under
-`PERSISTENCE=postgres`, and `application.documents.DocumentPipeline` with
-`adapters.documents.pdfium.PdfiumPageReader` (card W3-DOC) replaces the null document
-processor. Until they exist, the runtime reads the `sops/` files and reads no document,
-as before wave 3.
+
+| Adapter (card) | Name | Chosen when |
+|---|---|---|
+| SOP index (KNW) | `adapters.knowledge.postgres.knowledge_index` | `PERSISTENCE=postgres` |
+| Document pipeline (DOC) | `application.documents.DocumentPipeline` | always |
+| Page reader (DOC) | `adapters.documents.pdfium.PdfiumPageReader` | with the pipeline |
+| Embedder (KNW) | `adapters.knowledge.embeddings.OpenRouterEmbedder` | `LLM_MODE` live or record |
+
+Until one exists, the runtime behaves as before wave 3: it reads the `sops/` files, reads
+no document, and an embedder is a clear error in the live modes. Offline (`scripted`,
+`replay`) the embedder is `FakeEmbedder`, sized to the index's vectors: tools never run
+offline, so no real query needs a real vector.
 """
 
 import importlib
@@ -37,6 +44,7 @@ from pydantic import SecretStr
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
+from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.cassette import CassetteModel
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
@@ -53,7 +61,7 @@ from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, Runti
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.knowledge import SopIndex
+from freight_agent.ports.knowledge import Embedder, SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
@@ -106,6 +114,11 @@ KNOWLEDGE_POSTGRES = LazyAdapter("freight_agent.adapters.knowledge.postgres", "k
 # `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
+# `OpenRouterEmbedder(config: EmbeddingConfig, api_key: SecretStr)` (card W3-KNW).
+EMBEDDER_OPENROUTER = LazyAdapter(
+    "freight_agent.adapters.knowledge.embeddings", "OpenRouterEmbedder"
+)
+LIVE_MODES: tuple[LlmMode, ...] = ("live", "record")
 
 
 # --- language model ------------------------------------------------------------
@@ -148,7 +161,7 @@ def build_llm(
                 for role in roles
             }
         )
-    if mode not in ("live", "record"):
+    if mode not in LIVE_MODES:
         raise ValueError(f"unknown llm mode {mode!r}: use scripted, replay, live or record")
     key = settings.require_openrouter_key()
     if mode == "live":
@@ -270,6 +283,36 @@ def build_knowledge(settings: Settings) -> SopIndex:
 def build_blobs(settings: Settings) -> BlobStore:
     """Attachment and SOP file bytes, under `BLOBS_DIR` (created on the first upload)."""
     return FsBlobStore(settings.blobs_dir)
+
+
+def build_embedder(settings: Settings, *, mode: LlmMode | None = None) -> Embedder:
+    """What the SOP index embeds with: the sections of a version at publish, and a live
+    `search_sop` query. For `mode` (default: `settings.llm_mode`):
+
+    - `live` and `record`: OpenRouter's embeddings endpoint, with the model and the
+      dimensions of `embedding` in the models config (card W3-KNW). Needs the key. There
+      is no embedding cassette: a recording run embeds live.
+    - `scripted` and `replay`: `FakeEmbedder`, offline and deterministic, with the same
+      dimensions, so its vectors fit the index's column.
+    """
+    mode = mode or settings.llm_mode
+    embedding = _models_config(settings.models_config).embedding
+    if mode not in LIVE_MODES:
+        return FakeEmbedder() if embedding is None else FakeEmbedder(dim=embedding.dim)
+    if embedding is None:
+        raise BootstrapError(
+            f"LLM_MODE={mode} embeds SOP sections, but {settings.models_config} has no "
+            "`embedding` entry (model and dim): add it, or set LLM_MODE=replay"
+        )
+    key = settings.require_openrouter_key()
+    factory = EMBEDDER_OPENROUTER.load()
+    if factory is None:
+        raise BootstrapError(
+            f"LLM_MODE={mode}, but the OpenRouter embedder is not available yet "
+            f"({EMBEDDER_OPENROUTER.module}.{EMBEDDER_OPENROUTER.attribute}): "
+            "set LLM_MODE=replay"
+        )
+    return factory(embedding, key)
 
 
 def build_documents(deps: RuntimeDeps) -> DocumentProcessor:

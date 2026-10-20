@@ -4,9 +4,15 @@
 #   docker compose up -d postgres    # only the database, for `uv run` on the host
 #   docker compose down              # add -v to drop the database volume
 #
-#   postgres  the database. The image matches CI's integration job and ships pgvector.
+#   postgres  the database. The image matches CI's integration job and ships pgvector,
+#             which the SOP index's embeddings need.
 #   migrate   one shot: `agent db migrate` against postgres once it is healthy, then exits.
-#   app       the Dockerfile's image: the API on :8000, serving the built UI.
+#   app       the Dockerfile's image: the API on :8000, serving the built UI. Uploaded
+#             attachments and SOP files go to the `blobs` volume (BLOBS_DIR).
+#
+# Seed the database with the brokers and published SOP versions of sops/ (what a runtime
+# with PERSISTENCE=postgres reads), once the migrations ran:
+#   docker compose run --rm -e PERSISTENCE=postgres app sop import sops/
 #
 # Both ports are published on 127.0.0.1 only: postgres has fixed agent/agent credentials
 # and the platform has no login. Opening either to the network (dropping the 127.0.0.1) is
@@ -67,6 +73,11 @@ services:
       # (pooled URL). They win over a localhost or Neon URL in .env.
       DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
       DATABASE_URL_DIRECT: postgresql://agent:agent@postgres:5432/agent
+      # Bytes of uploaded attachments and SOP files, kept across restarts. The database
+      # keeps only their references (sha256), so the two volumes go together.
+      BLOBS_DIR: /app/blobs
+    volumes:
+      - blobs:/app/blobs
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -78,3 +89,4 @@ services:
 
 volumes:
   postgres-data:
+  blobs:

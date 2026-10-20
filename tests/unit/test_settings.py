@@ -52,6 +52,8 @@ def test_the_defaults_run_offline_on_memory_and_replay() -> None:
     assert settings.sops_dir == Path("sops")
     assert settings.evals_dir == Path("evals")
     assert settings.cassettes_dir == Path("evals/cassettes")
+    assert settings.web_dist == Path("web/dist")
+    assert settings.blobs_dir == Path("blobs")
     assert settings.openrouter_api_key is None
     assert settings.database_url is None
     assert settings.langsmith_tracing is False
@@ -67,6 +69,7 @@ def test_settings_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGSMITH_PROJECT", "freight-agent-evals")
     monkeypatch.setenv("SOPS_DIR", "/srv/sops")
     monkeypatch.setenv("CASSETTES_DIR", "/srv/cassettes")
+    monkeypatch.setenv("BLOBS_DIR", "/srv/blobs")
 
     settings = _settings()
 
@@ -77,6 +80,7 @@ def test_settings_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.langsmith_project == "freight-agent-evals"
     assert settings.sops_dir == Path("/srv/sops")
     assert settings.cassettes_dir == Path("/srv/cassettes")
+    assert settings.blobs_dir == Path("/srv/blobs")
 
 
 @pytest.mark.unit
