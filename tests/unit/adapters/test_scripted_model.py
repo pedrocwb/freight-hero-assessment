@@ -1,6 +1,6 @@
 import pytest
 
-from freight_agent.adapters.llm.scripted import ScriptedModel, ScriptExhausted
+from freight_agent.adapters.llm.scripted import ScriptedModel, ScriptedReply, ScriptExhausted
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.ports.llm import LlmError, LlmRequest, ModelRole
 
@@ -52,3 +52,35 @@ async def test_reset_clears_queues_and_history() -> None:
 
     assert model.remaining() == 0
     assert model.calls == []
+
+
+@pytest.mark.unit
+async def test_a_scripted_reply_returns_its_transcript_with_the_answer() -> None:
+    model = ScriptedModel()
+    transcript = (
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "get_ledger", "args": {}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "name": "get_ledger",
+            "content": "no open obligations",
+        },
+    )
+    model.push(ModelRole.GATE, ScriptedReply(parsed=ACK, transcript=transcript))
+
+    response = await model.generate(GATE, GateDecision)
+
+    assert response.parsed == ACK
+    assert response.transcript == transcript
+
+
+@pytest.mark.unit
+async def test_a_plain_output_has_an_empty_transcript() -> None:
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, ACK)
+
+    assert (await model.generate(GATE, GateDecision)).transcript == ()
