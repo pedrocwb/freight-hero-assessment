@@ -1,33 +1,35 @@
 """The seed SOPs in `sops/` follow the canonical table of docs/decisions.md.
 
-The eval scenarios and the decide prompt depend on these files: which sections exist
+The eval scenarios and the agent prompt depend on these files: which sections exist
 in which layer, which intents they answer, how the client layers merge, and the
 high-risk procedure of each client. A change that breaks one of these is a change to
 the shared contract, so it fails here before it reaches a scenario.
+
+The merged sections are read the way a deployment reads them: the tree imported into a
+SOP store (`agent sop import`) and served by the index over that store.
 """
 
 import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from freight_agent.adapters.clock import VirtualClock
+from freight_agent.adapters.knowledge.memory import StoreSopIndex
+from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.adapters.sop.files import (
-    FileSopRepository,
     SopFile,
     locate,
     read_sop_file,
     sop_paths,
 )
+from freight_agent.adapters.sop.importer import SopImporter
 from freight_agent.adapters.sop.lint import Severity, lint
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
-from freight_agent.domain.sop import (
-    MergeMode,
-    ResolvedSection,
-    effective_sections,
-    resolve,
-)
+from freight_agent.domain.sop import MergeMode, ResolvedSection
 
 SOPS = Path(__file__).resolve().parents[2] / "sops"
 NO_OVERRIDES = "a_new_client"  # a client with no folder: the standard procedures apply
@@ -44,7 +46,7 @@ CANONICAL: dict[str, frozenset[Intent]] = {
     "acknowledgements": frozenset({Intent.ACKNOWLEDGEMENT}),
     "status_updates": frozenset({Intent.STATUS_UPDATE}),
     "driver_departed": frozenset({Intent.DRIVER_DEPARTED}),
-    "documents": frozenset({Intent.DOCUMENT}),
+    "documents": frozenset({Intent.DOCUMENT, Intent.DOCUMENT_PROCESSED}),
 }
 
 # Every file outside standard/, with the merge mode the table gives it.
@@ -61,9 +63,17 @@ _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 MIN_LINES, MAX_LINES = 10, 40
 
 
+async def _index() -> StoreSopIndex:
+    """The tree imported into a new store, and the index over it (no file fallback: the
+    index serves only what was imported)."""
+    store = MemoryStore()
+    clock = VirtualClock(datetime(2026, 10, 20, tzinfo=UTC))
+    await SopImporter(store.unit_of_work, clock=clock).import_tree(SOPS)
+    return StoreSopIndex(store.unit_of_work)
+
+
 async def _effective(client_id: str, load_types: Sequence[str] = ()) -> dict[str, ResolvedSection]:
-    sections = await FileSopRepository(SOPS).sections_for_client(client_id)
-    merged = effective_sections(sections, client_id=client_id, load_types=load_types)
+    merged = await (await _index()).visible(client_id, load_types)
     return {s.section_id: s for s in merged}
 
 
@@ -196,15 +206,9 @@ async def test_the_reefer_extension_does_not_leak_to_another_client() -> None:
 async def test_a_due_eta_follow_up_at_to_pickup_resolves_the_high_risk_procedure(
     client_id: str,
 ) -> None:
-    sections = await FileSopRepository(SOPS).sections_for_client(client_id)
+    index = await _index()
 
-    sop = resolve(
-        sections,
-        client_id=client_id,
-        load_types=(),
-        intent=Intent.ETA_FOLLOW_UP_DUE,
-        stage=Stage.TO_PICKUP,
-    )
+    sop = await index.by_applies(client_id, (), Intent.ETA_FOLLOW_UP_DUE, Stage.TO_PICKUP)
 
     assert set(sop.section_ids) == {"communication_rules", "delay_risk_high", "escalation"}
     assert {c.section_id for c in sop.catalog} == set(CANONICAL)

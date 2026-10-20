@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -7,6 +8,8 @@ import pytest
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import Gate, GateResult, follow_up_intent
+from freight_agent.application.prompts import GATE_SYSTEM_PROMPT, render_gate_system_prompt
+from freight_agent.domain.broker import Broker, IntentDef, ObligationDef, standard_broker
 from freight_agent.domain.events import Attachment, Direction, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, Load
@@ -129,7 +132,7 @@ async def test_due_eta_timer_is_a_follow_up(load: Load) -> None:
 
     result, model = await classify(load, trigger)
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
     assert result.decision.act is True
     assert result.usage is None
     assert model.calls == []
@@ -141,7 +144,7 @@ async def test_timer_kind_falls_back_to_the_timer_obligation(load: Load) -> None
 
     result, _ = await classify(load, trigger, obligations=(ETA_REQUEST,), event_timer=TIMER)
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
 
 
 @pytest.mark.unit
@@ -150,7 +153,7 @@ async def test_timer_kind_falls_back_to_the_obligation_named_in_the_event(load: 
 
     result, _ = await classify(load, trigger, obligations=(ETA_REQUEST,))
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
 
 
 @pytest.mark.unit
@@ -159,7 +162,7 @@ async def test_timer_of_an_unknown_obligation_still_goes_to_decide(load: Load) -
 
     result, model = await classify(load, trigger)
 
-    assert result.decision.intent is Intent.OTHER
+    assert result.decision.intent == Intent.OTHER
     assert result.should_act
     assert model.calls == []
 
@@ -267,7 +270,7 @@ async def test_system_only_intent_from_the_model_becomes_other(load: Load) -> No
 
     result = await Gate(model).classify(context(load, sms("gonna be late")))
 
-    assert result.decision.intent is Intent.OTHER
+    assert result.decision.intent == Intent.OTHER
     assert result.decision.act is True
     assert "delay_risk_high" in result.decision.reason
 
@@ -295,4 +298,110 @@ def test_should_act_honors_must_act(intent: Intent, act: bool, expected: bool) -
 def test_every_obligation_kind_has_a_follow_up_intent() -> None:
     for kind in ObligationKind:
         assert follow_up_intent(kind) is not None
-    assert follow_up_intent(ObligationKind.ETA_REQUEST) is Intent.ETA_FOLLOW_UP_DUE
+    assert follow_up_intent(ObligationKind.ETA_REQUEST) == Intent.ETA_FOLLOW_UP_DUE
+
+
+# --- the broker's catalog (wave 3) ---------------------------------------------------------
+
+
+def _with_detention() -> Broker:
+    standard = standard_broker()
+    detention = IntentDef(
+        intent_id="detention_request",
+        title="Detention request",
+        description="the carrier asks to be paid for waiting at a stop.",
+        must_act=False,
+    )
+    return standard.model_copy(update={"intents": (*standard.intents, detention)})
+
+
+@pytest.mark.unit
+async def test_a_processed_document_acts_without_a_model_call(load: Load) -> None:
+    trigger = event(
+        EventType.DOCUMENT_PROCESSED,
+        event_id="doc:doc_1",
+        data={"document_id": "doc_1", "type_id": "pod", "status": "processed"},
+    )
+
+    result, model = await classify(load, trigger)
+
+    assert (result.decision.intent, result.decision.act) == (Intent.DOCUMENT_PROCESSED, True)
+    assert result.should_act
+    assert model.calls == []
+
+
+@pytest.mark.unit
+async def test_a_message_may_have_an_intent_of_the_broker_s_catalog(load: Load) -> None:
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, GateDecision(intent="detention_request", act=False, reason="r"))
+    ctx = replace(context(load, sms("we waited 3 hours, detention?")), broker=_with_detention())
+
+    result = await Gate(model).classify(ctx)
+
+    assert result.decision.intent == "detention_request"
+    assert not result.should_act  # the catalog says this intent need not act
+    assert result.broker == ctx.broker
+    system = model.calls[0].request.system
+    assert system == render_gate_system_prompt(ctx.broker)
+    assert "- detention_request: the carrier asks to be paid for waiting at a stop." in system
+
+
+@pytest.mark.unit
+async def test_the_standard_catalog_gets_the_tuned_gate_prompt(load: Load) -> None:
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, GateDecision(intent="question", act=True, reason="r"))
+
+    await Gate(model).classify(context(load, sms("PO?")))
+
+    assert model.calls[0].request.system == GATE_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+async def test_a_broker_without_triage_sends_every_message_to_the_agent_unread(
+    load: Load,
+) -> None:
+    untriaged = standard_broker().model_copy(update={"triage": False})
+    model = ScriptedModel()
+
+    result = await Gate(model).classify(replace(context(load, sms("ok")), broker=untriaged))
+
+    assert model.calls == []
+    assert (result.decision.intent, result.decision.act) == (Intent.OTHER, True)
+    assert result.should_act and result.usage is None
+
+
+@pytest.mark.unit
+async def test_without_triage_system_events_still_get_their_intent_from_code(
+    load: Load,
+) -> None:
+    untriaged = standard_broker().model_copy(update={"triage": False})
+    photo = event(
+        EventType.INBOUND_MESSAGE, channel=Channel.SMS, sender=DRIVER, attachments=(_BOL,)
+    )
+
+    result = await Gate(ScriptedModel()).classify(replace(context(load, photo), broker=untriaged))
+
+    assert result.decision.intent == Intent.DOCUMENT
+
+
+_BOL = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
+
+
+@pytest.mark.unit
+async def test_an_intent_the_catalog_lacks_is_corrected_to_other(load: Load) -> None:
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, GateDecision(intent="detention_request", act=False, reason="r"))
+
+    result = await Gate(model).classify(context(load, sms("we waited 3 hours, detention?")))
+
+    assert (result.decision.intent, result.decision.act) == (Intent.OTHER, True)
+    assert "model said detention_request" in result.decision.reason
+
+
+@pytest.mark.unit
+def test_follow_up_intent_reads_the_given_catalog() -> None:
+    pod = ObligationDef(kind="pod", title="POD", description="The signed POD.")
+    broker = standard_broker().model_copy(update={"obligations": (pod,)})
+
+    assert follow_up_intent("pod", broker) == "pod_follow_up_due"
+    assert follow_up_intent("pod") is None

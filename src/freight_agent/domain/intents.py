@@ -1,4 +1,11 @@
-"""What an event means, as classified by the gate."""
+"""What an event means, as classified by the gate.
+
+An intent is a string id from the broker's catalog (`domain.broker.Broker.intents`):
+brokers add their own at runtime. `Intent` keeps the ids of the standard catalog
+(`domain.broker.standard_broker`) as constants, so code and tests that name a standard
+intent stay typo-proof. Which intents must act or may end a run without action is
+catalog data (`IntentDef.must_act`, `IntentDef.noop_eligible`), not a constant here.
+"""
 
 from enum import StrEnum
 
@@ -17,29 +24,12 @@ class Intent(StrEnum):
     ETA_FOLLOW_UP_DUE = "eta_follow_up_due"
     DRIVER_DEPARTED = "driver_departed"
     OTHER = "other"
-
-
-# Intents that may end a run without action when nothing is open.
-NOOP_ELIGIBLE = frozenset({Intent.ACKNOWLEDGEMENT})
-
-# Intents that always need a decision, whatever the gate model says.
-MUST_ACT = frozenset(
-    {
-        Intent.ETA_PROVIDED,
-        Intent.ETA_DEFERRED,
-        Intent.QUESTION,
-        Intent.DOCUMENT,
-        Intent.DELAY_RISK_HIGH,
-        Intent.DELAY_RISK_LOW,
-        Intent.ETA_FOLLOW_UP_DUE,
-        Intent.DRIVER_DEPARTED,
-    }
-)
+    DOCUMENT_PROCESSED = "document_processed"
 
 
 class GateDecision(DomainModel):
-    """Structured output of the gate model."""
+    """Structured output of the gate model. `intent` is an intent id of the catalog."""
 
-    intent: Intent
+    intent: str
     act: bool
     reason: str

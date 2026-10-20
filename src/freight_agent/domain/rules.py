@@ -16,15 +16,14 @@ from freight_agent.domain.actions import (
     Action,
     CloseObligation,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
-    Purpose,
     ScheduleTimer,
     SendEmail,
     SendSms,
     UpdateStage,
 )
 from freight_agent.domain.load import Channel, Stage, contacts_of
-from freight_agent.domain.obligations import ObligationKind
 from freight_agent.domain.validation import Rule, Severity, ValidationContext, Violation
 
 
@@ -139,42 +138,77 @@ class _LedgerView:
     deferrals_used: int
 
 
-def _is_eta_request(action: Action) -> bool:
-    """The executor opens the ETA obligation with this SMS, or records one more attempt."""
-    return isinstance(action, SendSms) and action.purpose is Purpose.ETA_REQUEST
+def _requested_kind(action: Action) -> str | None:
+    """The obligation an SMS or an email asks for: the executor opens it with this message,
+    or records one more attempt (`purpose: eta_request` means `requests: eta_request`)."""
+    return action.requests if isinstance(action, SendSms | SendEmail) else None
 
 
-def _open_in_ledger(kind: ObligationKind, ctx: ValidationContext) -> bool:
-    return any(o.kind is kind for o in ctx.open_obligations)
+def _named_kinds(action: Action) -> tuple[str, ...]:
+    """Every obligation kind an action names."""
+    if isinstance(action, ScheduleTimer | DeferObligation | CloseObligation | OpenObligation):
+        return (action.kind,)
+    requested = _requested_kind(action)
+    return () if requested is None else (requested,)
+
+
+def _open_in_ledger(kind: str, ctx: ValidationContext) -> bool:
+    return any(o.kind == kind for o in ctx.open_obligations)
 
 
 def _projected_obligation(
-    kind: ObligationKind, ctx: ValidationContext, approved: Sequence[Action]
+    kind: str, ctx: ValidationContext, approved: Sequence[Action]
 ) -> _LedgerView | None:
     """The open obligation of `kind` once the approved actions have run; None if there is none."""
-    current = next((o for o in ctx.open_obligations if o.kind is kind), None)
+    current = next((o for o in ctx.open_obligations if o.kind == kind), None)
     view = None if current is None else _LedgerView(current.attempts, current.deferrals_used)
     for action in approved:
-        if kind is ObligationKind.ETA_REQUEST and _is_eta_request(action):
+        if _requested_kind(action) == kind:
             view = (
                 _LedgerView(attempts=1, deferrals_used=0)
                 if view is None
                 else replace(view, attempts=view.attempts + 1)
             )
-        elif isinstance(action, DeferObligation) and action.kind is kind and view is not None:
+        elif isinstance(action, OpenObligation) and action.kind == kind and view is None:
+            view = _LedgerView(attempts=0, deferrals_used=0)
+        elif isinstance(action, DeferObligation) and action.kind == kind and view is not None:
             view = replace(view, deferrals_used=view.deferrals_used + 1)
-        elif isinstance(action, CloseObligation) and action.kind is kind:
+        elif isinstance(action, CloseObligation) and action.kind == kind:
             view = None
     return view
 
 
-class ObligationExists(_BaseRule):
-    """Ledger actions need the open obligation they act on.
+class KnownObligationKind(_BaseRule):
+    """An action names only obligation kinds of the broker's catalog
+    (`ValidationContext.obligation_kinds`): an obligation of another kind would have no
+    follow-up intent and no procedure, and nobody would ever close it."""
 
-    `schedule_timer` may also follow an `eta_request` SMS approved earlier in the
-    plan, because the executor opens the obligation when it sends that SMS.
-    `defer_obligation` and `close_obligation` act on an obligation that was open
-    before this run.
+    name = "known_obligation_kind"
+
+    def check(
+        self, action: Action, index: int, ctx: ValidationContext, approved: Sequence[Action]
+    ) -> Violation | None:
+        known = ctx.obligation_kinds
+        if known is None:
+            return None
+        unknown = [kind for kind in _named_kinds(action) if kind not in known]
+        if not unknown:
+            return None
+        return self._violation(
+            index,
+            f"{', '.join(unknown)} is not an obligation kind of this broker "
+            f"(kinds: {', '.join(known) or 'none'})",
+        )
+
+
+class ObligationExists(_BaseRule):
+    """Ledger actions need the open obligation they act on, and `open_obligation` needs
+    none open.
+
+    `schedule_timer` may also follow a request (an `eta_request` SMS) or an
+    `open_obligation` approved earlier in the plan, because the executor opens the
+    obligation first. `defer_obligation` and `close_obligation` act on an obligation
+    that was open before this run.
     """
 
     name = "obligation_exists"
@@ -182,6 +216,10 @@ class ObligationExists(_BaseRule):
     def check(
         self, action: Action, index: int, ctx: ValidationContext, approved: Sequence[Action]
     ) -> Violation | None:
+        if isinstance(action, OpenObligation):
+            if _projected_obligation(action.kind, ctx, approved) is None:
+                return None
+            return self._violation(index, f"an open {action.kind} obligation already exists")
         if not isinstance(action, ScheduleTimer | DeferObligation | CloseObligation):
             return None
         is_open = _projected_obligation(action.kind, ctx, approved) is not None
@@ -220,22 +258,27 @@ class DeferralWithinPolicy(_BaseRule):
         return None
 
 
-class EtaAttemptCap(_BaseRule):
-    """Stops chasing the driver for an ETA after `max_eta_attempts` requests."""
+class AttemptCap(_BaseRule):
+    """Stops chasing a contact after the cap of requests of an obligation kind
+    (`ValidationConfig.attempt_cap`, the catalog's `ObligationDef.max_attempts`): an SMS
+    or an email that asks for a kind whose requests are used up is refused."""
 
-    name = "eta_attempt_cap"
+    name = "attempt_cap"
 
     def check(
         self, action: Action, index: int, ctx: ValidationContext, approved: Sequence[Action]
     ) -> Violation | None:
-        if not _is_eta_request(action):
+        kind = _requested_kind(action)
+        if kind is None:
             return None
-        view = _projected_obligation(ObligationKind.ETA_REQUEST, ctx, approved)
-        cap = ctx.config.max_eta_attempts
-        if view is None or view.attempts < cap:
+        view = _projected_obligation(kind, ctx, approved)
+        cap = ctx.config.attempt_cap(kind)
+        if view is None or cap is None or view.attempts < cap:
             return None
         return self._violation(
-            index, f"the ETA was already requested {view.attempts} times (cap {cap})"
+            index,
+            f"{kind} was already requested {view.attempts} times (cap {cap}): its requests "
+            "are used up",
         )
 
 
@@ -358,7 +401,8 @@ def default_rules() -> tuple[Rule, ...]:
         NoContactDetailsInText(),
         ChannelAllowed(),
         SmsRateLimit(),
-        EtaAttemptCap(),
+        KnownObligationKind(),
+        AttemptCap(),
         ObligationExists(),
         DeferralWithinPolicy(),
         StageMovesForward(),

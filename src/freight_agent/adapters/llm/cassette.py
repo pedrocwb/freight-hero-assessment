@@ -1,15 +1,18 @@
 """Cassettes: record a real model's answers once, replay them offline on every PR.
 
 A cassette is keyed by everything that shapes the model's answer: the model id,
-the role, the prompts, the tools offered, the output schema and the tool-round
-limit. Change any of them and the key changes, so a recording is never replayed
-against a prompt it was not made for: the eval stops with `CassetteMissing` and
-says how to record again. The timeout is not in the key because it does not
-change what the model says.
+the role, the prompts, the images, the tools offered, the output schema, the
+tool-round limit and the cost cap. Change any of them and the key changes, so a
+recording is never replayed against a prompt it was not made for: the eval stops with
+`CassetteMissing` and says how to record again. The timeout is not in the key because
+it does not change what the model says.
 
 In replay the recorded transcript stands in for the tool calls; tools do not
-run. Cassettes are committed, so a file holds hashes of the prompts rather than
-the prompts, and the transcript is scrubbed of credentials before it is written.
+run. The agent recomputes what its action tools staged from that transcript
+(`application.agent.stage_from_transcript`), so a replay reproduces the recorded
+run's plan with no side effect. Cassettes are committed, so a file holds hashes of the
+prompts and images rather than the prompts and images, and the transcript is scrubbed
+of credentials before it is written.
 """
 
 import hashlib
@@ -61,8 +64,13 @@ class CassetteCorrupt(CassetteError):
 
 
 def cassette_key(model_id: str, request: LlmRequest, schema: type[BaseModel]) -> str:
-    """sha256 of canonical JSON over every input that shapes the model's answer."""
-    material = {
+    """sha256 of canonical JSON over every input that shapes the model's answer.
+
+    The images (by content hash) and the cost cap (it can end the tool loop early) are
+    in the key only when the request has them, so a request without either keeps the key
+    it had before they existed.
+    """
+    material: dict[str, Any] = {
         "model_id": model_id,
         "role": request.role.value,
         "system": request.system,
@@ -74,7 +82,17 @@ def cassette_key(model_id: str, request: LlmRequest, schema: type[BaseModel]) ->
         "schema": {"name": schema.__name__, "json_schema": schema.model_json_schema()},
         "max_tool_rounds": request.max_tool_rounds,
     }
+    if request.images:
+        material["images"] = _image_hashes(request)
+    if request.max_cost_usd is not None:
+        material["max_cost_usd"] = request.max_cost_usd
     return _sha256(json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+
+
+def _image_hashes(request: LlmRequest) -> list[str]:
+    return [
+        f"{image.media_type}:{hashlib.sha256(image.data).hexdigest()}" for image in request.images
+    ]
 
 
 _UNSAFE_PATH_CHARS = re.compile(r"[^a-z0-9._-]+")
@@ -145,6 +163,8 @@ class CassetteModel:
                 "user_sha256": _sha256(request.user),
                 "tools": [tool.name for tool in request.tools],
                 "max_tool_rounds": request.max_tool_rounds,
+                "images": _image_hashes(request),
+                "max_cost_usd": request.max_cost_usd,
             },
             "parsed": response.parsed.model_dump(mode="json"),
             "usage": response.usage.model_dump(mode="json"),

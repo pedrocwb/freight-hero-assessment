@@ -57,8 +57,8 @@ def lint(root: Path, scenario_tags: Iterable[str] | None = None) -> list[LintIss
         file = read_sop_file(path, location)
         files.append(file)
         issues.extend(_error(source, problem) for problem in file.problems)
-    issues.extend(_duplicate_issues(files))
-    issues.extend(_extend_issues(files))
+    issues.extend(duplicate_issues(files))
+    issues.extend(extend_issues(files))
     if scenario_tags is not None:
         issues.extend(_coverage_warnings(files, scenario_tags))
     return sorted(issues, key=lambda issue: issue.file)  # stable: a file keeps its order
@@ -68,14 +68,14 @@ def _error(file: str, message: str) -> LintIssue:
     return LintIssue(Severity.ERROR, file, message)
 
 
-def _duplicate_issues(files: Sequence[SopFile]) -> list[LintIssue]:
+def duplicate_issues(files: Sequence[SopFile]) -> list[LintIssue]:
     return [
         _error(repeat.location.source, duplicate_problem(section_id, first))
         for section_id, repeat, first in duplicates(files)
     ]
 
 
-def _extend_issues(files: Sequence[SopFile]) -> list[LintIssue]:
+def extend_issues(files: Sequence[SopFile]) -> list[LintIssue]:
     """`extend` adds text after a less specific section of the same client, so one must exist."""
     ids_in: dict[tuple[SopLayer, str | None], set[str]] = {}
     for file in files:

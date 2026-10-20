@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from freight_agent.adapters.channels.fakes.recording import Delivery, RecordingGateways
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
+from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
@@ -30,8 +32,8 @@ from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
-from freight_agent.ports.sop import SopRepository
 from freight_agent.ports.tracing import Tracer
 
 LA = ZoneInfo("America/Los_Angeles")
@@ -41,7 +43,7 @@ DISPATCHER = "dsp_4410"
 BROKER = "brk_0087"
 ETA = ObligationKind.ETA_REQUEST
 GATE = ModelRole.GATE
-DECIDE = ModelRole.DECIDE
+DECIDE = ModelRole.AGENT  # the role was named decide before wave 3
 
 
 def at(hour: int, minute: int, second: int = 0) -> datetime:
@@ -100,7 +102,11 @@ STANDARD = (
     ),
     section("driver_questions", "Answer from the load metadata.", intents=(Intent.QUESTION,)),
     section("acknowledgements", "Do nothing.", intents=(Intent.ACKNOWLEDGEMENT,)),
-    section("documents", "Create a Hero task to review it.", intents=(Intent.DOCUMENT,)),
+    section(
+        "documents",
+        "Create a Hero task to review it.",
+        intents=(Intent.DOCUMENT, Intent.DOCUMENT_PROCESSED),
+    ),
 )
 NORTHLINE = (
     section(
@@ -115,19 +121,11 @@ NORTHLINE = (
 SECTIONS = (*STANDARD, *NORTHLINE)
 
 
-class FakeSop:
-    """The SopRepository contract over a fixed list of sections."""
+class FakeSop(MemorySopIndex):
+    """The SopIndex contract over a fixed list of sections, at version "test"."""
 
     def __init__(self, sections: Sequence[SopSection] = SECTIONS) -> None:
-        self._sections = tuple(sections)
-
-    async def sections_for_client(self, client_id: str) -> list[SopSection]:
-        return [
-            s for s in self._sections if s.layer is SopLayer.STANDARD or s.client_id == client_id
-        ]
-
-    def version(self) -> str:
-        return "test"
+        super().__init__(sections, version="test")
 
 
 ASK_ETA = SendSms(
@@ -158,7 +156,7 @@ class World:
         *,
         config: RuntimeConfig | None = None,
         llm: LanguageModel | None = None,
-        sop: SopRepository | None = None,
+        knowledge: SopIndex | None = None,
         tracer: Tracer | None = None,
         wrap_gateways: Callable[[Gateways], Gateways] | None = None,
     ) -> None:
@@ -175,9 +173,10 @@ class World:
             clock=self.clock,
             ids=self.ids,
             llm=llm or self.model,
-            sop=sop or FakeSop(),
+            knowledge=knowledge or FakeSop(),
             gateways=wrap_gateways(recording) if wrap_gateways else recording,
             tracer=tracer or NullTracer(),
+            blobs=MemoryBlobStore(),
             config=config or RuntimeConfig(),
         )
         self.runtime = AgentRuntime(self.deps)
@@ -235,7 +234,7 @@ class World:
 
     async def eta_request(self) -> Obligation | None:
         snapshot = await self.snapshot()
-        return next((o for o in reversed(snapshot.obligations) if o.kind is ETA), None)
+        return next((o for o in reversed(snapshot.obligations) if o.kind == ETA), None)
 
     async def pending_timers(self) -> list[Timer]:
         snapshot = await self.snapshot()

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.runs import RunRecord, Usage
+from freight_agent.evalkit.judge import JudgeResult
 
 
 class _Result(BaseModel):
@@ -24,6 +25,7 @@ class StepObservation(_Result):
     runs: tuple[RunRecord, ...]  # runs that started during the step, in order
     llm_calls: int  # model calls made during the step (all roles)
     snapshot: LoadSnapshot  # state at the end of the step
+    judge: JudgeResult | None = None  # the judge's verdict, for a step with a rubric
 
 
 class Failure(_Result):
@@ -38,9 +40,16 @@ class ScenarioResult(_Result):
     passed: bool
     failures: tuple[Failure, ...] = ()
     observations: tuple[StepObservation, ...] = ()
-    usage: tuple[Usage, ...] = ()
+    usage: tuple[Usage, ...] = ()  # the agent's model calls (what `llm_calls` counts)
+    judge_usage: tuple[Usage, ...] = ()  # the judge's calls, reported apart (F10)
+    warnings: tuple[str, ...] = ()  # e.g. a rubric not judged in scripted mode
     error: str | None = None  # the scenario could not run (bad fixture, missing cassette)
 
     @property
     def cost_usd(self) -> float:
-        return sum(u.cost_usd for u in self.usage)
+        """Everything the trial spent, the judge included: the cost cap counts it."""
+        return sum(u.cost_usd for u in (*self.usage, *self.judge_usage))
+
+    @property
+    def judge_cost_usd(self) -> float:
+        return sum(u.cost_usd for u in self.judge_usage)

@@ -14,7 +14,7 @@ export function BrokerSlack() {
   const { load, timezone } = sim;
   const broker = contactFor(load, "broker", "slack");
   const onSlack = broker?.channels.includes("slack") ?? false;
-  const { resource, entries, send, discard } = useThread("slack");
+  const { resource, entries, send, attach, discard } = useThread("slack");
   const thread = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -76,7 +76,7 @@ export function BrokerSlack() {
                         <time dateTime={entry.at}>{formatTime(entry.at, timezone)}</time>
                         {entry.pending === "sending" ? <span className="muted">sending</span> : null}
                       </p>
-                      <p className="slack-text">{entry.text}</p>
+                      <p className="slack-text">{entry.text || <span className="muted">Shared a file</span>}</p>
                       {entry.pending === "failed" ? (
                         <p className="field-error">
                           Not sent: {entry.error}{" "}
@@ -101,6 +101,7 @@ export function BrokerSlack() {
           disabledReason={broker ? `${broker.id} is not on Slack for this load` : "No broker on this load"}
           suggestions={["Any update on the pickup ETA?", "Thanks"]}
           onSend={(text) => (broker ? send(broker, text) : Promise.resolve(false))}
+          onAttach={(file, text) => (broker ? attach(broker, file, text) : Promise.resolve(null))}
         />
       </div>
     </>

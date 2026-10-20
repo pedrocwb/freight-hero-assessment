@@ -15,6 +15,8 @@ import pytest
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
+from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.application.contracts import (
@@ -23,21 +25,21 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import RunRecord, RunStatus
-from freight_agent.domain.sop import SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.evalkit.counting import CountingModel
 from freight_agent.evalkit.runner import ScenarioRunner, build_runtime
 from freight_agent.evalkit.spec import Scenario
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
-from freight_agent.ports.sop import SopRepository
 
 EVALS = Path(__file__).resolve().parents[2] / "evals"
 LA = ZoneInfo("America/Los_Angeles")
@@ -52,12 +54,9 @@ def la(hhmm: str) -> datetime:
     return datetime.combine(DAY, time.fromisoformat(hhmm), tzinfo=LA)
 
 
-class NoSop:
-    async def sections_for_client(self, client_id: str) -> list[SopSection]:
-        return []
-
-    def version(self) -> str:
-        return "test"
+class NoSop(MemorySopIndex):
+    def __init__(self) -> None:
+        super().__init__((), version="test")
 
 
 @dataclass(frozen=True)
@@ -180,7 +179,7 @@ class FakeRuntime:
         return run
 
     async def _think(self, item: _Queued) -> None:
-        decide = LlmRequest(role=ModelRole.DECIDE, system="decide", user=item.event_id)
+        decide = LlmRequest(role=ModelRole.AGENT, system="decide", user=item.event_id)
         if item.kind == "timer":
             await self.model.generate(decide, Plan)
         elif item.kind == "message":
@@ -199,7 +198,7 @@ class FakeFactory:
     created: list[FakeRuntime] = field(default_factory=list[FakeRuntime])
 
     def __call__(
-        self, clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository
+        self, clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
     ) -> FakeRuntime:
         runtime = FakeRuntime(
             clock, model, follow_up_minutes=self.follow_up_minutes, fires=self.fires
@@ -512,7 +511,7 @@ async def test_scripted_mode_feeds_each_step_its_script() -> None:
     assert outcome.failures == ()
     assert observation.llm_calls == 2
     assert [r.status for r in observation.runs] == [RunStatus.ACTED]
-    assert [u.role for u in outcome.usage] == ["gate", "decide"]
+    assert [u.role for u in outcome.usage] == ["gate", "agent"]
 
 
 @pytest.mark.unit
@@ -526,7 +525,7 @@ async def test_unused_script_entries_fail_the_step() -> None:
 
     assert [(f.step_index, f.check) for f in outcome.failures] == [(0, "script"), (1, "script")]
     assert "1 scripted gate output" in outcome.failures[0].message
-    assert "1 scripted decide output" in outcome.failures[1].message
+    assert "1 scripted agent output" in outcome.failures[1].message
 
 
 @pytest.mark.unit
@@ -622,12 +621,19 @@ def test_the_default_factory_builds_the_real_runtime() -> None:
     clock = VirtualClock(la("07:00"))
     model = CountingModel(ScriptedModel())
     gateways = RecordingGateways().as_gateways()
-    sop = NoSop()
+    knowledge = NoSop()
 
-    runtime = build_runtime(clock, model, gateways, sop)
+    runtime = build_runtime(clock, model, gateways, knowledge)
 
     assert isinstance(runtime, AgentRuntime)
     deps = runtime._deps  # pyright: ignore[reportPrivateUsage]
-    assert (deps.clock, deps.llm, deps.gateways, deps.sop) == (clock, model, gateways, sop)
+    assert (deps.clock, deps.llm, deps.gateways, deps.knowledge) == (
+        clock,
+        model,
+        gateways,
+        knowledge,
+    )
+    assert isinstance(deps.blobs, MemoryBlobStore)
+    assert isinstance(deps.documents, DocumentPipeline)  # W3-DOC, found by name
     assert isinstance(deps.ids, SequentialIdGenerator)
     assert isinstance(deps.tracer, NullTracer)

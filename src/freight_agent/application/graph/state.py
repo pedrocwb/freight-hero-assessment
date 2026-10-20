@@ -11,13 +11,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, TypedDict
 
+from freight_agent.application.agent import Staged
 from freight_agent.application.context import RunContext
 from freight_agent.application.escalation import Escalation
 from freight_agent.application.gate import GateResult
 from freight_agent.application.prefilter import PrefilterResult
 from freight_agent.domain.actions import Action, Plan
 from freight_agent.domain.intents import GateDecision
-from freight_agent.domain.runs import RunStatus, Usage
+from freight_agent.domain.runs import RunStatus, TrajectoryStep, Usage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import ValidationOutcome, Violation
 
@@ -53,10 +54,17 @@ class RunState:
     sop: ResolvedSop | None = None
     sop_version: str | None = None
     visible_sections: tuple[ResolvedSection, ...] = ()  # back the read_sop_section tool
-    plan: Plan | None = None
+    plan: Plan | None = None  # every action the agent proposed (`agent.merge_plan`)
+    staged: Staged | None = None  # what the agent's transcript staged (the fold)
+    no_procedure: bool = False  # the agent said no SOP section covers the event
     validation: ValidationOutcome | None = None
     usage: Annotated[tuple[Usage, ...], operator.add] = ()  # every model call, in order
     verdict: Verdict | None = None
+    # The run's reading of the event: the triage intent, then the agent's catalog label.
+    intent: str | None = None
+    trajectory: tuple[TrajectoryStep, ...] = ()  # the agent's tool calls, in order
+    sections_searched: tuple[str, ...] = ()
+    rejections: int = 0  # action tool calls refused
 
     @property
     def gate_decision(self) -> GateDecision | None:
@@ -77,12 +85,18 @@ class RunUpdate(TypedDict, total=False):
     prefilter: PrefilterResult | None
     gate: GateResult
     sop: ResolvedSop
-    sop_version: str
+    sop_version: str | None
     visible_sections: tuple[ResolvedSection, ...]
     plan: Plan
+    staged: Staged
+    no_procedure: bool
     validation: ValidationOutcome
     usage: tuple[Usage, ...]
     verdict: Verdict
+    intent: str | None
+    trajectory: tuple[TrajectoryStep, ...]
+    sections_searched: tuple[str, ...]
+    rejections: int
 
 
 def need[T](value: T | None, what: str) -> T:

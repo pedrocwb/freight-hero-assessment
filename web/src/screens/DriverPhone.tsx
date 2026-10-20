@@ -17,7 +17,7 @@ export function DriverPhone() {
   const sim = useSim();
   const { load, timezone } = sim;
   const driver = contactFor(load, "driver", "sms");
-  const { resource, entries, send, discard } = useThread("sms");
+  const { resource, entries, send, attach, discard } = useThread("sms");
   const thread = useRef<HTMLDivElement>(null);
 
   // Keep the newest text in view inside the phone, without scrolling the page.
@@ -78,7 +78,7 @@ export function DriverPhone() {
                     <div key={entry.key} className={clsx("bubble-row", own ? "bubble-row--own" : "bubble-row--them")}>
                       <div className={clsx("bubble", own ? "bubble--own" : "bubble--them", entry.pending === "failed" && "bubble--failed")}>
                         <span className="visually-hidden">{own ? "You" : "Agent"}: </span>
-                        {entry.text}
+                        {entry.text || <span className="bubble-file">Attachment</span>}
                       </div>
                       <p className="bubble-meta">
                         <time dateTime={entry.at}>{formatTime(entry.at, timezone)}</time>
@@ -109,13 +109,15 @@ export function DriverPhone() {
             disabledReason="This load has no driver on SMS"
             suggestions={SAMPLES}
             onSend={(text) => (driver ? send(driver, text) : Promise.resolve(false))}
+            onAttach={(file, text) => (driver ? attach(driver, file, text) : Promise.resolve(null))}
           />
         </div>
         <div className="col-side">
           <LedgerPanel snapshot={sim.snapshot.data} compact />
           <p className="hint side-hint">
             A question or an "ok" is not an ETA: the request stays open and its follow-up still
-            runs. Move the clock from the left to reach the next timer.
+            runs. Move the clock from the left to reach the next timer. Attach a POD or a BOL
+            photo as the driver would by MMS: the next tick reads it, then the agent acts on it.
           </p>
         </div>
       </div>

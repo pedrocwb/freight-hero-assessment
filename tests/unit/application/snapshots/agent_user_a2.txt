@@ -1,0 +1,75 @@
+Load 481207. Times are local to the current stop (America/Los_Angeles) unless marked.
+
+## Load
+load: 481207
+broker: Northline Logistics (id northline)
+shipper: Riverbend Foods
+carrier: Prairie Haul LLC (MC 778120)
+commodity: Canned tomato sauce, 38,000 lb, dry van
+load types: none
+stage: to_pickup
+delay risk: high
+stops:
+- stop 1 (current), pickup: Riverbend plant, Stockton, CA. Appointment: window 2026-10-13 06:00 to 14:00 PDT.
+- stop 2, delivery: Valley DC, Reno, NV. Appointment: fixed 2026-10-14 09:30 PDT.
+instructions (verbatim from the load metadata):
+  Call 1 hr before arrival. PO 55821 required at gate.
+
+## Contacts (the only people you may address, by id)
+- drv_20931: driver; channels: sms
+- dsp_4410: dispatcher; channels: email
+- brk_0087: broker; channels: email, slack
+
+## SOP sections for this event (follow them exactly)
+
+### communication_rules: Communication rules
+Be brief and polite. Never share rates.
+
+### driver_questions: Driver questions
+Answer from the load metadata when the answer is there. Otherwise a Hero task. Never guess.
+
+### escalation: Escalation
+Create a Hero task when you cannot act yourself.
+
+## Procedure in progress (context)
+An open obligation in the ledger follows this procedure. Its next step runs when its follow-up timer fires. Do not run its steps for this event unless the sections above tell you to.
+
+### delay_risk_high: Delay risk high
+1. Send an SMS to the driver to get the ETA and wait 30 minutes.
+2. No ETA after 30 minutes: send the SMS again and wait 30 minutes.
+3. No ETA after the two SMS: email the dispatcher in the main thread, then create a Hero task to call the driver.
+
+## Other SOP sections (read one with read_sop_section, or find one with search_sop, if this event needs it)
+- acknowledgements: Acknowledgements. What to do about acknowledgements.
+
+## Ledger (the source of truth for obligations and attempts)
+Open:
+- eta_request: attempts 1; opened 07:01; last action 07:01 (12 min ago); deferred until none, deferrals used 0; follow-up timer due 07:31 (in 18 min)
+Recently closed:
+- none
+
+## Pending timers (earliest first)
+- due 07:31 (in 18 min): follow-up for eta_request
+
+## Transcript (recent events, oldest first; "out" lines are what you did)
+- 07:00 system: delay risk changed low -> high
+- 07:01 out sms to drv_20931 (driver), purpose eta_request: "What time will you arrive at the pickup?"
+- 07:12 in sms from drv_20931 (driver): "What's the PO number?"  <- this event
+
+## Now
+Tue 2026-10-13 07:13 PDT (2026-10-13 14:13 UTC)
+
+## Event (decide what to do about this)
+type: inbound_message
+time: 07:12 (1 min ago)
+channel: sms
+from: drv_20931 (driver)
+text: "What's the PO number?"
+attachments: none
+
+## Gate
+intent: question
+reason: "The driver asks for the PO."
+
+## Your task
+Decide what to do about the event above. Follow the SOP sections for this event, and use the ledger, the timers and the transcript to see what is already done. Stage each action the SOP asks for now with its action tool, then call finish. Stage nothing if nothing should be done now.

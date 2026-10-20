@@ -1,4 +1,9 @@
-"""Command line entry point: `agent eval run|list|report` and `agent sop lint`.
+"""Command line entry point: `agent eval run|list|report|lint|draft`, `agent sop ...` (in
+`cli_sop.py`), `agent serve` and `agent db migrate`.
+
+`--broker-file` (a broker export, `evals/brokers/README.md`) plays a suite on one broker's
+catalog and published sections; `agent eval lint` lists the broker's intents no scenario
+covers, and `agent eval draft` drafts scenarios for them on the `compile` role.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -18,11 +23,14 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from freight_agent.cli_sop import sop_app
 from freight_agent.settings import LlmMode, Settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from freight_agent.domain.broker import Broker
+    from freight_agent.evalkit.brokers import BrokerExport, LintIssue
     from freight_agent.evalkit.graders import Budget
     from freight_agent.evalkit.langsmith_experiment import LangSmithExperiment
     from freight_agent.evalkit.metadata import RunMetadata
@@ -31,7 +39,6 @@ if TYPE_CHECKING:
 
 app = typer.Typer(no_args_is_help=True, help="Freight load agent.", add_completion=False)
 eval_app = typer.Typer(no_args_is_help=True, help="Run, list and report the scenario evals.")
-sop_app = typer.Typer(no_args_is_help=True, help="Check the SOP files.")
 app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
 
@@ -124,6 +131,13 @@ def eval_run(
             "and the graders' verdicts as feedback. Needs LANGSMITH_API_KEY.",
         ),
     ] = False,
+    broker_file: Annotated[
+        Path | None,
+        typer.Option(
+            help="Play every scenario on this broker export (evals/brokers/*.json): its "
+            "catalog in the trial's store, its published sections in the SOP index."
+        ),
+    ] = None,
 ) -> None:
     """Run a suite, grade it, write results.json and report.md, and exit with the verdict.
 
@@ -147,6 +161,7 @@ def eval_run(
             out=out,
             budget=_budget(max_tokens_per_run, max_latency_ms_per_run),
             langsmith=langsmith,
+            broker=_read_broker(broker_file),
         )
     except UsageProblem as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -168,8 +183,10 @@ def _run(
     out: Path | None,
     budget: "Budget | None",
     langsmith: bool = False,
+    broker: "BrokerExport | None" = None,
 ) -> int:
-    from freight_agent.adapters.sop.files import FileSopRepository
+    from freight_agent.adapters.knowledge.memory import MemorySopIndex
+    from freight_agent.evalkit.brokers import broker_index
     from freight_agent.evalkit.metadata import collect_metadata
     from freight_agent.evalkit.report import (
         REPORT_FILE,
@@ -201,15 +218,20 @@ def _run(
     except (SuiteError, ReportError) as exc:
         raise UsageProblem(str(exc)) from exc
     factory = _checked_model_factory(settings, mode)
-    sop = FileSopRepository(settings.sops_dir)
+    knowledge = MemorySopIndex.from_files(settings.sops_dir)
+    sop_version = knowledge.content_version
+    if broker is not None:
+        played = broker_index(knowledge, broker)
+        sop_version = getattr(played, "content_version", sop_version)
     metadata = collect_metadata(
         created_at=datetime.now(UTC),
         mode=mode,
         model_set=model_set,
-        sop=sop,
+        sop_version=sop_version,
         models_config=models_config,
         repo=Path.cwd(),
         settings=settings.describe(),
+        broker=None if broker is None else broker.label(),
     )
     experiment = (
         _langsmith_experiment(settings, suite, suite_scenarios, metadata, k, cost_cap_usd)
@@ -218,13 +240,15 @@ def _run(
     )
     runner = SuiteRunner(
         evals_dir=settings.evals_dir,
-        sop=sop,
+        knowledge=knowledge,
         mode=mode,
         model_factory=factory,
         budget=budget,
         observer=experiment,
+        broker=broker,
     )
-    typer.echo(f"{suite}: {len(scenarios)} scenarios, mode {mode}, k={k}")
+    on_broker = "" if broker is None else f", broker {broker.label()}"
+    typer.echo(f"{suite}: {len(scenarios)} scenarios, mode {mode}, k={k}{on_broker}")
     if experiment is not None:
         linked = f", agent {settings.langsmith_project}" if experiment.linked_to_agent else ""
         typer.echo(f"langsmith experiment: {experiment.name}{linked}")
@@ -351,6 +375,17 @@ def _split(values: Iterable[str] | None) -> list[str]:
     return [part.strip() for value in values or () for part in value.split(",") if part.strip()]
 
 
+def _read_broker(path: Path | None) -> "BrokerExport | None":
+    if path is None:
+        return None
+    from freight_agent.evalkit.brokers import BrokerFileError, read_broker_export
+
+    try:
+        return read_broker_export(path)
+    except BrokerFileError as exc:
+        raise UsageProblem(str(exc)) from exc
+
+
 # --- agent eval list / report ---------------------------------------------------------
 
 
@@ -410,32 +445,160 @@ def eval_report(
     typer.echo(render_summary(result, comparison, report=report))
 
 
-# --- agent sop lint ---------------------------------------------------------------------
+# --- agent eval lint / draft (a broker's coverage) ------------------------------------------
 
 
-@sop_app.command("lint")
-def sop_lint() -> None:
-    """Check every SOP file, and warn about sections no eval scenario covers.
+@eval_app.command("lint")
+def eval_lint(
+    broker_file: Annotated[
+        Path | None,
+        typer.Option(
+            help="The broker export to check (evals/brokers/*.json).",
+            show_default="the standard catalog",
+        ),
+    ] = None,
+) -> None:
+    """Check that every intent of a broker's catalog has a scenario.
 
-    Exit code 1 when there is an error; warnings alone leave it at 0.
+    Exit code 1 when an intent has none (`agent eval draft` drafts one), 2 when the
+    scenarios or the broker file cannot be read.
     """
-    from freight_agent.adapters.sop.lint import Severity, lint
-    from freight_agent.evalkit.suite import SuiteError, discover, suites
-
-    settings = Settings()
-    tags: list[str] | None
     try:
-        evals = settings.evals_dir
-        tags = [tag for name in suites(evals) for s in discover(evals, name) for tag in s.tags]
-    except SuiteError as exc:
-        typer.echo(f"warning: coverage not checked, the scenarios cannot be read: {exc}")
-        tags = None
-    issues = lint(settings.sops_dir, tags)
+        broker = _read_broker(broker_file)
+        issues, catalog, scenarios = _lint(Settings().evals_dir, broker)
+    except UsageProblem as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(HARNESS_ERROR) from None
     for issue in issues:
         typer.echo(str(issue))
-    errors = sum(issue.severity is Severity.ERROR for issue in issues)
-    typer.echo(f"{errors} errors, {len(issues) - errors} warnings in {settings.sops_dir}")
-    raise typer.Exit(1 if errors else 0)
+    typer.echo(
+        f"{len(issues)} errors: {catalog.broker_id}, {len(catalog.intents)} intents, "
+        f"{scenarios} scenarios"
+    )
+    raise typer.Exit(1 if issues else 0)
+
+
+def _lint(evals_dir: Path, broker: "BrokerExport | None") -> "tuple[list[LintIssue], Broker, int]":
+    from freight_agent.domain.broker import standard_broker
+    from freight_agent.evalkit.brokers import exports_by_file, lint_broker
+    from freight_agent.evalkit.suite import SuiteError, discover, suites
+
+    catalog = standard_broker() if broker is None else broker.broker
+    try:
+        every = [s for name in suites(evals_dir) for s in discover(evals_dir, name)]
+    except SuiteError as exc:
+        raise UsageProblem(str(exc)) from exc
+    issues = lint_broker(catalog, every, exports_by_file(evals_dir, every))
+    return issues, catalog, len(every)
+
+
+@eval_app.command("draft")
+def eval_draft(
+    broker_file: Annotated[
+        Path, typer.Option(help="The broker export to draft for (evals/brokers/*.json).")
+    ],
+    mode: Annotated[
+        LlmMode,
+        typer.Option(
+            help="live (or record) calls the compile model, about $0.002 per intent; replay "
+            "reads recorded answers. Scripted has no model to draft with."
+        ),
+    ],
+    intent: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Intents to draft. Repeat or comma-separate.",
+            show_default="the intents `agent eval lint` reports",
+        ),
+    ] = None,
+    model_set: Annotated[
+        str, typer.Option(help="'default' is config/models.yaml; NAME is models.NAME.yaml.")
+    ] = DEFAULT_MODEL_SET,
+    cost_cap_usd: Annotated[
+        float, typer.Option(min=0, help="Stop drafting once this much was spent.")
+    ] = 0.05,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Scenario folder root.", show_default="EVALS_DIR/scenarios"),
+    ] = None,
+) -> None:
+    """Draft scenarios for a broker's intents from its sections, on the compile role.
+
+    Each draft goes to <out>/<broker>/_draft_<intent>.yaml, tagged draft (and capability,
+    so it never gates a run). An existing draft is never overwritten. Exit code 1 when a
+    draft failed, 2 when the command cannot run.
+    """
+    try:
+        code = _draft(
+            settings=Settings(),
+            broker_file=broker_file,
+            mode=mode,
+            intents=_split(intent),
+            model_set=model_set,
+            cost_cap_usd=cost_cap_usd,
+            out=out,
+        )
+    except UsageProblem as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(HARNESS_ERROR) from None
+    raise typer.Exit(code)
+
+
+def _draft(
+    *,
+    settings: Settings,
+    broker_file: Path,
+    mode: LlmMode,
+    intents: list[str],
+    model_set: str,
+    cost_cap_usd: float,
+    out: Path | None,
+) -> int:
+    from freight_agent.adapters.clock import SystemClock
+    from freight_agent.adapters.knowledge.memory import MemorySopIndex
+    from freight_agent.evalkit.draft import draft_scenarios
+
+    if mode == "scripted":
+        raise UsageProblem("drafting calls the compile model: use --mode live, record or replay")
+    broker = _read_broker(broker_file)
+    assert broker is not None
+    if not intents:
+        issues, _, _ = _lint(settings.evals_dir, broker)
+        intents = [issue.intent for issue in issues]
+    if not intents:
+        typer.echo(f"nothing to draft: every intent of {broker.broker_id} has a scenario")
+        return 0
+    settings = settings.model_copy(
+        update={"models_config": models_config_for(settings, model_set), "llm_mode": mode}
+    )
+    factory = _checked_model_factory(settings, mode)
+    assert factory is not None
+    results, usage = asyncio.run(
+        draft_scenarios(
+            factory(SystemClock()),
+            broker,
+            intents=intents,
+            knowledge=MemorySopIndex.from_files(settings.sops_dir),
+            evals_dir=settings.evals_dir,
+            broker_file=_relative_to(broker_file, settings.evals_dir),
+            out_dir=out,
+            cost_cap_usd=cost_cap_usd,
+        )
+    )
+    for result in results:
+        where = str(result.path) if result.path is not None else result.message
+        detail = f" ({result.message})" if result.path is not None and result.message else ""
+        typer.echo(f"{result.status:<8} {result.intent:<30} {where}{detail}")
+    typer.echo(f"{len(usage)} compile call(s), ${sum(u.cost_usd for u in usage):.4f}")
+    return 1 if any(r.status == "failed" for r in results) else 0
+
+
+def _relative_to(path: Path, folder: Path) -> str:
+    """How a scenario under `folder` names `path`: relative when it is inside."""
+    try:
+        return path.resolve().relative_to(folder.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
 
 
 # --- agent serve and agent db -------------------------------------------------------------

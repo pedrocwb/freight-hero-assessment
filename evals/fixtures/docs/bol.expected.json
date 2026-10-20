@@ -1,0 +1,78 @@
+{
+  "file": "bol.pdf",
+  "load_id": "481207",
+  "type_id": "bol",
+  "pages": 1,
+  "text_layer": true,
+  "vision_path": false,
+  "extracted": {
+    "bol_number": "RBF-30417",
+    "shipper": "Riverbend Foods",
+    "consignee": "Valley DC",
+    "po_numbers": "55821",
+    "seal_number": "SL-44120",
+    "weight": 38000,
+    "pickup_date": "2026-10-13",
+    "signed": true
+  },
+  "not_in_standard_type": [],
+  "also_on_document": {
+    "load_number": "481207",
+    "carrier_name": "Prairie Haul LLC",
+    "mc_number": "778120",
+    "trailer_number": "PH-5327",
+    "pickup_stop": "Riverbend plant",
+    "handling_units": "20 pallets",
+    "pieces": "1600 cases",
+    "commodity": "Canned tomato sauce",
+    "freight_class": "60",
+    "delivery_appointment": "2026-10-14T09:30"
+  },
+  "checks": [
+    {
+      "field": "shipper",
+      "check": "stop_name",
+      "expected": "Riverbend Foods",
+      "found": "Riverbend Foods",
+      "ok": true
+    },
+    {
+      "field": "consignee",
+      "check": "stop_name",
+      "expected": "Valley DC",
+      "found": "Valley DC",
+      "ok": true
+    },
+    {
+      "field": "po_numbers",
+      "check": "po_number",
+      "expected": "55821",
+      "found": "55821",
+      "ok": true
+    },
+    {
+      "field": "seal_number",
+      "check": "seal_number",
+      "expected": null,
+      "found": "SL-44120",
+      "ok": true
+    },
+    {
+      "field": "pickup_date",
+      "check": "date_in_window",
+      "expected": "2026-10-13T06:00/2026-10-13T14:00",
+      "found": "2026-10-13",
+      "ok": true
+    },
+    {
+      "field": "signed",
+      "check": "signature",
+      "expected": "true",
+      "found": "true",
+      "ok": true
+    }
+  ],
+  "exceptions_noted": false,
+  "status": "processed",
+  "review_reasons": []
+}

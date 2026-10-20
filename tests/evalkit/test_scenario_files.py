@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from freight_agent.evalkit.spec import load_scenario
+from freight_agent.domain.actions import Plan
+from freight_agent.evalkit.spec import (
+    AgentTurn,
+    Expectation,
+    MessageStep,
+    ScriptedLlm,
+    load_scenario,
+)
 
 EVALS = Path(__file__).resolve().parents[2] / "evals"
 FILES = sorted((EVALS / "scenarios").rglob("*.yaml"))
@@ -40,3 +47,40 @@ def test_a_repeated_key_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'runs'"):
         load_scenario(path)
+
+
+# --- wave 3 spec (C0) ------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_decide_is_the_older_name_of_agent_and_comes_first() -> None:
+    script = ScriptedLlm.model_validate(
+        {"decide": [{"rationale": "first"}], "agent": [{"rationale": "second"}]}
+    )
+
+    assert [p.rationale for p in script.agent] == ["first", "second"]
+    assert script.decide == script.agent
+    assert ScriptedLlm.model_validate({"agent": [Plan()]}).agent == (AgentTurn(),)  # a turn
+    assert ScriptedLlm.model_validate({"decide": None}).agent == ()
+
+
+@pytest.mark.unit
+def test_a_message_step_may_carry_attachments() -> None:
+    step = MessageStep.model_validate(
+        {
+            "channel": "sms",
+            "sender": "drv_20931",
+            "body": "POD attached",
+            "attachments": [{"filename": "pod.pdf", "fixture": "fixtures/docs/pod_clean.pdf"}],
+        }
+    )
+
+    (attachment,) = step.attachments
+    assert (attachment.filename, attachment.content_type) == ("pod.pdf", "application/pdf")
+
+
+@pytest.mark.unit
+def test_obligation_expectations_take_any_kind_of_the_catalog() -> None:
+    expectation = Expectation.model_validate({"obligations": {"pod": {"status": "open"}}})
+
+    assert set(expectation.obligations) == {"pod"}

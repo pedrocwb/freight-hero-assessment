@@ -19,7 +19,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.domain.events import Event, EventType
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
@@ -269,7 +269,7 @@ def timer_lag_metrics(timers: Sequence[Timer], events: Sequence[Event]) -> Timer
 class StalledObligation(_Metric):
     obligation_id: str
     load_id: str
-    kind: ObligationKind
+    kind: str
     idle_since: datetime
     idle_s: float
 

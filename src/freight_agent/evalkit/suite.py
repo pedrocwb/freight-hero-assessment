@@ -24,6 +24,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError, computed_field
 
+from freight_agent.evalkit.brokers import BrokerExport
 from freight_agent.evalkit.graders import Budget, check_invariants, grade_step
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.observe import NullObserver, Observer
@@ -34,17 +35,22 @@ from freight_agent.evalkit.runner import (
     RuntimeFactory,
     RuntimeLike,
     ScenarioRunner,
-    build_runtime,
+    TrialDeps,
+    TrialFactory,
+    build_trial_runtime,
+    from_runtime_factory,
 )
 from freight_agent.evalkit.spec import Scenario, load_scenario
 from freight_agent.ports.clock import Clock
-from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, SchemaT
-from freight_agent.ports.sop import SopRepository
 from freight_agent.settings import LlmMode
 
 REGRESSION = "regression"
 CAPABILITY = "capability"
+# A guardrail control that injects the agent's tool calls through its script (a gullible
+# or confused agent): it tests the code's checks, not a model, so only scripted mode runs it.
+SCRIPTED_ONLY = "scripted_only"
 _FIRST_GROUPS = (REGRESSION, CAPABILITY)
 
 # Builds the model of one trial on that trial's virtual clock (circuit breakers read it).
@@ -304,6 +310,8 @@ def grade(
         failures=tuple(failures),
         observations=outcome.observations,
         usage=outcome.usage,
+        judge_usage=outcome.judge_usage,
+        warnings=outcome.warnings,
         error=outcome.error,
     )
 
@@ -338,43 +346,52 @@ class SuiteRunner:
     `scripted` mode feeds each trial the scenario's own script; the other modes need a
     `model_factory`. `record` runs like `live` (the factory's model records as it goes).
     An `observer` (`evalkit.observe`) sees every trial and step, for experiment tracking.
+    `broker` (a broker export) plays every scenario on that broker.
     """
 
     def __init__(
         self,
         *,
         evals_dir: Path,
-        sop: SopRepository,
+        knowledge: SopIndex,
         mode: LlmMode,
         model_factory: ModelFactory | None = None,
         budget: Budget | None = None,
         runtime_factory: RuntimeFactory | None = None,
         observer: Observer | None = None,
+        trial_factory: TrialFactory | None = None,
+        broker: BrokerExport | None = None,
     ) -> None:
         if mode == "scripted" and model_factory is not None:
             raise ValueError("scripted mode feeds the scenario scripts; do not pass a model")
         if mode != "scripted" and model_factory is None:
             raise ValueError(f"{mode} mode needs a model factory")
+        if runtime_factory is not None and trial_factory is not None:
+            raise ValueError("pass a runtime_factory or a trial_factory, not both")
         self._mode: LlmMode = mode
         self._budget = budget
         self._observer: Observer = observer or NullObserver()
-        inner = runtime_factory or build_runtime
+        if trial_factory is not None:
+            inner = trial_factory
+        elif runtime_factory is not None:
+            inner = from_runtime_factory(runtime_factory)
+        else:
+            inner = build_trial_runtime
         trial_model = TrialModel(model_factory) if model_factory is not None else None
 
-        def factory(
-            clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository
-        ) -> RuntimeLike:
+        def factory(deps: TrialDeps) -> RuntimeLike:
             if trial_model is not None:
-                trial_model.start(clock)
-            return inner(clock, model, gateways, sop)
+                trial_model.start(deps.clock)
+            return inner(deps)
 
         self._runner = ScenarioRunner(
             evals_dir=evals_dir,
-            sop=sop,
+            knowledge=knowledge,
             mode=_RUNNER_MODES[mode],
             model=trial_model,
-            runtime_factory=factory,
             observer=self._observer,
+            trial_factory=factory,
+            broker=broker,
         )
 
     async def run(
@@ -395,6 +412,10 @@ class SuiteRunner:
         spent = 0.0
         stopped: str | None = None
         not_run: tuple[str, ...] = ()
+        skipped: list[str] = []
+        if self._mode != "scripted":
+            skipped = [s.id for s in scenarios if SCRIPTED_ONLY in s.tags]
+            scenarios = [s for s in scenarios if SCRIPTED_ONLY not in s.tags]
         for index, scenario in enumerate(scenarios):
             trials: list[ScenarioResult] = []
             for trial in range(1, k + 1):
@@ -436,16 +457,27 @@ class SuiteRunner:
             not_run=not_run,
             cost_cap_usd=cost_cap_usd,
             stopped=stopped,
-            warnings=self._warnings(k),
+            warnings=self._warnings(k, summaries, skipped),
         )
 
-    def _warnings(self, k: int) -> tuple[str, ...]:
-        if self._mode == "scripted" and k > 1:
-            return (
-                f"scripted mode is deterministic: the {k} trials of each scenario are the "
-                "same trial, so k > 1 only repeats it",
+    def _warnings(
+        self, k: int, summaries: Sequence[ScenarioSummary], skipped: Sequence[str] = ()
+    ) -> tuple[str, ...]:
+        warnings: list[str] = []
+        if skipped:
+            warnings.append(
+                f"not run in {self._mode} mode (tagged {SCRIPTED_ONLY}: a guardrail control "
+                f"that scripts the agent's tool calls): {', '.join(skipped)}"
             )
-        return ()
+        if self._mode == "scripted" and k > 1:
+            warnings.append(
+                f"scripted mode is deterministic: the {k} trials of each scenario are the "
+                "same trial, so k > 1 only repeats it"
+            )
+        for summary in summaries:  # the same warning from each of k trials is shown once
+            for warning in dict.fromkeys(w for t in summary.trials for w in t.warnings):
+                warnings.append(f"{summary.scenario_id}: {warning}")
+        return tuple(warnings)
 
 
 def _describe_error(exc: Exception) -> str:

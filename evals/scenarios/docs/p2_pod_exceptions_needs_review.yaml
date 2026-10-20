@@ -1,0 +1,113 @@
+# P2: a POD with exceptions and a wrong PO goes to a Hero; the load is not delivered.
+# The fixture pod_exceptions.pdf lists "2 cases damaged, 1 short" and PO 55812, while the
+# load's PO is 55821: the pipeline's po_number check fails, so the document is
+# `needs_review` and the `pod` obligation stays open (docs/decisions.md, "Documents").
+# Acme's proof_of_delivery section, step 5: a Hero task with the values found and what
+# does not match, no stage change, nothing to the driver.
+#
+# Cards: W3-DOC (checks in code, needs_review leaves the obligation open) and W3-AGT.
+#
+# Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
+#   step 0  09:10  arrival, as in p1: at_delivery, `pod` open with its timer at 11:11.
+#   step 1  09:50  POD photo, no text.
+#           09:51  extract: pod with PO 55812 and exceptions -> needs_review. The message
+#                  run does nothing; the document_processed run creates one Hero task
+#                  with the PO found, the load's PO and the exceptions.
+# The judge reads the Hero task: it must give a person what they need to fix the POD.
+id: p2_pod_exceptions_needs_review
+title: "A POD with exceptions and a wrong PO goes to a Hero and does not deliver the load (Acme)"
+suite: docs
+tags: [regression, sop:proof_of_delivery, sop:documents, sop:escalation]
+description: >-
+  The document check finds a PO mismatch, so the POD needs review: one Hero task with the
+  values found, the POD request stays open, the stage stays at_delivery, and the driver
+  is told nothing.
+load: fixtures/load_481207.json
+broker_file: brokers/acme.json
+load_overrides:
+  stage: to_delivery
+date: 2026-10-14
+start: "09:00"
+steps:
+  - at: "09:10"
+    note: "Arrival at Valley DC: the POD becomes due at 11:11"
+    message: {channel: sms, sender: drv_20931, body: "checked in at valley dc, they are unloading us now"}
+    script:
+      gate:
+        - {intent: status_update, act: true, reason: "The driver reports the arrival at the receiver."}
+      agent:
+        - rationale: proof_of_delivery, step 1, set the load to at_delivery and wait for the POD.
+          actions:
+            - {type: update_stage, stage: at_delivery}
+    expect:
+      actions:
+        - {kind: stage_update, stage: at_delivery, count: 1}
+      obligations:
+        pod: {status: open, attempts: 0}
+      timers: {pending: 1, due_at: "11:11"}
+
+  - at: "09:50"
+    note: "The POD arrives with exceptions and a PO that does not match the load"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: ""
+      attachments:
+        - {filename: pod.pdf, fixture: fixtures/docs/pod_exceptions.pdf, content_type: application/pdf}
+    script:
+      extract:
+        # domain.documents.Extraction: the wrong PO and the exceptions make it needs_review.
+        - type_id: pod
+          confidence: 0.95
+          fields:
+            - {name: receiver, value: Valley DC}
+            - {name: po_numbers, value: "55812"}
+            - {name: signed, value: "true"}
+            - {name: delivered_at, value: "2026-10-14T09:42"}
+            - {name: exceptions, value: "2 cases damaged, 1 short"}
+          notes: Shortage and Damage are ticked on the POD.
+      agent:
+        - rationale: The message only carries the file; the document_processed run acts on it.
+        - rationale: >-
+            proof_of_delivery, step 5: the POD needs review (PO mismatch, exceptions), so
+            a Hero task with the values; no stage change and nothing to the driver.
+          intent: document_processed
+          tool_calls:
+            - name: read_document
+              args: {document_id: doc_1}
+              result: "pod, needs_review: po_numbers 55812 does not match 55821; exceptions: 2 cases damaged, 1 short"
+            - name: create_hero_task
+              args:
+                title: Review the POD of load 481207 at Valley DC
+                description: >-
+                  Load 481207, delivery at Valley DC (Reno). The POD received at 09:50 lists
+                  PO 55812, but the load's PO is 55821, and notes exceptions: 2 cases
+                  damaged, 1 short. It is signed by the receiver at 09:42. The load is not
+                  set to delivered. Check the POD with the receiver and the carrier, then
+                  update the load.
+                urgent: false
+              result: "accepted as action #1"
+      judge:
+        - reasons:
+            - "The task names the PO found (55812) and the load's PO (55821)."
+            - "It lists the exceptions: 2 cases damaged, 1 short."
+            - "It says the load is not set to delivered and what to do next."
+          score: 0.9
+    expect:
+      intent: document_processed
+      tools_used: [create_hero_task]
+      actions:
+        - {kind: hero_task, contains: ["55812"], count: 1}
+      obligations:
+        pod: {status: open, attempts: 0}
+      runs: 2
+      judge:
+        rubric: |-
+          1. A Hero task says what is wrong with the POD: the PO on it (55812) differs from the load's PO (55821), and it notes exceptions (2 cases damaged, 1 short).
+          2. It says the load was not set to delivered, and what the Hero should check or do.
+          3. Nothing is sent to the driver about the POD.
+        min_score: 0.7
+    forbid:
+      - {kind: stage_update}
+      - {kind: sms}
+      - {kind: email}

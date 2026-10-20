@@ -7,9 +7,12 @@ and `record_run` returns None, and the export runs in a small worker pool bounde
 pending limit and a timeout, so a slow or down LangSmith costs a run at most `timeout_s`.
 
 The trace is built from the finished `RunRecord`, not by instrumenting the graph: a root
-run named after the event, with child runs for the gate, decide and validate steps the
-record has. The record keeps no per-step timestamps, so the child spans are laid end to
-end from each model call's latency, inside the run's own span.
+run named after the event, with child runs for the gate, agent and validate steps the
+record has, and under the agent step one `tool` run per call of its trajectory (the
+arguments, what the tool answered, whether a rule accepted or refused an action). The
+record keeps no per-step timestamps, so the child spans are laid end to end from each
+model call's latency, inside the run's own span, and the tool calls share the agent's
+span in order. The root carries the run's intent, broker version and refused calls.
 
 Opik would implement the same `Tracer` port the same way: an `OpikTracer` that builds
 one `opik.Opik().trace(...)` per run with a span per step (`trace.span(name=..., type=
@@ -31,7 +34,7 @@ from langsmith.run_trees import RunTree
 from langsmith.schemas import ExtractedUsageMetadata, InputTokenDetails
 
 from freight_agent.adapters.observability.null import NullTracer
-from freight_agent.domain.runs import RunRecord, Usage
+from freight_agent.domain.runs import RunRecord, TrajectoryStep, Usage
 from freight_agent.domain.validation import Severity
 from freight_agent.ports.tracing import Tracer
 
@@ -205,6 +208,8 @@ def build_trace(
             "skip_reason": run.skip_reason,
             "plan": None if run.plan is None else run.plan.model_dump(mode="json"),
             "violations": [v.model_dump(mode="json") for v in run.violations],
+            "intent": _intent(run),
+            "rejections": run.rejections,
         },
         error=run.error,
         extra={"metadata": _root_metadata(run, broker_id, sop_version)},
@@ -224,16 +229,23 @@ def build_trace(
             inputs={"event_id": run.event_id},
             outputs=run.gate.model_dump(mode="json"),
         )
-    if run.plan is not None:
-        cursor = _step(
+    if run.plan is not None or run.trajectory:
+        agent, cursor = _child(
             root,
-            "decide",
-            _role_usage(run, "decide"),
+            "agent",
+            _role_usage(run, *_AGENT_ROLES),
             start=cursor,
             run_end=end,
             inputs={"sop_section_ids": list(run.sop_section_ids)},
-            outputs={"plan": run.plan.model_dump(mode="json")},
+            outputs={
+                "intent": _intent(run),
+                "plan": None if run.plan is None else run.plan.model_dump(mode="json"),
+                "sections_searched": list(run.sections_searched),
+                "rejections": run.rejections,
+            },
         )
+        _tool_calls(agent, run.trajectory)
+    if run.plan is not None:
         _step(
             root,
             "validate",
@@ -250,8 +262,20 @@ def build_trace(
     return root
 
 
-def _role_usage(run: RunRecord, role: str) -> tuple[Usage, ...]:
-    return tuple(u for u in run.usage if u.role == role)
+# The agent step's model calls: the role is `agent` since wave 3; records stored before it
+# say `decide`.
+_AGENT_ROLES = ("agent", "decide")
+
+
+def _role_usage(run: RunRecord, *roles: str) -> tuple[Usage, ...]:
+    return tuple(u for u in run.usage if u.role in roles)
+
+
+def _intent(run: RunRecord) -> str | None:
+    """The intent the run settled on: the agent's label, else the gate's."""
+    if run.intent is not None:
+        return run.intent
+    return None if run.gate is None else run.gate.intent
 
 
 def _step(
@@ -264,8 +288,25 @@ def _step(
     inputs: dict[str, Any],
     outputs: dict[str, Any],
 ) -> datetime:
-    """Add one child run; returns where the next step starts. A step with model calls is
-    an `llm` run carrying LangSmith's usage metadata, so the UI shows tokens and cost."""
+    """Add one child run; returns where the next step starts."""
+    return _child(root, name, usage, start=start, run_end=run_end, inputs=inputs, outputs=outputs)[
+        1
+    ]
+
+
+def _child(
+    root: RunTree,
+    name: str,
+    usage: Sequence[Usage],
+    *,
+    start: datetime,
+    run_end: datetime,
+    inputs: dict[str, Any],
+    outputs: dict[str, Any],
+) -> tuple[RunTree, datetime]:
+    """Add one child run; returns it and where the next step starts. A step with model
+    calls is an `llm` run carrying LangSmith's usage metadata, so the UI shows tokens and
+    cost."""
     end = min(start + timedelta(milliseconds=sum(u.latency_ms for u in usage)), run_end)
     metadata: dict[str, Any] = {}
     if usage:
@@ -281,7 +322,29 @@ def _step(
     )
     if usage:
         child.set(usage_metadata=_usage_metadata(usage))
-    return end
+    return child, end
+
+
+def _tool_calls(agent: RunTree, trajectory: Sequence[TrajectoryStep]) -> None:
+    """One `tool` run per call, in order, sharing the agent step's span. A call a rule
+    refused is an error run, so the trace shows it in red."""
+    if not trajectory:
+        return
+    start, end = agent.start_time, agent.end_time or agent.start_time
+    slice_ = (end - start) / len(trajectory)
+    for index, call in enumerate(trajectory):
+        refused = call.accepted is False
+        agent.create_child(
+            call.tool,
+            "tool",
+            inputs=dict(call.args),
+            outputs={"result": call.result, "accepted": call.accepted},
+            start_time=start + slice_ * index,
+            end_time=start + slice_ * (index + 1),
+            error=f"refused: {call.result}" if refused else None,
+            tags=["refused"] if refused else [],
+            extra={"metadata": {"accepted": call.accepted, "cost_usd": call.cost_usd}},
+        )
 
 
 def _usage_metadata(usage: Sequence[Usage]) -> ExtractedUsageMetadata:
@@ -308,13 +371,20 @@ def _root_metadata(
         "status": run.status.value,
         "models": sorted({u.model for u in run.usage}),
         "sop_section_ids": list(run.sop_section_ids),
+        "intent": _intent(run),
+        "tools": [call.tool for call in run.trajectory],
+        "rejections": run.rejections,
+        "sections_searched": list(run.sections_searched),
         "input_tokens": sum(u.input_tokens for u in run.usage),
         "output_tokens": sum(u.output_tokens for u in run.usage),
         "cached_tokens": sum(u.cached_tokens for u in run.usage),
         "cost_usd": run.cost_usd,
     }
+    broker_id = run.broker_id or broker_id
     if broker_id is not None:
         metadata["broker_id"] = broker_id
+    if run.broker_config_version is not None:
+        metadata["broker_config_version"] = run.broker_config_version
     if sop_version is not None:
         metadata["sop_version"] = sop_version
     return metadata
@@ -322,10 +392,14 @@ def _root_metadata(
 
 def _tags(run: RunRecord, broker_id: str | None) -> list[str]:
     tags = ["freight-agent", f"status:{run.status.value}", f"load:{run.load_id}"]
-    if run.gate is not None:
-        tags.append(f"intent:{run.gate.intent.value}")
+    intent = _intent(run)
+    if intent is not None:
+        tags.append(f"intent:{intent}")
+    broker_id = run.broker_id or broker_id
     if broker_id is not None:
         tags.append(f"broker:{broker_id}")
+    if run.rejections:
+        tags.append("refused")
     tags.extend(f"sop:{section_id}" for section_id in run.sop_section_ids)
     return tags
 

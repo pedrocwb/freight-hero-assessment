@@ -1,6 +1,7 @@
 # Bake-off candidate set "nano" (`--model-set nano`): the default set with GPT-4.1 Nano
 # on decide too. Only the decide role differs from config/models.yaml; see that file for
 # what each setting means and where the prices come from.
+# Wave 3 renamed the `decide` role to `agent` (the measurements above ran on decide).
 
 roles:
   gate:
@@ -12,7 +13,7 @@ roles:
       order: [openai]
       allow_fallbacks: false
 
-  decide:
+  agent:
     model: openai/gpt-4.1-nano
     fallbacks: [openai/gpt-4.1-mini]
     temperature: 0
@@ -36,6 +37,20 @@ roles:
     temperature: 0.7
     max_tokens: 400
 
+  extract:
+    # Wave 3: as in config/models.yaml.
+    model: google/gemini-2.5-flash
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 4096
+
+  compile:
+    # Wave 3: as in config/models.yaml.
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 8192
+
 pricing:
   openai/gpt-4.1-nano: {input: 0.10, output: 0.40, cached_input: 0.025, context_length: 1047576}
   google/gemini-2.5-flash-lite: {input: 0.10, output: 0.40, cached_input: 0.01, context_length: 1048576}
@@ -43,6 +58,9 @@ pricing:
   mistralai/mistral-small-3.2-24b-instruct: {input: 0.10, output: 0.30, context_length: 131072}
   qwen/qwen3-30b-a3b-instruct-2507: {input: 0.10, output: 0.30, context_length: 262144}
   openai/gpt-oss-120b: {input: 0.037, output: 0.17, context_length: 131072}
+  # Wave 3; check against the catalog before the bake-off (card W3-BAKE).
+  google/gemini-2.5-flash: {input: 0.30, output: 2.50, cached_input: 0.075, context_length: 1048576}
+  openai/text-embedding-3-small: {input: 0.02, output: 0, context_length: 8192}
 
 bakeoff_candidates:
   - openai/gpt-4.1-nano
@@ -50,3 +68,8 @@ bakeoff_candidates:
   - mistralai/mistral-small-3.2-24b-instruct
   - qwen/qwen3-30b-a3b-instruct-2507
   - openai/gpt-oss-120b
+
+# The SOP index's embedding model (live and record only). As in config/models.yaml.
+embedding:
+  model: openai/text-embedding-3-small
+  dim: 1536

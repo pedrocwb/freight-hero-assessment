@@ -10,6 +10,9 @@ low reasoning effort). The only cheap set that met every threshold; about $0.000
 agent run and about $0.02 to $0.03 of inference for a long load. Claude Haiku 5.5 also met
 every threshold on decide, at about 5 times the cost per run.
 
+These rounds measured the single-plan design (decide). Wave 3 replaced it with a tool loop
+on the `agent` role; that role is measured again in "Wave 3: the agent loop" at the end.
+
 ## Selection thresholds (fixed before round 1)
 
 A model set is chosen only if, on the full core suite at `--k 3`, live:
@@ -168,3 +171,142 @@ recording (one run, about a cent).
 
 **Total spend for this work: $0.5812** of the USD 2.00 cap (the orchestrator's $0.0009
 smoke run not included).
+
+## Wave 3: the agent loop
+
+Measured on 2026-10-20 (branch `wave3`). The `decide` role became `agent`, one model call
+that runs a tool loop inside the guardrails (read tools, one action tool per action type,
+each action checked by the rules at the call; `docs/answers.md` 1.1). Three suites ran:
+core (22 scenarios), agent (`t2_gap_hero_without_promise`; see the note on the guardrail
+controls below) and docs (`p1_pod_clean_delivers`, `p2_pod_exceptions_needs_review`,
+`p3_pod_overdue_follow_up`). Every run is a LangSmith experiment on the dataset of its
+suite (`--langsmith`).
+
+### Candidates
+
+| Set | Agent model | Endpoint | Gate | Why it is a candidate |
+|---|---|---|---|---|
+| `gptoss` | `openai/gpt-oss-120b` | DeepInfra, bf16, low reasoning effort | GPT-4.1 Nano | The wave 2 winner on the single plan |
+| `haiku` | `anthropic/claude-haiku-5.5` | Anthropic | GPT-4.1 Nano | Passed 22/22 at k=3 in wave 2 with no fix; the first upgrade |
+| `gemini` | `google/gemini-2.5-flash` | Google | GPT-4.1 Nano | A stronger tool user than Flash Lite, at a price between the two |
+
+Only the agent role differs between the sets (`config/models.NAME.yaml`); the gate, the
+judge, `extract` and `compile` are the default set's. Prices were checked against
+OpenRouter's catalog on 2026-10-20 before the runs.
+
+### Selection thresholds (fixed before round 1)
+
+A set is chosen only if, live, at `--k 3`:
+
+1. **A and B scenarios at pass^3 = 100%** (as in wave 2).
+2. **No required action dropped by the gate** (as in wave 2).
+3. **Cost well under $1 per load:** average cost per model-calling run of the core suite at
+   most $0.0015 (as in wave 2), so a long load of 150 runs stays under about $0.25.
+4. **Few refused tool calls:** on average at most 0.5 refused action calls per agent run
+   (`RunRecord.rejections`), over every suite.
+5. **The loop handles a missing procedure:** first written as "`t1_gap_search_then_hero`
+   calls `search_sop` in every trial". **Revised after round 1**, see below.
+
+Among the sets that meet all five, the cheapest wins (measured cost); latency breaks a tie.
+
+**What changed after round 1, and why.** The k=1 screening failed the whole agent suite
+(n1, n2, t1) for all three models, and for the same reason: the models behaved well. `n1`
+and `n2` script a gullible or confused agent (an email to an outside address, four
+refused actions) to prove the rules refuse them at the call; a live model never made those
+calls (each model handed the outside-email request to a Hero instead). `t1` required the
+path search → read → "no procedure", but the `escalation` section names no intent, so it
+is always in the prompt in full: no model needed to search, and each handed the case to a
+Hero. So:
+
+- `n1`, `n2` and `t1` are tagged `scripted_only`: guardrail controls that run in scripted
+  mode (and in CI); live, record and replay skip them with a warning
+  (`evalkit/suite.py`). Injection resistance of a live model stays measured by
+  `e1_prompt_injection`.
+- `t2_gap_hero_without_promise` judges the outcome of a gap in any mode: one Hero task
+  with the driver's words, no SMS or email, and the judge's rubric (min 0.7). Threshold 5
+  became "t2 passes in every trial".
+- The screening also showed `requests` (the obligation an SMS asks for) being filled with
+  its only enum value on an SMS that asked for a trailer temperature (d2, gpt-oss): its
+  description now says when to leave it out. A prompt fix, applied before the k=3 round.
+
+### Rounds
+
+| # | Agent model (set) | Change before the run | Scope | Pass^k | A B C D E G | agent | docs | Cost | Total |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | gpt-oss-120b (`gptoss`) | none (prompts as merged) | 3 suites, k=1 | 21/22 | 2/2 5/5 5/5 2/3 2/2 5/5 | 0/3 | 3/3 | $0.0438 | $0.0438 |
+| 1 | claude-haiku-5.5 (`haiku`) | same | 3 suites, k=1 | 22/22 | 2/2 5/5 5/5 3/3 2/2 5/5 | 0/3 | 2/3 | $0.1429 | $0.1867 |
+| 1 | gemini-2.5-flash (`gemini`) | same | 3 suites, k=1 | 21/22 | 1/2 5/5 5/5 3/3 2/2 5/5 | 0/3 | 2/3 | $0.2156 | $0.4023 |
+| 2 | gpt-oss-120b (`gptoss`) | `requests` described; `scripted_only`; t2 | 3 suites, k=3 | 21/22 | 2/2 5/5 5/5 2/3 2/2 5/5 | 1/1 | 2/3 | $0.1241 | $0.5264 |
+| 2 | claude-haiku-5.5 (`haiku`) | same | 3 suites, k=3 | 22/22 | 2/2 5/5 5/5 3/3 2/2 5/5 | 1/1 | 2/3 | $0.4316 | $0.9580 |
+
+Gemini was dropped after round 1: it missed a group A scenario (the dispatcher email at
+08:01 in `a_question_during_last_wait`) and was the most expensive per run.
+
+### Bake-off (round 2, k=3)
+
+| Agent model | Core pass^3 | A | B | C | D | E | G | Agent (t2) | Docs | Mean refusals per run | Cost / run | Agent p50 / p95 | Thresholds |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **gpt-oss-120b** | 21/22 | 2/2 | 5/5 | 5/5 | 2/3 | 2/2 | 5/5 | 3/3 | 2/3 | 0.00 core, 0.04 docs | **$0.00066** | 5.1 / 9.6 s | **all five** |
+| claude-haiku-5.5 | 22/22 | 2/2 | 5/5 | 5/5 | 3/3 | 2/2 | 5/5 | 3/3 | 2/3 | 0.01 core, 0.00 docs | $0.00241 | 4.1 / 5.9 s | fails 3 (cost) |
+
+"Cost / run" is per agent run that called a model (gate, agent or both), with every round
+of the loop, from `RunRecord.usage`. Latency is the agent call, all its rounds.
+
+Failures left, both intermittent:
+- `d2_keystone_reefer_departure` (gpt-oss, 1 of 3 trials): an SMS asking for the trailer
+  temperature and seal still opened an `eta_request` obligation once after the fix.
+- `p3_pod_overdue_follow_up` (both models, 1 of 3 trials each): after the POD reminder
+  SMS the agent did not schedule the next follow-up timer, so the Hero task 30 minutes
+  later never came. Both models missing it once points at the Acme POD section or the
+  scenario wording rather than a model; it is the first thing to improve.
+
+### Choice
+
+**Agent: `openai/gpt-oss-120b`** (DeepInfra, bf16), the only set that meets the five
+thresholds, at about a third of Haiku's cost per run. `config/models.yaml` already names
+it, so nothing changed there. Claude Haiku 5.5 stays the first upgrade: 22/22 and faster,
+at 3.6 times the cost. Measured on the loop, a model-calling run costs about $0.0007, so a
+typical load of about 45 such runs costs about $0.03, as estimated for the single plan
+(`docs/answers.md` 5.3). The loop reads more: an agent call (all its rounds) averaged
+16,636 input tokens in round 2 (median 17,978), against a measured median of 4,720 for the
+single-plan decide call; the gate's call averaged 892. DeepInfra reported no cache reads
+for gpt-oss, so the margin comes from its input price ($0.037 per million tokens), not
+from caching.
+
+Spend of this section: $0.958 (round 1 $0.402, round 2 $0.556), plus the smoke run of
+load 481207 ($0.003) and the recording of the cassettes ($0.042: core 22/22, agent t2,
+docs 3/3, every scenario passing while it was recorded): **$1.003 in total**, against a
+cap of $3. The 45 wave 2 cassettes, no longer read by any prompt, were removed; replay
+runs on the 63 new ones and blocks CI again. The `extract` role stayed
+`google/gemini-2.5-flash` (the docs suite's extractions passed in both rounds).
+
+### End-to-end onboarding check (live, 2026-10-20)
+
+On a live platform instance (`LLM_MODE=live`): a broker `acme` created from the standard
+catalog; `evals/fixtures/sops/acme_sop.pdf` uploaded and compiled (`compile` role,
+`gpt-4.1-mini`, 3 pages); the draft reviewed and published (config version 2); then load
+481207 run as an Acme load.
+
+- **Compile.** The draft had the five topics as sections, proposed `detention_request`, the
+  POD requirement (`pod` at `at_delivery`, 120 minutes) and the obligations `eta_request`
+  (20 minutes, 3 attempts) and `pod` (30 minutes, 1 attempt). The publish lint refused it
+  until the review linked two sections: `detention` was tagged `other` instead of the
+  proposed intent, and no section named `pod_follow_up_due`. After a checklist was added at
+  the end of the compile prompt, a second compile linked the POD section to
+  `document_processed` but proposed no detention intent and again missed
+  `pod_follow_up_due`. A compile is a draft that varies between runs; the review and the
+  publish lint are the guard, and they held both times. A stronger `compile` model is the
+  next thing to try.
+- **The load ran on Acme's procedure:** at 07:00 the high-risk ping sent the ETA SMS with a
+  follow-up timer at 07:21 (Acme's 20 minutes, not the standard 30); at 07:12 the PO
+  question got "PO 55821"; at 07:18 "already at Valley DC" moved the stage to `at_delivery`,
+  closed the ETA request as satisfied and opened the `pod` obligation with its timer at
+  09:19 (120 minutes); the uploaded `pod_clean.pdf` was read as `processed` (POD,
+  confidence 0.95, receiver, PO, signature and date checks ok); the message's own run did
+  nothing with it, and the `document_processed` run moved the load to `delivered` and wrote
+  the TMS note, with the `pod` obligation satisfied. Every run recorded config version 2.
+  Model cost of the load's runs: $0.0038.
+
+OpenRouter's own meter for the key after all of this: $1.02 spent on 2026-10-20 (the
+LangSmith runs of card LSM-1, this section's rounds, the recording, the smoke run, the
+demo and the two compiles), $1.61 in total on the key since the project started.

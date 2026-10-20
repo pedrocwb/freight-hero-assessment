@@ -1,5 +1,5 @@
-# Bake-off candidate set "haiku" (`--model-set haiku`): Claude Haiku 5.5 on gate and
-# decide, pinned to Anthropic's own endpoint. The other roles are as in config/models.yaml;
+# Bake-off candidate set "haiku" (`--model-set haiku`): Claude Haiku 5.5 on the agent role
+# (decide before wave 3), pinned to Anthropic's own endpoint. The other roles are as in config/models.yaml;
 # see that file for what each setting means.
 #
 # anthropic/claude-haiku-5.5 in the public catalog on 2026-10-19: USD 0.10 per 1M input,
@@ -14,18 +14,22 @@
 # (adapters/llm/openrouter.py) and Haiku answered in them every time, but the gate is one
 # forced call, so in the bake-off every gate call fell back to GPT-4.1 Nano. The runs of
 # this set are therefore "gate Nano, decide Haiku".
+# Wave 3 renamed the `decide` role to `agent` (the measurements above ran on decide). For
+# the wave 3 bake-off of the agent role the gate is the default set's GPT-4.1 Nano, as it
+# was in practice: only the agent role differs from config/models.yaml, as in the gptoss
+# and gemini sets, and no gate call is spent on an endpoint that refuses it.
 
 roles:
   gate:
-    model: anthropic/claude-haiku-5.5
-    fallbacks: [openai/gpt-4.1-nano]
-    temperature: null
+    model: openai/gpt-4.1-nano
+    fallbacks: [google/gemini-2.5-flash-lite]
+    temperature: 0
     max_tokens: 256
     provider:
-      order: [anthropic]
+      order: [openai]
       allow_fallbacks: false
 
-  decide:
+  agent:
     model: anthropic/claude-haiku-5.5
     fallbacks: [openai/gpt-4.1-mini]
     temperature: null
@@ -49,6 +53,20 @@ roles:
     temperature: 0.7
     max_tokens: 400
 
+  extract:
+    # Wave 3: as in config/models.yaml.
+    model: google/gemini-2.5-flash
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 4096
+
+  compile:
+    # Wave 3: as in config/models.yaml.
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 8192
+
 pricing:
   anthropic/claude-haiku-5.5: {input: 0.10, output: 0.50, cached_input: 0.01, context_length: 1000000}
   openai/gpt-4.1-nano: {input: 0.10, output: 0.40, cached_input: 0.025, context_length: 1047576}
@@ -56,6 +74,9 @@ pricing:
   openai/gpt-4.1-mini: {input: 0.40, output: 1.60, cached_input: 0.10, context_length: 1047576}
   qwen/qwen3-30b-a3b-instruct-2507: {input: 0.10, output: 0.30, context_length: 262144}
   openai/gpt-oss-120b: {input: 0.037, output: 0.17, context_length: 131072}
+  # Wave 3; check against the catalog before the bake-off (card W3-BAKE).
+  google/gemini-2.5-flash: {input: 0.30, output: 2.50, cached_input: 0.075, context_length: 1048576}
+  openai/text-embedding-3-small: {input: 0.02, output: 0, context_length: 8192}
 
 bakeoff_candidates:
   - openai/gpt-4.1-nano
@@ -63,3 +84,8 @@ bakeoff_candidates:
   - qwen/qwen3-30b-a3b-instruct-2507
   - openai/gpt-oss-120b
   - anthropic/claude-haiku-5.5
+
+# The SOP index's embedding model (live and record only). As in config/models.yaml.
+embedding:
+  model: openai/text-embedding-3-small
+  dim: 1536

@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from freight_agent.adapters.llm.models_config import (
+    EmbeddingConfig,
     ModelPricing,
     ModelsConfig,
     ProviderRouting,
@@ -54,7 +55,7 @@ def test_the_gate_and_decide_stay_on_cheap_models() -> None:
     """The user's rule: cheap, light models first. Under US$ 1 per 1M output tokens."""
     config = load_models_config(SHIPPED)
 
-    for role in (ModelRole.GATE, ModelRole.DECIDE):
+    for role in (ModelRole.GATE, ModelRole.AGENT):
         assert config.pricing_for(config.role(role).model).output < 1.0
 
 
@@ -82,7 +83,7 @@ def test_a_missing_role_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_a_model_without_pricing_is_an_error(tmp_path: Path) -> None:
     raw = _config()
-    raw["roles"]["decide"]["fallbacks"] = ["acme/unpriced"]
+    raw["roles"]["agent"]["fallbacks"] = ["acme/unpriced"]
 
     with pytest.raises(ValueError, match="acme/unpriced"):
         load_models_config(_write(tmp_path, raw))
@@ -190,3 +191,30 @@ def test_pricing_lookup_names_the_missing_model() -> None:
 
     with pytest.raises(KeyError, match="acme/none"):
         config.pricing_for("acme/none")
+
+
+@pytest.mark.unit
+def test_every_shipped_set_has_every_role_and_the_embedding_model() -> None:
+    for path in sorted(SHIPPED.parent.glob("models*.yaml")):
+        config = load_models_config(path)
+
+        assert set(config.roles) == set(ModelRole), path.name
+        assert config.embedding is not None, path.name
+        assert (config.embedding.model, config.embedding.dim) == (
+            "openai/text-embedding-3-small",
+            1536,
+        )
+        assert config.pricing_for(config.embedding.model).input > 0
+
+
+@pytest.mark.unit
+def test_the_embedding_is_optional_but_must_be_priced(tmp_path: Path) -> None:
+    assert load_models_config(_write(tmp_path, _config())).embedding is None
+
+    raw = _config(embedding={"model": "acme/embed", "dim": 64})
+    with pytest.raises(ValueError, match="acme/embed"):
+        load_models_config(_write(tmp_path, raw))
+
+    raw["pricing"]["acme/embed"] = {"input": 0.02, "output": 0}
+    config = load_models_config(_write(tmp_path, raw))
+    assert config.embedding == EmbeddingConfig(model="acme/embed", dim=64)

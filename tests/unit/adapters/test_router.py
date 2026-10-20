@@ -7,7 +7,7 @@ from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
 
 GATE = LlmRequest(role=ModelRole.GATE, system="s", user="u", max_tool_rounds=0)
-DECIDE = LlmRequest(role=ModelRole.DECIDE, system="s", user="u")
+DECIDE = LlmRequest(role=ModelRole.AGENT, system="s", user="u")
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
 EMPTY_PLAN = Plan(rationale="nothing to do")
 
@@ -16,8 +16,8 @@ EMPTY_PLAN = Plan(rationale="nothing to do")
 async def test_each_request_goes_to_the_model_of_its_role() -> None:
     gate, decide = ScriptedModel("gate-model"), ScriptedModel("decide-model")
     gate.push(ModelRole.GATE, ACK)
-    decide.push(ModelRole.DECIDE, EMPTY_PLAN)
-    router = RoleRouter({ModelRole.GATE: gate, ModelRole.DECIDE: decide})
+    decide.push(ModelRole.AGENT, EMPTY_PLAN)
+    router = RoleRouter({ModelRole.GATE: gate, ModelRole.AGENT: decide})
 
     gated = await router.generate(GATE, GateDecision)
     decided = await router.generate(DECIDE, Plan)
@@ -25,18 +25,18 @@ async def test_each_request_goes_to_the_model_of_its_role() -> None:
     assert (gated.parsed, gated.usage.model) == (ACK, "gate-model")
     assert (decided.parsed, decided.usage.model) == (EMPTY_PLAN, "decide-model")
     assert [c.role for c in gate.calls] == [ModelRole.GATE]
-    assert [c.role for c in decide.calls] == [ModelRole.DECIDE]
+    assert [c.role for c in decide.calls] == [ModelRole.AGENT]
 
 
 @pytest.mark.unit
 async def test_a_role_with_no_model_is_an_llm_error_naming_the_role() -> None:
     router = RoleRouter({ModelRole.GATE: ScriptedModel()})
 
-    with pytest.raises(LlmError, match="decide") as raised:
+    with pytest.raises(LlmError, match="agent") as raised:
         await router.generate(DECIDE, Plan)
 
     assert isinstance(raised.value, NoModelForRole)
-    assert raised.value.role is ModelRole.DECIDE
+    assert raised.value.role is ModelRole.AGENT
 
 
 @pytest.mark.unit
@@ -55,7 +55,7 @@ def test_a_later_change_to_the_callers_mapping_does_not_reroute() -> None:
     models: dict[ModelRole, LanguageModel] = {ModelRole.GATE: ScriptedModel()}
     router = RoleRouter(models)
 
-    models[ModelRole.DECIDE] = ScriptedModel()
+    models[ModelRole.AGENT] = ScriptedModel()
 
     assert router.roles == frozenset({ModelRole.GATE})
 

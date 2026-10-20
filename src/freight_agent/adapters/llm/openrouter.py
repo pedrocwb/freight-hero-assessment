@@ -16,10 +16,18 @@ The conversation:
 
 - No tools, or `max_tool_rounds == 0` (the gate): one forced call.
 - Otherwise up to `max_tool_rounds` rounds with `tool_choice="required"` (`"auto"` for
-  Claude, see `round_tool_choice`). The model calls read-only tools, which run here and
-  go back as tool messages, or the answer tool, which ends the loop. When the rounds run
-  out, or the model replies in prose, one last call forces the answer. A request makes
-  at most `max_tool_rounds + 1` calls.
+  Claude, see `round_tool_choice`). The model calls tools (read tools, and the agent's
+  action tools, which stage an action and never execute it), which run here and go back
+  as tool messages, or the answer tool, which ends the loop. When the rounds run out,
+  the running cost reaches `request.max_cost_usd`, or the model replies in prose, one
+  last call forces the answer. A request makes at most `max_tool_rounds + 1` calls.
+- Every tool call of the transcript runs, in order, also one made in the same reply as
+  the answer: the agent recomputes its staged plan from the transcript
+  (`application.agent.stage_from_transcript`), so what the tools saw and what the
+  transcript says must be the same calls.
+- Each assistant entry of the transcript carries its round's `usage` (tokens and cost),
+  so the agent's trajectory can show what each round cost.
+- `request.images` go with the user prompt as image parts (data URLs).
 
 Any provider error, timeout (`request.timeout_s` covers the whole conversation) or
 answer that does not fit the schema becomes `LlmError`, named after the model.
@@ -27,6 +35,7 @@ answer that does not fit the schema becomes `LlmError`, named after the model.
 
 import argparse
 import asyncio
+import base64
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -121,7 +130,7 @@ class OpenRouterModel:
         return f"OpenRouterModel(model={self.model_id!r})"
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
-        messages: list[BaseMessage] = [SystemMessage(request.system), HumanMessage(request.user)]
+        messages: list[BaseMessage] = [SystemMessage(request.system), _user_message(request)]
         started = self._timer()
         try:
             parsed = await asyncio.wait_for(
@@ -134,7 +143,7 @@ class OpenRouterModel:
         return LlmResponse(
             parsed=parsed,
             usage=self._usage(request, messages, latency_ms),
-            transcript=tuple(_transcript_entry(m) for m in messages),
+            transcript=tuple(self._transcript_entry(m) for m in messages),
         )
 
     async def _converse(
@@ -151,6 +160,7 @@ class OpenRouterModel:
 
         for _ in range(rounds):
             reply = await self._ask(request, messages, bound, round_tool_choice(self.model_id))
+            messages.extend(await _tool_results(reply, tools, answer=name))
             call = _answer_call(reply, name)
             if call is not None:
                 return self._parse(request, schema, call)
@@ -159,13 +169,23 @@ class OpenRouterModel:
                 # prefill to some providers, so ask for the answer in a user turn.
                 messages.append(HumanMessage(f"Now call {name} with your final answer."))
                 break
-            messages.extend(await _tool_results(reply, tools))
+            if self._spent(request, messages):
+                break
 
         reply = await self._ask(request, messages, bound, name)
+        messages.extend(await _tool_results(reply, tools, answer=name))
         call = _answer_call(reply, name)
         if call is None:
             raise self._error(request, _no_answer(reply, name))
         return self._parse(request, schema, call)
+
+    def _spent(self, request: LlmRequest, messages: Sequence[BaseMessage]) -> bool:
+        """The rounds so far cost `request.max_cost_usd` or more: the next call answers."""
+        cap = request.max_cost_usd
+        if cap is None:
+            return False
+        spent = sum(self._round_usage(m)["cost_usd"] for m in messages if isinstance(m, AIMessage))
+        return spent >= cap
 
     async def _ask(
         self,
@@ -205,6 +225,27 @@ class OpenRouterModel:
             raise self._error(
                 request, f"the answer does not match {schema.__name__}: {problems}"
             ) from exc
+
+    def _round_usage(self, message: AIMessage) -> dict[str, Any]:
+        """One reply's tokens and their cost."""
+        metadata = message.usage_metadata
+        input_tokens = metadata["input_tokens"] if metadata else 0
+        output_tokens = metadata["output_tokens"] if metadata else 0
+        cached = (metadata.get("input_token_details", {}).get("cache_read") or 0) if metadata else 0
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached,
+            "cost_usd": self._pricing.cost_usd(
+                input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=cached
+            ),
+        }
+
+    def _transcript_entry(self, message: BaseMessage) -> dict[str, Any]:
+        entry = _transcript_entry(message)
+        if isinstance(message, AIMessage):
+            entry["usage"] = self._round_usage(message)
+        return entry
 
     def _usage(self, request: LlmRequest, messages: list[BaseMessage], latency_ms: int) -> Usage:
         input_tokens = output_tokens = cached_tokens = 0
@@ -453,6 +494,20 @@ def _nullable(prop: Any) -> bool:
     return field.get("type") in (None, "null")
 
 
+def _user_message(request: LlmRequest) -> HumanMessage:
+    """The user prompt, with each image as an OpenAI-style `image_url` part (a base64 data
+    URL), which OpenRouter passes to every vision model."""
+    if not request.images:
+        return HumanMessage(request.user)
+    parts: list[str | dict[str, Any]] = [{"type": "text", "text": request.user}]
+    for image in request.images:
+        data = base64.b64encode(image.data).decode("ascii")
+        parts.append(
+            {"type": "image_url", "image_url": {"url": f"data:{image.media_type};base64,{data}"}}
+        )
+    return HumanMessage(content=parts)
+
+
 def _function(spec: ToolSpec) -> dict[str, Any]:
     return {
         "type": "function",
@@ -477,8 +532,12 @@ def _no_answer(reply: AIMessage, name: str) -> str:
     return f"did not return a {name} answer when forced to ({instead})"
 
 
-async def _tool_results(reply: AIMessage, tools: Mapping[str, ToolSpec]) -> list[ToolMessage]:
-    """One tool message per call, so the history stays valid for every provider."""
+async def _tool_results(
+    reply: AIMessage, tools: Mapping[str, ToolSpec], *, answer: str
+) -> list[ToolMessage]:
+    """One tool message per call but the answer's, in order, so the history stays valid
+    for every provider. Calls in the reply that also holds the answer run too: the
+    transcript must hold no tool call that did not run."""
     results = [
         ToolMessage(
             await _run_tool(tools, call["name"], call["args"]),
@@ -486,6 +545,7 @@ async def _tool_results(reply: AIMessage, tools: Mapping[str, ToolSpec]) -> list
             name=call["name"],
         )
         for call in reply.tool_calls
+        if call["name"] != answer
     ]
     results.extend(
         ToolMessage(
@@ -496,13 +556,15 @@ async def _tool_results(reply: AIMessage, tools: Mapping[str, ToolSpec]) -> list
             status="error",
         )
         for bad in reply.invalid_tool_calls
+        if bad["name"] != answer
     )
     return results
 
 
 async def _run_tool(tools: Mapping[str, ToolSpec], name: str, args: dict[str, Any]) -> str:
     """A bad call is an answer the model can recover from, not an exception (see
-    `application/tools.py`). Tools are read-only, so a failing one is reported too."""
+    `application/agent_tools.py`). A tool has no side effect outside the run (an action
+    tool only stages), so a failing one is reported too."""
     spec = tools.get(name)
     if spec is None:
         return f"Unknown tool {name!r}. Available tools: {', '.join(tools)}."
@@ -533,7 +595,13 @@ def _transcript_entry(message: BaseMessage) -> dict[str, Any]:
             "content": message.text,
         }
     role = "system" if isinstance(message, SystemMessage) else "user"
-    return {"role": role, "content": message.text}
+    entry = {"role": role, "content": message.text}
+    if isinstance(message.content, list):
+        parts = cast("list[Any]", message.content)
+        images = sum(1 for p in parts if isinstance(p, dict) and p.get("type") == "image_url")
+        if images:
+            entry["images"] = images  # the count only: a cassette never holds the bytes
+    return entry
 
 
 # Manual smoke test: `python -m freight_agent.adapters.llm.openrouter --smoke`.
@@ -560,7 +628,7 @@ async def _smoke(config_path: Path) -> None:
         ),
         (
             LlmRequest(
-                role=ModelRole.DECIDE,
+                role=ModelRole.AGENT,
                 system=(
                     "You follow the SOP. Read the section delay_risk_high with the tool, "
                     "then answer with a plan. The driver's contact id is drv-1."

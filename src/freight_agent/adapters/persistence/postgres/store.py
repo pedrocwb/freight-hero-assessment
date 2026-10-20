@@ -21,11 +21,13 @@ from psycopg.abc import QueryNoTemplate
 from psycopg.pq import TransactionStatus
 from psycopg_pool import AsyncConnectionPool
 
+from freight_agent.adapters.persistence.postgres.brokers import PostgresBrokerRepository
 from freight_agent.adapters.persistence.postgres.connection import (
     CONNECTION_KWARGS,
     Session,
     begin_command,
 )
+from freight_agent.adapters.persistence.postgres.documents import PostgresDocumentRepository
 from freight_agent.adapters.persistence.postgres.repositories import (
     PostgresEventLog,
     PostgresEventQueue,
@@ -35,6 +37,10 @@ from freight_agent.adapters.persistence.postgres.repositories import (
     PostgresRunRepository,
     PostgresTimerRepository,
 )
+from freight_agent.adapters.persistence.postgres.sops import PostgresSopStore
+from freight_agent.ports.brokers import BrokerRepository
+from freight_agent.ports.documents import DocumentRepository
+from freight_agent.ports.knowledge import SopStore
 from freight_agent.ports.repositories import (
     EventLog,
     EventQueue,
@@ -119,6 +125,9 @@ class PostgresUnitOfWork:
         self.outbox: OutboxRepository = PostgresOutboxRepository(self._session)
         self.runs: RunRepository = PostgresRunRepository(self._session)
         self.queue: EventQueue = PostgresEventQueue(self._session, max_queue_attempts)
+        self.brokers: BrokerRepository = PostgresBrokerRepository(self._session)
+        self.sops: SopStore = PostgresSopStore(self._session)
+        self.documents: DocumentRepository = PostgresDocumentRepository(self._session)
 
     async def __aenter__(self) -> Self:
         if self._session.bound:

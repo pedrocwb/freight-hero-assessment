@@ -20,8 +20,15 @@ from freight_agent import bootstrap
 from freight_agent.adapters.channels.fakes import recording
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.documents.fs_blobs import FsBlobStore
+from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
+from freight_agent.adapters.knowledge.memory import MemorySopIndex, StoreSopIndex
 from freight_agent.adapters.llm.cassette import CassetteMissing, CassetteModel, model_slug
-from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
+from freight_agent.adapters.llm.models_config import (
+    EmbeddingConfig,
+    ModelsConfig,
+    load_models_config,
+)
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
 from freight_agent.adapters.llm.scripted import ScriptedModel
@@ -29,6 +36,7 @@ from freight_agent.adapters.observability.langsmith import LangSmithTracer
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.bootstrap import (
     BootstrapError,
@@ -260,7 +268,7 @@ def test_the_mode_argument_wins_over_the_settings(tmp_path: Path, clock: Virtual
 
     llm = build_llm(settings, mode="replay", clock=clock)
 
-    assert isinstance(_router(llm).model_for(ModelRole.DECIDE), CassetteModel)
+    assert isinstance(_router(llm).model_for(ModelRole.AGENT), CassetteModel)
 
 
 @pytest.mark.unit
@@ -279,15 +287,17 @@ def test_a_missing_models_config_names_the_file_and_the_setting(
 
 
 @pytest.mark.unit
-def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
+async def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
     deps = build_runtime_deps(_settings(tmp_path))
 
     assert isinstance(deps.clock, SystemClock)
     assert isinstance(deps.ids, UuidIdGenerator)
     assert isinstance(deps.uow_factory(), MemoryUnitOfWork)
     assert isinstance(_router(deps.llm).model_for(ModelRole.GATE), CassetteModel)  # replay
-    assert isinstance(deps.sop, FileSopRepository)
-    assert deps.sop.version() == FileSopRepository(SOPS).version()
+    assert isinstance(deps.knowledge, StoreSopIndex)  # the store's published SOPs, else sops/
+    assert await deps.knowledge.version("northline") == FileSopRepository(SOPS).version()
+    assert isinstance(deps.blobs, FsBlobStore)
+    assert isinstance(deps.documents, DocumentPipeline)  # W3-DOC plugged in by name
     assert isinstance(deps.gateways, Gateways)
     assert type(deps.gateways.sms).__module__ == recording.__name__
     assert isinstance(deps.tracer, NullTracer)
@@ -516,3 +526,234 @@ def test_the_simulation_builds_the_agent_runtime(tmp_path: Path) -> None:
 def test_the_simulation_needs_a_timezone_aware_start(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="timezone"):
         build_simulation(_settings(tmp_path), datetime(2026, 10, 13, 7, 0))
+
+
+# --- knowledge, blobs and documents (wave 3) -------------------------------------
+
+
+@pytest.mark.unit
+async def test_the_local_runtime_reads_the_sop_files(tmp_path: Path) -> None:
+    knowledge = bootstrap.build_knowledge(_settings(tmp_path))
+
+    assert isinstance(knowledge, MemorySopIndex)
+    assert await knowledge.version("northline") == FileSopRepository(SOPS).version()
+
+
+@pytest.mark.unit
+def test_postgres_reads_the_sop_files_until_the_knowledge_index_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absent(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES)
+
+    knowledge = bootstrap.build_knowledge(_settings(tmp_path, persistence="postgres"))
+
+    assert isinstance(knowledge, MemorySopIndex)
+
+
+@pytest.mark.unit
+def test_postgres_uses_the_knowledge_index_once_it_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = MemorySopIndex([], version="db")
+    seen: list[Settings] = []
+
+    embedders: list[object] = []
+
+    def knowledge_index(settings: Settings, *, embedder: object = None) -> MemorySopIndex:
+        seen.append(settings)
+        embedders.append(embedder)
+        return index
+
+    _fake_module(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES, knowledge_index)
+    settings = _settings(tmp_path, persistence="postgres")
+
+    assert bootstrap.build_knowledge(settings) is index
+    assert seen == [settings]
+    assert isinstance(embedders[0], FakeEmbedder)  # replay: no live query embedding
+
+
+@pytest.mark.unit
+def test_blobs_go_under_blobs_dir_and_nothing_is_written_up_front(tmp_path: Path) -> None:
+    blobs = bootstrap.build_blobs(_settings(tmp_path, blobs_dir=tmp_path / "files"))
+
+    assert isinstance(blobs, FsBlobStore)
+    assert not (tmp_path / "files").exists()
+
+
+@pytest.mark.unit
+def test_the_document_pipeline_is_built_once_its_card_provides_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    class Pipeline:
+        def __init__(self, **ports: Any) -> None:
+            built.append(ports)
+
+        async def process_pending(self, limit: int = 10) -> list[Any]:
+            return []
+
+    class Pages:
+        pass
+
+    _fake_module(monkeypatch, bootstrap.DOCUMENT_PIPELINE, Pipeline)
+    _fake_module(monkeypatch, bootstrap.PAGE_READER, Pages)
+
+    deps = build_runtime_deps(_settings(tmp_path))
+
+    assert isinstance(deps.documents, Pipeline)
+    (ports,) = built
+    assert set(ports) == {"uow_factory", "clock", "ids", "llm", "blobs", "pages", "timeout_s"}
+    assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
+    assert isinstance(ports["pages"], Pages)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("missing", ["pipeline", "pages"])
+def test_no_document_is_read_until_both_document_adapters_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    present, absent = (
+        (bootstrap.PAGE_READER, bootstrap.DOCUMENT_PIPELINE)
+        if missing == "pipeline"
+        else (bootstrap.DOCUMENT_PIPELINE, bootstrap.PAGE_READER)
+    )
+    _fake_module(monkeypatch, present, object)
+    _absent(monkeypatch, absent)
+
+    assert isinstance(build_runtime_deps(_settings(tmp_path)).documents, NullDocumentProcessor)
+
+
+# --- embedder (wave 3) -------------------------------------------------------------
+
+
+@dataclass
+class EmbedderSpy:
+    """Stands in for `OpenRouterEmbedder`: keeps what the root built it with."""
+
+    config: EmbeddingConfig
+    api_key: SecretStr
+
+
+def _without_embedding(tmp_path: Path) -> Path:
+    """The shipped models config with its `embedding` entry cut off (it is the last one)."""
+    text = MODELS_YAML.read_text("utf-8")
+    path = tmp_path / "models.no-embedding.yaml"
+    path.write_text(text[: text.index("\nembedding:")] + "\n", "utf-8")
+    return path
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["scripted", "replay"])
+async def test_offline_runs_embed_with_the_fake_sized_to_the_index(
+    tmp_path: Path, config: ModelsConfig, mode: str
+) -> None:
+    embedder = bootstrap.build_embedder(_settings(tmp_path, llm_mode=mode))
+
+    assert isinstance(embedder, FakeEmbedder)
+    assert config.embedding is not None
+    assert embedder.dim == config.embedding.dim == 1536
+    (vector,) = await embedder.embed(["trailer temperature and seal"])
+    assert len(vector) == embedder.dim
+
+
+@pytest.mark.unit
+def test_offline_runs_need_no_key_and_no_embedder_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absent(monkeypatch, bootstrap.EMBEDDER_OPENROUTER)
+
+    embedder = bootstrap.build_embedder(_settings(tmp_path, llm_mode="live"), mode="replay")
+
+    assert isinstance(embedder, FakeEmbedder)
+
+
+@pytest.mark.unit
+def test_a_models_config_without_embedding_gives_the_default_fake_offline(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, models_config=_without_embedding(tmp_path))
+
+    embedder = bootstrap.build_embedder(settings, mode="scripted")
+
+    assert embedder == FakeEmbedder()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode", ["live", "record"])
+def test_live_runs_embed_on_openrouter_with_the_configured_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: ModelsConfig, mode: str
+) -> None:
+    _fake_module(monkeypatch, bootstrap.EMBEDDER_OPENROUTER, EmbedderSpy)
+    settings = _settings(tmp_path, llm_mode=mode, openrouter_api_key=KEY)
+
+    embedder = bootstrap.build_embedder(settings)
+
+    assert isinstance(embedder, EmbedderSpy)
+    assert embedder.config == config.embedding
+    assert embedder.api_key.get_secret_value() == KEY
+
+
+@pytest.mark.unit
+def test_a_live_embedder_without_the_key_names_the_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_module(monkeypatch, bootstrap.EMBEDDER_OPENROUTER, EmbedderSpy)
+
+    with pytest.raises(MissingSetting, match="OPENROUTER_API_KEY"):
+        bootstrap.build_embedder(_settings(tmp_path, llm_mode="live"))
+
+
+@pytest.mark.unit
+def test_a_live_embedder_is_a_clear_error_until_its_adapter_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absent(monkeypatch, bootstrap.EMBEDDER_OPENROUTER)
+    settings = _settings(tmp_path, llm_mode="live", openrouter_api_key=KEY)
+
+    with pytest.raises(BootstrapError, match="LLM_MODE=replay") as raised:
+        bootstrap.build_embedder(settings)
+
+    assert "OpenRouterEmbedder" in str(raised.value)
+    assert KEY not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_a_live_embedder_needs_the_embedding_entry_of_the_models_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_module(monkeypatch, bootstrap.EMBEDDER_OPENROUTER, EmbedderSpy)
+    settings = _settings(
+        tmp_path,
+        llm_mode="record",
+        openrouter_api_key=KEY,
+        models_config=_without_embedding(tmp_path),
+    )
+
+    with pytest.raises(BootstrapError, match="embedding"):
+        bootstrap.build_embedder(settings)
+
+
+@pytest.mark.unit
+def test_the_runtime_builds_without_an_embedder_in_live_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only publishing and the Postgres index embed; a live runtime on the SOP files
+    must not depend on the embedder's card."""
+    _absent(monkeypatch, bootstrap.EMBEDDER_OPENROUTER)
+    settings = _settings(tmp_path, llm_mode="live", openrouter_api_key=KEY)
+
+    deps = build_runtime_deps(settings, llm=ScriptedModel())
+
+    assert isinstance(deps.knowledge, StoreSopIndex)
+
+
+@pytest.mark.unit
+async def test_the_memory_store_index_serves_what_the_store_published(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    uow_factory = bootstrap.build_uow_factory(settings)
+
+    knowledge = bootstrap.build_knowledge(settings, uow_factory=uow_factory)
+
+    assert isinstance(knowledge, StoreSopIndex)
+    assert await knowledge.version("northline") == FileSopRepository(SOPS).version()

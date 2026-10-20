@@ -5,10 +5,11 @@ sent: the messages, the bound tools and the tool choice.
 """
 
 import asyncio
+import base64
 import json
 import traceback
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,7 +44,7 @@ from freight_agent.adapters.llm.openrouter import (
 from freight_agent.domain.actions import Plan, Purpose, ScheduleTimer, SendEmail, SendSms
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.obligations import ObligationKind
-from freight_agent.ports.llm import LlmError, LlmRequest, ModelRole, ToolSpec
+from freight_agent.ports.llm import ImageInput, LlmError, LlmRequest, ModelRole, ToolSpec
 
 KEY = "sk-or-v1-never-show-me-0123456789"
 ROLE = RoleConfig(model="acme/small", temperature=0, max_tokens=512)
@@ -190,7 +191,7 @@ def sop_tool(log: list[dict[str, Any]], fail: Exception | None = None) -> ToolSp
 
 def decide(*tools: ToolSpec, max_tool_rounds: int = 2, timeout_s: float = 60.0) -> LlmRequest:
     return LlmRequest(
-        role=ModelRole.DECIDE,
+        role=ModelRole.AGENT,
         system="follow the SOP",
         user="delay risk is high",
         tools=tools,
@@ -331,6 +332,7 @@ async def test_the_action_union_goes_out_as_one_flat_object_picked_by_its_type()
         "schedule_timer",
         "defer_obligation",
         "close_obligation",
+        "open_obligation",
     ]
     assert "schedule_timer: kind, due_in_minutes" in properties["type"]["description"]
     assert properties["due_in_minutes"]["type"] == "integer"
@@ -502,7 +504,9 @@ async def test_claude_tool_rounds_use_auto_since_no_endpoint_takes_required() ->
 
 
 @pytest.mark.unit
-async def test_an_answer_next_to_a_tool_call_ends_the_loop_without_running_the_tool() -> None:
+async def test_an_answer_next_to_a_tool_call_runs_the_tool_then_ends_the_loop() -> None:
+    """The agent recomputes its staged plan from the transcript, so a tool call in the
+    transcript must have run: one made next to the answer runs too, before the answer."""
     log: list[dict[str, Any]] = []
     model, chat = make_model(calls(("read_sop_section", {"section_id": "a"}), ("Plan", PLAN)))
 
@@ -510,7 +514,102 @@ async def test_an_answer_next_to_a_tool_call_ends_the_loop_without_running_the_t
 
     assert len(response.parsed.actions) == 1
     assert len(chat.sent) == 1
-    assert log == []
+    assert log == [{"section_id": "a"}]
+    assert [t["role"] for t in response.transcript] == ["system", "user", "assistant", "tool"]
+    assert response.transcript[3]["tool_call_id"] == "c1"
+
+
+@pytest.mark.unit
+async def test_a_tool_call_next_to_the_forced_answer_runs_too() -> None:
+    log: list[dict[str, Any]] = []
+    model, _ = make_model(
+        calls(("read_sop_section", {"section_id": "a"})),
+        calls(("read_sop_section", {"section_id": "b"}), ("Plan", PLAN)),
+    )
+
+    await model.generate(decide(sop_tool(log), max_tool_rounds=1), Plan)
+
+    assert log == [{"section_id": "a"}, {"section_id": "b"}]
+
+
+@pytest.mark.unit
+async def test_the_cost_cap_forces_the_answer_after_the_round_that_reaches_it() -> None:
+    """Each round of 1,000 input tokens costs $0.0001 here; a $0.0002 cap stops the loop
+    after the second round, and one forced call answers."""
+    log: list[dict[str, Any]] = []
+    model, chat = make_model(
+        calls(("read_sop_section", {"section_id": "a"}), usage=_usage(1_000, 0)),
+        calls(("read_sop_section", {"section_id": "b"}), usage=_usage(1_000, 0)),
+        answers("Plan", PLAN),
+    )
+    request = replace(decide(sop_tool(log), max_tool_rounds=8), max_cost_usd=0.0002)
+
+    response = await model.generate(request, Plan)
+
+    assert response.parsed.rationale == PLAN["rationale"]
+    assert [s.tool_choice for s in chat.sent] == ["required", "required", "Plan"]
+    assert log == [{"section_id": "a"}, {"section_id": "b"}]
+
+
+@pytest.mark.unit
+async def test_without_a_cost_cap_the_rounds_go_on() -> None:
+    model, chat = make_model(
+        calls(("read_sop_section", {"section_id": "a"}), usage=_usage(1_000_000, 0)),
+        answers("Plan", PLAN),
+    )
+
+    await model.generate(decide(sop_tool([]), max_tool_rounds=8), Plan)
+
+    assert [s.tool_choice for s in chat.sent] == ["required", "required"]
+
+
+@pytest.mark.unit
+async def test_each_assistant_entry_of_the_transcript_carries_its_rounds_usage() -> None:
+    model, _ = make_model(
+        calls(("read_sop_section", {"section_id": "a"}), usage=_usage(1_000, 50, cached=400)),
+        answers("Plan", PLAN, usage=_usage(1_200, 150)),
+    )
+
+    response = await model.generate(decide(sop_tool([])), Plan)
+
+    first, second = (t for t in response.transcript if t["role"] == "assistant")
+    assert first["usage"] == {
+        "input_tokens": 1_000,
+        "output_tokens": 50,
+        "cached_tokens": 400,
+        "cost_usd": PRICING.cost_usd(input_tokens=1_000, output_tokens=50, cached_tokens=400),
+    }
+    assert second["usage"]["input_tokens"] == 1_200
+    assert "usage" not in response.transcript[0]
+    total = first["usage"]["cost_usd"] + second["usage"]["cost_usd"]
+    assert response.usage.cost_usd == pytest.approx(total)
+
+
+@pytest.mark.unit
+async def test_images_go_with_the_user_prompt_as_data_url_parts() -> None:
+    model, chat = make_model(answers("GateDecision", ACK))
+    png = b"\x89PNG\r\n\x1a\nfake"
+    request = replace(GATE, images=(ImageInput(data=png, media_type="image/png"),))
+
+    response = await model.generate(request, GateDecision)
+
+    user = chat.sent[0].messages[1]
+    assert isinstance(user, HumanMessage)
+    text, image = user.content
+    assert text == {"type": "text", "text": GATE.user}
+    encoded = base64.b64encode(png).decode()
+    assert image == {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+    assert response.transcript[1] == {"role": "user", "content": GATE.user, "images": 1}
+
+
+@pytest.mark.unit
+async def test_a_prompt_without_images_is_plain_text() -> None:
+    model, chat = make_model(answers("GateDecision", ACK))
+
+    response = await model.generate(GATE, GateDecision)
+
+    assert chat.sent[0].messages[1].content == GATE.user
+    assert response.transcript[1] == {"role": "user", "content": GATE.user}
 
 
 @pytest.mark.unit
@@ -571,7 +670,7 @@ async def test_usage_sums_every_round_and_is_priced() -> None:
     response = await model.generate(decide(sop_tool([])), Plan)
 
     usage = response.usage
-    assert (usage.role, usage.model) == ("decide", "acme/small")
+    assert (usage.role, usage.model) == ("agent", "acme/small")
     assert (usage.input_tokens, usage.output_tokens, usage.cached_tokens) == (2_200, 200, 1_400)
     assert usage.cost_usd == pytest.approx(
         PRICING.cost_usd(input_tokens=2_200, output_tokens=200, cached_tokens=1_400)
@@ -623,7 +722,7 @@ async def test_a_provider_error_becomes_an_llm_error_naming_the_model() -> None:
 
 @pytest.mark.unit
 async def test_an_answer_that_does_not_match_the_schema_is_an_llm_error() -> None:
-    model, _ = make_model(answers("GateDecision", {"intent": "dance", "act": True, "reason": "x"}))
+    model, _ = make_model(answers("GateDecision", {"intent": 42, "act": True, "reason": "x"}))
 
     with pytest.raises(LlmError, match=r"acme/small.*GateDecision.*intent"):
         await model.generate(GATE, GateDecision)
@@ -763,7 +862,7 @@ def test_models_for_role_builds_one_model_per_entry_of_the_chain() -> None:
         built.append(role.model)
         return FakeChat()
 
-    models = models_for_role(config, ModelRole.DECIDE, SecretStr(KEY), chat_factory=factory)
+    models = models_for_role(config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory)
 
     assert [m.model_id for m in models] == ["acme/small", "acme/tiny"]
     assert built == ["acme/small", "acme/tiny"]

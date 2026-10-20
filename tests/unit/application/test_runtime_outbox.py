@@ -45,7 +45,7 @@ async def outbox(world: World) -> list[OutboxItem]:
 
 async def test_every_kind_is_delivered_with_its_payload_and_key(load: Load) -> None:
     departed = section("driver_departed", "Update the stage.", intents=(Intent.DRIVER_DEPARTED,))
-    world = await World(load, sop=FakeSop((*SECTIONS, departed))).start()
+    world = await World(load, knowledge=FakeSop((*SECTIONS, departed))).start()
     await world.message(at(7, 12), "Loaded and leaving now")
     world.model.push(GATE, decision(Intent.DRIVER_DEPARTED))
     world.model.push(

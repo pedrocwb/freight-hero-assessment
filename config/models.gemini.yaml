@@ -1,0 +1,73 @@
+# Bake-off candidate set "gemini" (`--model-set gemini`), for the wave 3 bake-off of the
+# agent role (card W3-BAKE): the default set with Gemini 2.5 Flash on the agent. Only the
+# agent role differs from config/models.yaml; see that file for what each setting means.
+# Gemini 2.5 Flash thinks by default; no reasoning_effort is set, because the chain sends
+# every fallback the same settings and GPT-4.1 has no endpoint for `reasoning`.
+# max_tokens counts the thinking tokens. Prices: check against the catalog before the
+# bake-off.
+
+roles:
+  gate:
+    model: openai/gpt-4.1-nano
+    fallbacks: [google/gemini-2.5-flash-lite]
+    temperature: 0
+    max_tokens: 256
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  agent:
+    model: google/gemini-2.5-flash
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 4096
+
+  judge:
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 1024
+    provider:
+      order: [openai]
+      allow_fallbacks: false
+
+  driver_sim:
+    model: google/gemini-2.5-flash-lite
+    fallbacks: [openai/gpt-4.1-nano]
+    temperature: 0.7
+    max_tokens: 400
+
+  extract:
+    # Wave 3: as in config/models.yaml.
+    model: google/gemini-2.5-flash
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 4096
+
+  compile:
+    # Wave 3: as in config/models.yaml.
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 8192
+
+pricing:
+  openai/gpt-4.1-nano: {input: 0.10, output: 0.40, cached_input: 0.025, context_length: 1047576}
+  google/gemini-2.5-flash-lite: {input: 0.10, output: 0.40, cached_input: 0.01, context_length: 1048576}
+  openai/gpt-4.1-mini: {input: 0.40, output: 1.60, cached_input: 0.10, context_length: 1047576}
+  openai/gpt-oss-120b: {input: 0.037, output: 0.17, context_length: 131072}
+  anthropic/claude-haiku-5.5: {input: 0.10, output: 0.50, cached_input: 0.01, context_length: 1000000}
+  google/gemini-2.5-flash: {input: 0.30, output: 2.50, cached_input: 0.075, context_length: 1048576}
+  openai/text-embedding-3-small: {input: 0.02, output: 0, context_length: 8192}
+
+# The wave 3 agent bake-off: gpt-oss (--model-set gptoss), Claude Haiku 5.5 (haiku) and
+# Gemini 2.5 Flash (this set).
+bakeoff_candidates:
+  - openai/gpt-oss-120b
+  - anthropic/claude-haiku-5.5
+  - google/gemini-2.5-flash
+
+# The SOP index's embedding model (live and record only). As in config/models.yaml.
+embedding:
+  model: openai/text-embedding-3-small
+  dim: 1536

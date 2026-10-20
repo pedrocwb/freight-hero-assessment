@@ -2,6 +2,12 @@
 
 `grade_step` judges one step against its `Expectation` and `forbid` list;
 `check_invariants` judges the whole run (idempotency, recipients, budget).
+
+The trajectory checks (wave 3) read the step's run records: the intent each run settled
+on (the agent's label, else the gate's), the tool calls of the agent loop
+(`RunRecord.trajectory`), the sections it searched up or read and the calls a rule
+refused (`RunRecord.rejections`). The judge check reads the verdict the runner asked the
+judge model for (`StepObservation.judge`); it never calls a model itself.
 Graders never raise on a bad agent: every problem becomes a `Failure` whose
 message states what was expected and lists what actually happened, so a red
 scenario can be fixed from the report alone.
@@ -19,16 +25,24 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from freight_agent.domain.load import Load
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
-from freight_agent.domain.runs import RunRecord, RunStatus
+from freight_agent.domain.runs import RunRecord, RunStatus, TrajectoryStep
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.evalkit.judge import JudgeResult, JudgeSpec
 from freight_agent.evalkit.results import Failure, StepObservation
-from freight_agent.evalkit.spec import ActionMatcher, ObligationExpectation, Step, TimerExpectation
+from freight_agent.evalkit.spec import (
+    ActionMatcher,
+    Expectation,
+    ObligationExpectation,
+    Step,
+    TimerExpectation,
+)
 
 # Payload keys whose values are human-readable text, in the order they are joined.
 _TEXT_FIELDS = ("text", "body", "subject", "title", "description")
 _EXCERPT = 80
+READ_SECTION_TOOL = "read_sop_section"  # its `section_id` argument is a section the agent read
 
 # A grader yields (check, message) pairs; the caller adds the step index.
 type _Findings = Iterator[tuple[str, str]]
@@ -63,6 +77,8 @@ def grade_step(step: Step, obs: StepObservation, *, timezone: str) -> list[Failu
         *_check_run_status(expect.run_status, obs.runs),
         *_check_llm_calls(expect.llm_calls, obs),
         *_check_runs(expect.runs, obs),
+        *_check_trajectory(expect, obs.runs),
+        *_check_judge(expect.judge, obs.judge),
     ]
     return [Failure(step_index=obs.step_index, check=c, message=m) for c, m in findings]
 
@@ -105,17 +121,17 @@ def _check_forbid(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]
 
 
 def _check_obligations(
-    expected: Mapping[ObligationKind, ObligationExpectation | None],
+    expected: Mapping[str, ObligationExpectation | None],
     obligations: Sequence[Obligation],
 ) -> _Findings:
     for kind, want in expected.items():
-        check = f"expect.obligations.{kind.value}"
+        check = f"expect.obligations.{kind}"
         latest = _latest(obligations, kind)
         if want is None:
             if latest is not None:
-                yield check, f"expected no {kind.value} obligation, found {_describe(latest)}"
+                yield check, f"expected no {kind} obligation, found {_describe(latest)}"
         elif latest is None:
-            yield check, f"expected an {kind.value} obligation, found none"
+            yield check, f"expected an {kind} obligation, found none"
         else:
             yield from _compare_obligation(check, want, latest)
 
@@ -183,6 +199,103 @@ def _check_runs(want: int | None, obs: StepObservation) -> _Findings:
         yield (
             "expect.runs",
             f"expected {want} run(s), got {len(obs.runs)}: {_list_runs(obs.runs)}",
+        )
+
+
+# --- trajectory and judge (wave 3) ------------------------------------------------------
+
+
+def run_intent(run: RunRecord) -> str | None:
+    """The intent the run settled on: the agent's label when it gave one, else the gate's."""
+    if run.intent is not None:
+        return run.intent
+    return run.gate.intent if run.gate is not None else None
+
+
+def tool_calls(runs: Sequence[RunRecord]) -> list[TrajectoryStep]:
+    return [step for run in runs for step in run.trajectory]
+
+
+def sections_read(runs: Sequence[RunRecord]) -> list[str]:
+    """Sections the agent searched up or read: `sections_searched`, plus the `section_id` of
+    every `read_sop_section` call, in order, each once."""
+    found: list[str] = []
+    for run in runs:
+        found.extend(run.sections_searched)
+        for step in run.trajectory:
+            section_id = step.args.get("section_id")
+            if step.tool == READ_SECTION_TOOL and isinstance(section_id, str):
+                found.append(section_id)
+    return list(dict.fromkeys(found))
+
+
+def rejections(runs: Sequence[RunRecord]) -> int:
+    return sum(run.rejections for run in runs)
+
+
+def _check_trajectory(expect: Expectation, runs: Sequence[RunRecord]) -> _Findings:
+    calls = tool_calls(runs)
+    if expect.intent is not None:
+        intents = [i for i in (run_intent(r) for r in runs) if i is not None]
+        if expect.intent not in intents:
+            yield (
+                "expect.intent",
+                f"expected a run with intent {expect.intent}, got "
+                f"[{', '.join(intents) or 'no intent'}]; runs: {_list_runs(runs)}",
+            )
+    used = {c.tool for c in calls}
+    if missing := [t for t in expect.tools_used if t not in used]:
+        yield (
+            "expect.tools_used",
+            f"expected calls to {', '.join(missing)}; tool calls: {_list_calls(calls)}",
+        )
+    refused = {c.tool for c in calls if c.accepted is False}
+    if missing := [t for t in expect.tools_refused if t not in refused]:
+        yield (
+            "expect.tools_refused",
+            f"expected a refused call to {', '.join(missing)}; tool calls: {_list_calls(calls)}",
+        )
+    read = sections_read(runs)
+    if missing := [s for s in expect.sections_read if s not in read]:
+        yield (
+            "expect.sections_read",
+            f"expected the agent to read {', '.join(missing)}; it read "
+            f"[{', '.join(read) or 'nothing'}]; tool calls: {_list_calls(calls)}",
+        )
+    refusals = rejections(runs)
+    low, high = expect.min_rejections, expect.max_rejections
+    if low is not None and refusals < low:
+        yield (
+            "expect.min_rejections",
+            f"expected at least {low} refused tool call(s), got {refusals}; "
+            f"tool calls: {_list_calls(calls)}",
+        )
+    if high is not None and refusals > high:
+        yield (
+            "expect.max_rejections",
+            f"expected at most {high} refused tool call(s), got {refusals}; "
+            f"tool calls: {_list_calls(calls)}",
+        )
+
+
+def _check_judge(want: JudgeSpec | None, result: JudgeResult | None) -> _Findings:
+    if want is None:
+        return
+    if result is None:
+        yield "expect.judge", "the step has a rubric but the judge did not run"
+        return
+    if result.skipped is not None:
+        return
+    if result.error is not None:
+        yield "expect.judge", result.error
+        return
+    verdict = result.verdict
+    if verdict is not None and verdict.score < result.min_score:
+        reasons = "; ".join(verdict.reasons) or "no reasons given"
+        yield (
+            "expect.judge",
+            f"the judge scored {verdict.score:.2f}, below the minimum of "
+            f"{result.min_score:.2f}: {reasons}",
         )
 
 
@@ -309,8 +422,8 @@ def _text(item: OutboxItem) -> str:
     return "\n".join(v for v in values if isinstance(v, str))
 
 
-def _latest(obligations: Sequence[Obligation], kind: ObligationKind) -> Obligation | None:
-    of_kind = [o for o in obligations if o.kind is kind]
+def _latest(obligations: Sequence[Obligation], kind: str) -> Obligation | None:
+    of_kind = [o for o in obligations if o.kind == kind]
     return max(of_kind, key=lambda o: (o.opened_at, o.obligation_id), default=None)
 
 
@@ -381,9 +494,25 @@ def _describe_run(run: RunRecord) -> str:
     details = [
         f"skip_reason={run.skip_reason}" if run.skip_reason else "",
         f"gate={run.gate.intent}, act={run.gate.act}" if run.gate else "",
+        f"intent={run.intent}" if run.intent else "",
         "calls=" + ", ".join(u.role for u in run.usage) if run.usage else "",
+        "tools=" + _list_calls(run.trajectory) if run.trajectory else "",
+        f"rejections={run.rejections}" if run.rejections else "",
         "violations=" + ", ".join(v.rule for v in run.violations) if run.violations else "",
         f"error={run.error}" if run.error else "",
     ]
     detail = "; ".join(d for d in details if d)
     return f"{run.run_id} on {run.event_id}: {run.status}" + (f" ({detail})" if detail else "")
+
+
+def _list_calls(calls: Sequence[TrajectoryStep]) -> str:
+    return ", ".join(_describe_call(c) for c in calls) or "(none)"
+
+
+def _describe_call(call: TrajectoryStep) -> str:
+    """`read_sop_section(escalation)`, `send_email refused`: the tool and what matters."""
+    section = call.args.get("section_id")
+    head = f"{call.tool}({section})" if isinstance(section, str) else call.tool
+    if call.accepted is False:
+        return f"{head} refused"
+    return head

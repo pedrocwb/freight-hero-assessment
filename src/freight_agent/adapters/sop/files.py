@@ -13,15 +13,14 @@ the file name ("standard/escalation.md: the header has no `id`...").
 import difflib
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
-from freight_agent.domain.intents import Intent
+from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 
@@ -33,6 +32,8 @@ LAYOUT = (
 _FENCE = "---"
 _SNAKE_CASE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _VERSION_LENGTH = 12
+# The intents a file may name unless the caller knows its broker's catalog.
+STANDARD_INTENTS: tuple[str, ...] = tuple(i.intent_id for i in standard_broker().intents)
 
 Scope = tuple[SopLayer, str | None, str | None]
 
@@ -132,8 +133,14 @@ def duplicates(files: Iterable[SopFile]) -> list[tuple[str, SopFile, SopFile]]:
     return found
 
 
-def read_sop_file(path: Path, location: SopLocation) -> SopFile:
-    """Read one file and check every setting, collecting all problems instead of stopping."""
+def read_sop_file(
+    path: Path, location: SopLocation, *, intents: Collection[str] = STANDARD_INTENTS
+) -> SopFile:
+    """Read one file and check every setting, collecting all problems instead of stopping.
+
+    `intents` are the ids the file may name: the standard catalog's, unless the caller
+    knows the catalog of the file's broker (the importer does).
+    """
     try:
         meta, body = _split_front_matter(_read_text(path))
     except _Unreadable as exc:
@@ -142,8 +149,8 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
     section_id = _section_id(meta, problems)
     title = _text(meta, "title", problems)
     description = _text(meta, "description", problems)
-    intents = _members(meta, "intents", Intent, problems)
-    stages = _members(meta, "stages", Stage, problems)
+    intent_ids = _members(meta, "intents", {i: i for i in intents}, problems)
+    stages = _members(meta, "stages", {stage.value: stage for stage in Stage}, problems)
     mode = _mode(meta, problems)
     if not body:
         problems.append("the section has no text. Write the procedure below the closing --- line.")
@@ -156,7 +163,7 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
         load_type=location.load_type,
         title=title or section_id,
         description=description or "",
-        intents=intents,
+        intents=intent_ids,
         stages=stages,
         # decisions.md: mode is ignored in standard/, there is nothing below it to extend.
         mode=MergeMode.REPLACE if location.layer is SopLayer.STANDARD else mode,
@@ -166,12 +173,43 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
     return SopFile(location, section_id, mode, section, ())
 
 
+def tree_version(root: Path) -> str:
+    """Short sha256 of the sorted (relative path, bytes) pairs: any edit or move changes it."""
+    digest = hashlib.sha256()
+    for source, path in sop_paths(root):
+        data = path.read_bytes()
+        # The length keeps the pairs unambiguous: no two trees hash the same bytes.
+        digest.update(source.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
+    return digest.hexdigest()[:_VERSION_LENGTH]
+
+
+def load_tree(root: Path) -> list[SopSection]:
+    """Every section of the tree, every client's included. Fails like `FileSopRepository`:
+    a file outside the layout, a file with a problem, an id used twice in one folder."""
+    files = [_load_file(source, path) for source, path in sop_paths(root)]
+    for section_id, repeat, first in duplicates(files):
+        raise SopFormatError(repeat.location.source, duplicate_problem(section_id, first))
+    return [file.section for file in files if file.section is not None]
+
+
+def _load_file(source: str, path: Path) -> SopFile:
+    location = locate(source)
+    if location is None:
+        raise SopFormatError(source, outside_layout_problem())
+    file = read_sop_file(path, location)
+    if file.section is None:
+        raise SopFormatError(source, "; ".join(file.problems))
+    return file
+
+
 class FileSopRepository:
-    """`SopRepository` over a folder of Markdown files.
+    """The sections of a folder of Markdown files, per client: the importer's file reader.
 
     Reads the disk on every call, so an edited SOP applies to the next run, and the
     version recorded with a run matches what that run read. Only the files a client can
-    see are read: a broken file of one client never blocks the others.
+    see are read: a broken file of one client never blocks the others. (Before wave 3
+    the runtime read SOPs through it; now it reads them through `ports.knowledge.SopIndex`,
+    see `adapters/knowledge/memory.py`.)
     """
 
     def __init__(self, root: Path) -> None:
@@ -179,7 +217,7 @@ class FileSopRepository:
 
     async def sections_for_client(self, client_id: str) -> list[SopSection]:
         files = [
-            self._load(source, path)
+            _load_file(source, path)
             for source, path in sop_paths(self._root)
             if _visible_to(source, client_id)
         ]
@@ -188,22 +226,7 @@ class FileSopRepository:
         return [file.section for file in files if file.section is not None]
 
     def version(self) -> str:
-        """Short sha256 of the sorted (relative path, bytes) pairs: any edit or move changes it."""
-        digest = hashlib.sha256()
-        for source, path in sop_paths(self._root):
-            data = path.read_bytes()
-            # The length keeps the pairs unambiguous: no two trees hash the same bytes.
-            digest.update(source.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
-        return digest.hexdigest()[:_VERSION_LENGTH]
-
-    def _load(self, source: str, path: Path) -> SopFile:
-        location = locate(source)
-        if location is None:
-            raise SopFormatError(source, outside_layout_problem())
-        file = read_sop_file(path, location)
-        if file.section is None:
-            raise SopFormatError(source, "; ".join(file.problems))
-        return file
+        return tree_version(self._root)
 
 
 def _visible_to(source: str, client_id: str) -> bool:
@@ -296,16 +319,15 @@ def _text(meta: dict[Any, Any], key: str, problems: list[str]) -> str | None:
     return None
 
 
-def _members[E: StrEnum](
-    meta: dict[Any, Any], key: str, kind: type[E], problems: list[str]
+def _members[E: str](
+    meta: dict[Any, Any], key: str, known: dict[str, E], problems: list[str]
 ) -> tuple[E, ...]:
-    """A list of enum values. A single value without brackets is accepted as a list of one."""
+    """A list of known values. A single value without brackets is a list of one."""
     noun = key.removesuffix("s")
     raw = meta.get(key)
     if raw is None:
         return ()
     items: object = [raw] if isinstance(raw, str) else raw
-    known = {member.value: member for member in kind}
     if not isinstance(items, list):
         problems.append(
             f"`{key}` must be a list, like [{', '.join(list(known)[:2])}]. "

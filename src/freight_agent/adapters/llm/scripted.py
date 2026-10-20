@@ -7,6 +7,7 @@ exception to simulate a model failure.
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -19,6 +20,21 @@ class ScriptExhausted(LlmError):
 
 
 @dataclass(frozen=True)
+class ScriptedReply:
+    """A scripted answer that also carries the conversation that led to it.
+
+    `transcript` uses the OpenRouter adapter's format (`_transcript_entry`): entries with
+    role "assistant" (`content`, `tool_calls: [{id, name, args}]`, optionally `usage`) and
+    role "tool" (`tool_call_id`, `name`, `content`). Tools never run in scripted mode: the
+    agent node folds the transcript's tool calls into the staged plan, exactly as it does
+    for a live or replayed conversation (wave 3 spec, F1).
+    """
+
+    parsed: BaseModel
+    transcript: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
 class ScriptedCall:
     role: ModelRole
     schema: str
@@ -28,11 +44,13 @@ class ScriptedCall:
 class ScriptedModel:
     def __init__(self, model_name: str = "scripted") -> None:
         self._model_name = model_name
-        self._queues: dict[ModelRole, deque[BaseModel | Exception]] = defaultdict(deque)
+        self._queues: dict[ModelRole, deque[BaseModel | ScriptedReply | Exception]] = defaultdict(
+            deque
+        )
         self.calls: list[ScriptedCall] = []
         self.exhausted: list[ScriptedCall] = []
 
-    def push(self, role: ModelRole, *outputs: BaseModel | Exception) -> None:
+    def push(self, role: ModelRole, *outputs: BaseModel | ScriptedReply | Exception) -> None:
         self._queues[role].extend(outputs)
 
     def remaining(self, role: ModelRole | None = None) -> int:
@@ -56,8 +74,11 @@ class ScriptedModel:
         output = queue.popleft()
         if isinstance(output, Exception):
             raise output
+        transcript: tuple[dict[str, Any], ...] = ()
+        if isinstance(output, ScriptedReply):
+            output, transcript = output.parsed, output.transcript
         parsed = (
             output if isinstance(output, schema) else schema.model_validate(output.model_dump())
         )
         usage = Usage(role=request.role.value, model=self._model_name)
-        return LlmResponse(parsed=parsed, usage=usage)
+        return LlmResponse(parsed=parsed, usage=usage, transcript=transcript)

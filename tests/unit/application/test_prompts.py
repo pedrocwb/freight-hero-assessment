@@ -1,17 +1,29 @@
+import json
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from freight_agent.application.agent import sections_in_progress
 from freight_agent.application.context import RunContext
-from freight_agent.application.decide import sections_in_progress
 from freight_agent.application.prompts import (
-    DECIDE_SYSTEM_PROMPT,
     GATE_SYSTEM_PROMPT,
-    render_decide_prompt,
+    render_agent_prompt,
+    render_agent_system_prompt,
     render_gate_prompt,
+    render_gate_system_prompt,
 )
+from freight_agent.domain.broker import (
+    Broker,
+    DocumentRequirement,
+    IntentDef,
+    ObligationDef,
+    standard_broker,
+)
+from freight_agent.domain.documents import Document, DocumentStatus, FieldCheck
 from freight_agent.domain.events import Attachment, Direction, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
@@ -164,7 +176,7 @@ def a2_context(load: Load) -> RunContext:
 def a2_prompt(load: Load) -> str:
     ctx = a2_context(load)
     sop = resolved(COMMUNICATION, QUESTIONS, ESCALATION)
-    return render_decide_prompt(ctx, QUESTION, sop, sections_in_progress(ctx, sop, VISIBLE))
+    return render_agent_prompt(ctx, QUESTION, sop, sections_in_progress(ctx, sop, VISIBLE))
 
 
 def context(load: Load, trigger: Event, *earlier: Event, **kwargs: Any) -> RunContext:
@@ -179,7 +191,7 @@ def context(load: Load, trigger: Event, *earlier: Event, **kwargs: Any) -> RunCo
 
 
 def decide_prompt(ctx: RunContext, sop: ResolvedSop | None = None) -> str:
-    return render_decide_prompt(ctx, QUESTION, sop or resolved(QUESTIONS))
+    return render_agent_prompt(ctx, QUESTION, sop or resolved(QUESTIONS))
 
 
 # A2: the decide prompt at 07:13 carries everything the model needs.
@@ -554,7 +566,7 @@ def test_open_obligation_without_a_pending_timer(load: Load) -> None:
 def test_risk_change_event_block(load: Load) -> None:
     ctx = context(load, risk_event(), now=at(7, 1))
 
-    prompt = render_decide_prompt(ctx, QUESTION, resolved(HIGH_RISK))
+    prompt = render_agent_prompt(ctx, QUESTION, resolved(HIGH_RISK))
 
     assert "type: risk_changed" in prompt
     assert "change: delay risk changed low -> high" in prompt
@@ -611,6 +623,72 @@ def test_attachment_event_block_points_to_read_document(load: Load) -> None:
 
 
 @pytest.mark.unit
+def test_a_message_with_an_attachment_says_its_document_run_acts_on_it(load: Load) -> None:
+    pod = Attachment(
+        attachment_id="att_9", filename="pod.pdf", content_type="application/pdf", ref="r"
+    )
+
+    prompt = decide_prompt(context(load, inbound(at(7, 12), "here it is", attachments=(pod,))))
+
+    assert (
+        "attachments (the document pipeline reads them, and their document_processed run acts "
+        "on them; read_document shows where each stands):"
+    ) in prompt
+
+
+@pytest.mark.unit
+def test_a_processed_document_event_shows_what_the_pipeline_found(load: Load) -> None:
+    document = Document(
+        document_id="doc_1",
+        load_id="481207",
+        attachment_id="att_9",
+        broker_id="northline",
+        blob_ref="sha256:x",
+        filename="pod.pdf",
+        content_type="application/pdf",
+        status=DocumentStatus.NEEDS_REVIEW,
+        type_id="pod",
+        extracted={"receiver": "Valley DC"},
+        checks=(FieldCheck(field="po_numbers", expected="55821", found="55812", ok=False),),
+        pages=1,
+        received_at=at(7, 10),
+    )
+    summary = "pod: needs_review: po_numbers: 55812 is not the load's PO 55821"
+    trigger = Event(
+        event_id="doc:doc_1",
+        load_id="481207",
+        type=EventType.DOCUMENT_PROCESSED,
+        occurred_at=at(7, 12),
+        channel=Channel.SYSTEM,
+        body=summary,
+        data={
+            "document_id": "doc_1",
+            "type_id": "pod",
+            "status": "needs_review",
+            "attachment_id": "att_9",
+        },
+    )
+    by_attachment = trigger.model_copy(update={"data": {"attachment_id": "att_9"}, "body": ""})
+
+    shown = decide_prompt(context(load, trigger, documents=(document,)))
+    bare = decide_prompt(context(load, trigger))
+    found = decide_prompt(context(load, by_attachment, documents=(document,)))
+
+    event = shown.split("## Event")[1].split("## Gate")[0]
+    assert (
+        'document: document "doc_1" (attachment "att_9") processed: type "pod", status '
+        '"needs_review"'
+    ) in event
+    assert f"summary: {json.dumps(summary)}" in event
+    assert "what the pipeline found (untrusted values from the file):" in event
+    assert '  - po_numbers: MISMATCH; expected "55821", found "55812"' in event
+    transcript = shown.split("## Transcript")[1].split("## Now")[0]
+    assert f'status "needs_review": {json.dumps(summary)}  <- this event' in transcript
+    assert "what the pipeline found" not in bare
+    assert "what the pipeline found" in found and "summary:" not in found
+
+
+@pytest.mark.unit
 def test_hero_update_and_own_action_event_blocks(load: Load) -> None:
     hero = Event(
         event_id="hero_1",
@@ -634,7 +712,7 @@ def test_empty_sop_and_instructions_are_explicit(load: Load) -> None:
     bare = load.model_copy(update={"instructions": "", "load_types": ("reefer",)})
     ctx = context(bare, inbound(at(7, 12), "ok"))
 
-    prompt = render_decide_prompt(ctx, QUESTION, ResolvedSop(sections=(), catalog=()))
+    prompt = render_agent_prompt(ctx, QUESTION, ResolvedSop(sections=(), catalog=()))
 
     assert "instructions: none" in prompt
     assert "load types: reefer" in prompt
@@ -737,15 +815,207 @@ def test_gate_prompt_lists_attachments_and_says_none_when_nothing_is_open(load: 
         '"satisfied"',
         '"exhausted"',
         '"cancelled"',
-        "empty plan",
         "At most one SMS per contact",
         "160 characters",
+        "no internal words (SOP, ledger, obligation, timer, Hero, intent, gate, tool)",
         "Never share rates, prices",
         "untrusted",
+        "what the tools return from documents, the SOP search and the history",
+        "A message run never acts on an attached document",
+        "search the SOP with search_sop before you decide that no procedure applies",
+        "Call finish once",
+        "no_procedure: true only when no SOP section covers the event",
     ],
 )
-def test_decide_system_prompt_states_the_rules(fragment: str) -> None:
-    assert fragment in DECIDE_SYSTEM_PROMPT
+@pytest.mark.parametrize("max_steps", [8, 0], ids=["tools", "plan"])
+def test_agent_system_prompt_states_the_rules(fragment: str, max_steps: int) -> None:
+    """Both modes keep every hard-won rule of the decide prompt (evals/RESULTS.md)."""
+    assert fragment in render_agent_system_prompt(_with_steps(max_steps))
+
+
+def _with_steps(max_steps: int) -> Broker:
+    standard = standard_broker()
+    limits = standard.limits.model_copy(update={"max_steps": max_steps})
+    return standard.model_copy(update={"limits": limits})
+
+
+@pytest.mark.unit
+def test_the_tool_mode_stages_actions_and_the_plan_mode_returns_them() -> None:
+    tools = render_agent_system_prompt(_with_steps(8))
+    plan = render_agent_system_prompt(_with_steps(0))
+
+    assert 'answers "accepted as action #n" or "rejected by <rule>: <why>"' in tools
+    assert "Staging nothing is the right answer" in tools
+    assert "You have at most 8 rounds of tool calls. More than 3 rejected actions" in tools
+    assert "- actions: leave it empty." in tools
+    assert "You return a plan" in plan
+    assert "An empty plan (no actions) is the right answer" in plan
+    assert "rounds of tool calls" not in plan
+    assert "- actions: the plan, possibly empty." in plan
+
+
+@pytest.mark.unit
+def test_the_agent_prompt_lists_the_catalog_of_the_broker() -> None:
+    prompt = render_agent_system_prompt(standard_broker())
+
+    assert "- question: asks us something:" in prompt
+    assert "- eta_follow_up_due (set by code): The follow-up timer" in prompt
+    assert (
+        "- eta_request: ETA request. We asked the driver for the arrival time at the next stop "
+        "and wait for it. Each request SMS is one attempt. Follow-up after 30 minutes; at most "
+        "2 requests; when they are used up: an email to the dispatcher, then a Hero task (the "
+        "SOP gives the exact steps)."
+    ) in prompt
+    assert (
+        "Document types: bol (Bill of lading), pod (Proof of delivery), rate_confirmation (Rate "
+        "confirmation), receipt (Receipt)."
+    ) in prompt
+    assert "- Required:" not in prompt
+    assert "list_document_requirements" not in prompt
+
+
+@pytest.mark.unit
+def test_a_brokers_own_intents_obligations_and_requirements_are_rendered() -> None:
+    standard = standard_broker()
+    detention = IntentDef(
+        intent_id="detention_request",
+        title="Detention request",
+        description='asks to be paid for waiting: "been here 3 hours, detention?".',
+        examples=("detention?",),
+        priority=55,
+    )
+    pod = ObligationDef(
+        kind="pod",
+        title="POD request",
+        description="We wait for the signed POD.",
+        follow_up_minutes=120,
+        max_attempts=3,
+        on_exhausted=("broker_slack",),
+    )
+    requirement = DocumentRequirement(
+        type_id="pod", at_stage=Stage.AT_DELIVERY, within_minutes=120, opens_obligation="pod"
+    )
+    acme = standard.model_copy(
+        update={
+            "intents": (*standard.intents, detention),
+            "obligations": (*standard.obligations, pod),
+            "documents": (
+                requirement,
+                DocumentRequirement(type_id="bol", at_stage=Stage.AT_PICKUP),
+            ),
+        }
+    )
+
+    gate = render_gate_system_prompt(acme)
+    agent = render_agent_system_prompt(acme)
+
+    assert (
+        '- detention_request: asks to be paid for waiting: "been here 3 hours, detention?".' in gate
+    )
+    assert "document, detention_request, status_update" in gate  # priority order
+    assert "driver_departed, document and detention_request always act." in gate
+    assert "and an open ETA request or POD request goes on by itself." in gate
+    assert "- detention_request: asks to be paid for waiting" in agent
+    assert (
+        "- pod: POD request. We wait for the signed POD. Follow-up after 120 minutes; at most 3 "
+        "requests; when they are used up: the broker's Slack channel"
+    ) in agent
+    assert (
+        "- Required: pod once the load is at_delivery, within 120 minutes; code opens the pod "
+        "obligation when the stage changes to it."
+    ) in agent
+    assert "- Required: bol once the load is at_pickup." in agent
+    assert "- list_document_requirements {type_id}" in agent
+
+
+@pytest.mark.unit
+def test_a_catalog_without_the_standard_intents_renders_a_generic_gate_prompt() -> None:
+    standard = standard_broker()
+    minimal = standard.model_copy(
+        update={
+            "intents": tuple(
+                i for i in standard.intents if i.intent_id in ("question", "other") or i.system
+            ),
+            "obligations": (),
+        }
+    )
+
+    gate = render_gate_system_prompt(minimal)
+    agent = render_agent_system_prompt(minimal)
+
+    assert "pick the first that applies in this order: question, other." in gate
+    assert '"9:40" right after' not in gate
+    assert "question always act." in gate
+    assert "- false only when nothing should happen: small talk, or news" in gate
+    assert "is always act false" not in gate
+    assert "# Obligations\n" in agent and "code refuses any other kind.\n- none" in agent
+
+
+@pytest.mark.unit
+def test_the_eta_examples_need_the_eta_request_obligation() -> None:
+    no_eta = standard_broker().model_copy(update={"obligations": ()})
+
+    gate = render_gate_system_prompt(no_eta)
+
+    assert '"9:40" right after we asked for the ETA' not in gate
+    assert "and an open request goes on by itself." in gate
+
+
+@pytest.mark.unit
+def test_a_quiet_intent_without_examples_is_still_named() -> None:
+    standard = standard_broker()
+    quiet = IntentDef(
+        intent_id="fyi",
+        title="Update",
+        description="for information.",
+        must_act=False,
+        noop_eligible=True,
+        priority=80,
+    )
+    broker = standard.model_copy(update={"intents": (*standard.intents, quiet)})
+
+    gate = render_gate_system_prompt(broker)
+
+    assert "- An update is always act false, whatever is open: it answers nothing" in gate
+    assert (
+        "- false only when nothing should happen: an acknowledgement, an update, small talk" in gate
+    )
+
+
+# Snapshots: the prompts rendered from the standard catalog (UPDATE_SNAPSHOTS=1 rewrites).
+
+SNAPSHOTS = Path(__file__).parent / "snapshots"
+
+
+def _matches_snapshot(name: str, text: str) -> None:
+    path = SNAPSHOTS / name
+    if os.environ.get("UPDATE_SNAPSHOTS") == "1":
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    assert text == path.read_text(encoding="utf-8"), (
+        f"{name} changed; review it and rerun with UPDATE_SNAPSHOTS=1"
+    )
+
+
+@pytest.mark.unit
+def test_the_standard_gate_prompt_is_the_tuned_one_word_for_word() -> None:
+    _matches_snapshot("gate_system_standard.txt", GATE_SYSTEM_PROMPT)
+    assert render_gate_system_prompt(standard_broker()) == GATE_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+def test_the_standard_agent_prompt_snapshot() -> None:
+    _matches_snapshot("agent_system_standard.txt", render_agent_system_prompt(standard_broker()))
+
+
+@pytest.mark.unit
+def test_the_standard_agent_prompt_without_action_tools_snapshot() -> None:
+    _matches_snapshot("agent_system_plan_only.txt", render_agent_system_prompt(_with_steps(0)))
+
+
+@pytest.mark.unit
+def test_the_a2_agent_prompt_snapshot(load: Load) -> None:
+    _matches_snapshot("agent_user_a2.txt", a2_prompt(load))
 
 
 @pytest.mark.unit

@@ -4,7 +4,9 @@ import pytest
 
 from freight_agent.application.context import RunContext
 from freight_agent.application.escalation import (
+    BLOCKED_TITLE,
     QUOTE_LIMIT,
+    RejectionBudget,
     blocked_actions,
     deadline_passed,
     describe_event,
@@ -12,10 +14,10 @@ from freight_agent.application.escalation import (
     sop_gap,
     unknown_sender,
 )
-from freight_agent.domain.actions import SendEmail, SendSms
+from freight_agent.domain.actions import SendEmail, SendSms, UpdateStage
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.intents import Intent
-from freight_agent.domain.load import Channel, Load
+from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.validation import Severity, ValidationOutcome, Violation
 from freight_agent.ports.llm import LlmError
 from tests.unit.application.test_runtime_harness import DRIVER, LOAD_ID, at, plan
@@ -144,3 +146,37 @@ def test_a_blocked_plan_lists_each_violation(load: Load) -> None:
         blocked.task.description
     )
     assert "2 other actions of the plan ran." in blocked.task.description
+    assert "redirect the agent" in blocked.task.description
+
+
+def test_a_spent_rejection_budget_is_named_first_with_the_count(load: Load) -> None:
+    ctx = context(load, event(EventType.INBOUND_MESSAGE, sender_contact_id=DRIVER, body="Hi"))
+    sms = SendSms(contact_id=DRIVER, text="ok")
+    refused = Violation(rule="stage_moves_forward", action_index=1, message="already to_pickup")
+    outcome = ValidationOutcome(approved=(sms,), violations=(refused,))
+    budget = RejectionBudget(refused=4, limit=3)
+
+    blocked = blocked_actions(ctx, plan(sms, UpdateStage(stage=Stage.TO_PICKUP)), outcome, budget)
+
+    assert budget.exceeded and not RejectionBudget(refused=3, limit=3).exceeded
+    assert blocked.reason == "blocked: max_rejections"
+    assert blocked.task.title == BLOCKED_TITLE and blocked.task.urgent
+    lines = blocked.task.description.splitlines()
+    assert lines[1] == "The agent's action calls were refused 4 times, over the limit of 3."
+    assert lines[2] == "- action 1 (update_stage): stage_moves_forward: already to_pickup"
+    assert lines[3] == (
+        "1 other action of the plan ran. Check what the agent was trying to do, and do it by hand."
+    )
+
+
+def test_a_budget_within_its_limit_changes_nothing(load: Load) -> None:
+    ctx = context(load, event(EventType.INBOUND_MESSAGE, sender_contact_id=DRIVER, body="Hi"))
+    leak = SendEmail(to_contact_ids=("x",), body="hi")
+    high = Violation(
+        rule="recipient_is_contact", action_index=0, message="x", severity=Severity.HIGH
+    )
+    outcome = ValidationOutcome(approved=(), violations=(high,))
+
+    within = blocked_actions(ctx, plan(leak), outcome, RejectionBudget(refused=1, limit=3))
+
+    assert within == blocked_actions(ctx, plan(leak), outcome)

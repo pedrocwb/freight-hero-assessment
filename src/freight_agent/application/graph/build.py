@@ -1,13 +1,14 @@
 """The per-run LangGraph graph: the thinking part of a run.
 
-    prefilter -> gate -> resolve_sop -> decide -> validate
-        |          |          |                      |
-       END        END        END                    END
+    prefilter -> triage -> knowledge -> agent -> validate
+        |          |                                |
+       END        END                              END
 
-Each arrow to END is a conditional exit, taken when the node wrote a verdict:
-`skipped` or `escalated` (unknown sender) after the prefilter, `noop` after the
-gate, `escalated` (no SOP section) after SOP resolution. `validate` always ends
-the run.
+Each arrow to END after the prefilter and the triage is a conditional exit, taken when
+the node wrote a verdict: `skipped` or `escalated` (unknown sender) after the prefilter,
+`noop` after the triage. The knowledge step never ends the run (an event no section
+covers is the agent's `no_procedure`). `validate` always ends the run: `acted`, `noop`,
+or `escalated` (a high-severity violation, the rejection budget, no procedure).
 
 `load_context` and `commit_execute` from the pipeline in docs/decisions.md run
 in the runtime, around this graph, because they are the run's two transactions:
@@ -22,26 +23,29 @@ from typing import Any, Protocol, cast
 # langgraph is a namespace package, so pyright does not see its py.typed marker.
 from langgraph.graph import END, START, StateGraph  # pyright: ignore[reportMissingTypeStubs]
 
+from freight_agent.application.agent import Agent
 from freight_agent.application.context import RunContext
-from freight_agent.application.decide import Decider
 from freight_agent.application.gate import Gate
 from freight_agent.application.graph.nodes import (
     Node,
-    decide_node,
-    gate_node,
+    agent_node,
+    knowledge_node,
     prefilter_node,
-    resolve_sop_node,
+    triage_node,
     validate_node,
 )
 from freight_agent.application.graph.state import RunState
 from freight_agent.domain.rules import default_rules
-from freight_agent.domain.validation import Rule, ValidationConfig
-from freight_agent.ports.sop import SopRepository
+from freight_agent.domain.validation import Rule
+from freight_agent.ports.knowledge import SopIndex
 
 PREFILTER = "prefilter"
-GATE = "gate"
-RESOLVE_SOP = "resolve_sop"
-DECIDE = "decide"
+# The triage step keeps the node id it had as the gate: LangSmith traces name each node
+# run by it (step -> agent_run -> gate -> the gate model call), and traces recorded
+# before wave 3 stay comparable.
+TRIAGE = "gate"
+KNOWLEDGE = "knowledge"
+AGENT = "agent"
 VALIDATE = "validate"
 
 
@@ -74,10 +78,12 @@ class _Builder(Protocol):
 
 @dataclass(frozen=True)
 class GraphDeps:
+    """`rules` are the validator's; the agent's staging uses `agent.rules` (the same by
+    default), and the validate node logs any action the two judge differently."""
+
     gate: Gate
-    decider: Decider
-    sop: SopRepository
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    agent: Agent
+    knowledge: SopIndex
     rules: Sequence[Rule] = field(default_factory=default_rules)
 
 
@@ -110,14 +116,15 @@ class RunGraph:
 def build_graph(deps: GraphDeps) -> RunGraph:
     builder = cast(_Builder, StateGraph(RunState))
     builder.add_node(PREFILTER, prefilter_node())
-    builder.add_node(GATE, gate_node(deps.gate))
-    builder.add_node(RESOLVE_SOP, resolve_sop_node(deps.sop))
-    builder.add_node(DECIDE, decide_node(deps.decider))
-    builder.add_node(VALIDATE, validate_node(deps.rules, deps.validation))
+    builder.add_node(TRIAGE, triage_node(deps.gate))
+    builder.add_node(KNOWLEDGE, knowledge_node(deps.knowledge))
+    builder.add_node(AGENT, agent_node(deps.agent))
+    builder.add_node(VALIDATE, validate_node(deps.rules))
     builder.add_edge(START, PREFILTER)
-    for node, after in ((PREFILTER, GATE), (GATE, RESOLVE_SOP), (RESOLVE_SOP, DECIDE)):
+    for node, after in ((PREFILTER, TRIAGE), (TRIAGE, KNOWLEDGE)):
         builder.add_conditional_edges(node, _unless_decided(after), {after: after, END: END})
-    builder.add_edge(DECIDE, VALIDATE)
+    builder.add_edge(KNOWLEDGE, AGENT)
+    builder.add_edge(AGENT, VALIDATE)
     builder.add_edge(VALIDATE, END)
     return RunGraph(builder.compile())
 

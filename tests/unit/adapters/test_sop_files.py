@@ -7,7 +7,6 @@ from freight_agent.adapters.sop.files import FileSopRepository, SopFormatError
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
-from freight_agent.ports.sop import SopRepository
 
 FIXTURES = Path(__file__).parent / "sop_fixtures"
 
@@ -30,7 +29,7 @@ def _by_source(sections: list[SopSection]) -> dict[str, SopSection]:
 
 @pytest.mark.unit
 async def test_round_trip_gives_each_file_its_layer_client_and_load_type() -> None:
-    repo: SopRepository = FileSopRepository(FIXTURES)
+    repo = FileSopRepository(FIXTURES)
 
     sections = await repo.sections_for_client("keystone")
 

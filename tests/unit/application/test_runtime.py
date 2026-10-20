@@ -4,6 +4,8 @@ Every test drives `AgentRuntime` the way the eval runner and the API do, on the
 memory store, a virtual clock, a scripted model and recording gateways.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from freight_agent.application.contracts import IngestResult
@@ -59,7 +61,7 @@ async def test_assignment_sequence_for_client_a(load: Load) -> None:
 
     assert [(r.event_id, r.status) for r in runs] == [("risk:p1", RunStatus.ACTED)]
     run = runs[0]
-    assert run.gate is not None and run.gate.intent is Intent.DELAY_RISK_HIGH
+    assert run.gate is not None and run.gate.intent == Intent.DELAY_RISK_HIGH
     assert "delay_risk_high" in run.sop_section_ids
     assert (run.started_at, run.finished_at) == (at(7, 1), at(7, 1))
     assert [d.payload["contact_id"] for d in world.sent("sms")] == [DRIVER]
@@ -92,7 +94,7 @@ async def test_assignment_sequence_for_client_a(load: Load) -> None:
     runs = await world.tick(at(7, 31))
 
     assert [(r.event_id, r.status) for r in runs] == [("timer:timer_1", RunStatus.ACTED)]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.ETA_FOLLOW_UP_DUE
     assert len(world.sent("sms")) == 3
     obligation = await world.eta_request()
     assert obligation is not None and obligation.attempts == 2
@@ -145,7 +147,7 @@ async def test_acknowledgement_after_the_eta_request_is_a_noop(load: Load) -> No
     runs = await world.tick(at(7, 6))
 
     assert [r.status for r in runs] == [RunStatus.NOOP]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.ACKNOWLEDGEMENT
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.ACKNOWLEDGEMENT
     assert len(runs[0].usage) == 1 and runs[0].usage[0].role == "gate"
     assert runs[0].plan is None
     assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)
@@ -344,7 +346,7 @@ async def test_a_downgrade_needs_two_pings_and_a_duplicate_does_not_count(load: 
     runs = await world.tick(at(7, 16))
 
     assert [r.status for r in runs] == [RunStatus.ACTED]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.DELAY_RISK_LOW
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.DELAY_RISK_LOW
     assert runs[0].sop_section_ids == ("communication_rules", "delay_risk_cleared", "escalation")
     obligation = await world.eta_request()
     assert obligation is not None and obligation.status is ObligationStatus.CANCELLED
@@ -507,3 +509,87 @@ async def test_every_run_that_reads_the_sop_records_its_version(load: Load) -> N
 
     assert run.sop_version == "test"
     assert "delay_risk_high" in run.sop_section_ids
+
+
+# --- documents (wave 3 seams) ----------------------------------------------------------------
+
+
+class _AnnouncingProcessor:
+    """A document processor that announces every pending document as processed, and
+    records what the store held when the tick called it."""
+
+    def __init__(self, world: World) -> None:
+        self._world = world
+        self.seen: list[tuple[int, int]] = []  # (queued events, runs) at each call
+
+    async def process_pending(self, limit: int = 10) -> list[Event]:
+        announced: list[Event] = []
+        async with self._world.store.unit_of_work() as uow:
+            self.seen.append((await uow.queue.size(), len(await uow.runs.list_for_load(LOAD_ID))))
+            for document in await uow.documents.list_pending(limit):
+                await uow.documents.save(document.model_copy(update={"status": "processed"}))
+                event = Event(
+                    event_id=f"doc:{document.document_id}",
+                    load_id=document.load_id,
+                    type=EventType.DOCUMENT_PROCESSED,
+                    occurred_at=self._world.clock.now(),
+                    channel=Channel.SYSTEM,
+                    data={"document_id": document.document_id, "status": "processed"},
+                )
+                if await uow.events.append(event):
+                    await uow.queue.enqueue(event)
+                    announced.append(event)
+            await uow.commit()
+        return announced
+
+
+BOL = Attachment(attachment_id="a1", filename="bol.pdf", content_type="application/pdf", ref="r1")
+
+
+async def test_each_attachment_of_a_new_message_is_a_pending_document(load: Load) -> None:
+    world = await World(load).start()
+
+    await world.message(at(7, 12), "here is the BOL", attachments=(BOL,), message_id="m1")
+    await world.message(at(7, 12), "here is the BOL", attachments=(BOL,), message_id="m1")
+
+    async with world.store.unit_of_work() as uow:
+        (document,) = await uow.documents.list_for_load(LOAD_ID)
+    assert document.status == "pending"
+    assert (document.attachment_id, document.blob_ref, document.filename) == ("a1", "r1", "bol.pdf")
+    assert (document.broker_id, document.received_at) == (load.broker_id, at(7, 12))
+
+
+async def test_a_tick_reads_documents_before_the_queue_and_runs_what_they_announce(
+    load: Load,
+) -> None:
+    world = await World(load).start()
+    processor = _AnnouncingProcessor(world)
+    world.deps = replace(world.deps, documents=processor)
+    world.restart()
+    await world.message(at(7, 12), "here is the BOL", attachments=(BOL,), message_id="m1")
+    world.model.push(GATE, decision(Intent.DOCUMENT))
+    world.model.push(DECIDE, plan(), plan())
+
+    runs = await world.tick(at(7, 13))
+
+    assert processor.seen == [(1, 0)]  # the message is queued and nothing has run yet
+    assert [r.event_id for r in runs] == ["m1", "doc:doc_1"]
+    assert runs[1].gate is not None and runs[1].gate.intent == Intent.DOCUMENT_PROCESSED
+    assert "documents" in runs[1].sop_section_ids
+
+
+async def test_a_run_records_the_broker_config_it_followed(load: Load) -> None:
+    world = await World(load).start()
+    await world.ping(at(7, 0), DelayRisk.HIGH)
+    world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
+
+    (run,) = await world.tick(at(7, 1))
+
+    assert (run.broker_id, run.broker_config_version) == ("standard", 1)
+    # The triage intent; a scripted plan in the answer stages nothing and searches nothing.
+    assert (run.intent, run.trajectory, run.sections_searched, run.rejections) == (
+        Intent.DELAY_RISK_HIGH,
+        (),
+        (),
+        0,
+    )

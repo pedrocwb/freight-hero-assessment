@@ -1,123 +1,89 @@
-"""Read-only tools for the decide model.
+"""The words of the agent's tools: their names and the descriptions the model reads.
 
-Tools never act; actions are proposed in the plan. They let the model read an
-SOP section it was not shown in full, or an attachment's details. A bad
-argument is an answer, not an exception: the tool returns the valid ids so a
-small model can recover in its next tool round instead of failing the run.
+Owner: card W3-AGT. The runnable tools are built in `application/agent_tools.py`; the
+text lives here, next to `application/prompts.py`, because both shape what the model
+reads: `evalkit.metadata.prompts_sha256` hashes the two modules, so a changed tool
+description shows in an eval run's metadata like a changed prompt.
 """
 
-import json
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping
 
-from freight_agent.application.context import RunContext
-from freight_agent.domain.events import Attachment
-from freight_agent.domain.sop import ResolvedSection
-from freight_agent.ports.llm import ToolSpec
-
+SEARCH_SOP = "search_sop"
 READ_SOP_SECTION = "read_sop_section"
+GET_HISTORY = "get_history"
+GET_LEDGER = "get_ledger"
+GET_LOAD = "get_load"
 READ_DOCUMENT = "read_document"
+LIST_DOCUMENT_REQUIREMENTS = "list_document_requirements"
+READ_TOOLS = (
+    SEARCH_SOP,
+    READ_SOP_SECTION,
+    GET_HISTORY,
+    GET_LEDGER,
+    GET_LOAD,
+    READ_DOCUMENT,
+    LIST_DOCUMENT_REQUIREMENTS,
+)
 
+READ_DESCRIPTIONS: Mapping[str, str] = {
+    SEARCH_SOP: (
+        "Find SOP sections of this load's broker by their words, best first. Use it when the "
+        "sections shown do not cover the event."
+    ),
+    READ_SOP_SECTION: (
+        "Read the full text of one SOP section from the catalog of other SOP sections. Use it "
+        "only when this event needs a section that is not shown in full."
+    ),
+    GET_HISTORY: (
+        "The load's events further back than the transcript shows, oldest first, in the "
+        "transcript's format."
+    ),
+    GET_LEDGER: (
+        "Every obligation of the load, open and closed, and every pending timer. The prompt "
+        "shows the open ones and the last closed ones."
+    ),
+    GET_LOAD: "The load data (stops, appointments, instructions) and the contacts.",
+    READ_DOCUMENT: (
+        "Read a document of the load (BOL, POD, rate confirmation, receipt) by its document id "
+        "or its attachment id: its type, status, values and checks against the load."
+    ),
+    LIST_DOCUMENT_REQUIREMENTS: (
+        "The documents this broker requires at each stage, and whether this load has them or "
+        "is waiting for them."
+    ),
+}
 
-def decide_tools(
-    ctx: RunContext, visible_sections: Sequence[ResolvedSection]
-) -> tuple[ToolSpec, ...]:
-    """`read_document` is offered only when there is an attachment to read, so a small
-    model is not tempted to call a tool that cannot help."""
-    tools = [read_sop_section_tool(visible_sections)]
-    attachments = attachments_in_view(ctx)
-    if attachments:
-        tools.append(read_document_tool(attachments))
-    return tuple(tools)
+ACTION_DESCRIPTIONS: Mapping[str, str] = {
+    "send_sms": "Stage an SMS to a contact that has the sms channel.",
+    "send_email": "Stage an email in the load's main thread.",
+    "post_broker_slack": "Stage a message in the broker's Slack channel.",
+    "write_tms_note": "Stage a note in the broker's TMS.",
+    "create_hero_task": "Stage a task for the Hero team (phone calls, what you cannot do).",
+    "post_internal_slack": "Stage an alert to the Hero team.",
+    "update_stage": "Stage a move of the load to another stage.",
+    "schedule_timer": "Stage a follow-up timer for an open obligation, in minutes from now.",
+    "defer_obligation": "Stage a deferral: the contact promised the answer later.",
+    "close_obligation": "Stage the closing of an open obligation.",
+    "open_obligation": "Stage the opening of an obligation, with no message sent.",
+}
+ACTION_CHECKED = (
+    "Code checks it now and answers accepted or rejected; nothing runs until you finish."
+)
 
-
-def attachments_in_view(ctx: RunContext) -> tuple[Attachment, ...]:
-    """The event's attachments first, then those of the recent events, each once."""
-    seen: dict[str, Attachment] = {}
-    for event in (ctx.event, *ctx.recent_events):
-        for attachment in event.attachments:
-            seen.setdefault(attachment.attachment_id, attachment)
-    return tuple(seen.values())
-
-
-def read_sop_section_tool(sections: Sequence[ResolvedSection]) -> ToolSpec:
-    by_id = {s.section_id: s for s in sections}
-
-    async def run(args: dict[str, Any]) -> str:
-        if not by_id:
-            return "No SOP sections are available for this load."
-        section = by_id.get(_text_arg(args, "section_id"))
-        if section is None:
-            return _unknown("section_id", args, by_id)
-        return f"# {section.section_id}: {section.title}\n\n{section.body.strip()}"
-
-    return ToolSpec(
-        name=READ_SOP_SECTION,
-        description=(
-            "Read the full text of one SOP section from the catalog of other SOP sections. "
-            "Use it only when this event needs a section that is not shown in full."
-        ),
-        parameters=_id_schema(
-            "section_id", "The id of the section, as listed in the catalog.", by_id
-        ),
-        run=run,
-    )
-
-
-def read_document_tool(attachments: Sequence[Attachment]) -> ToolSpec:
-    by_id = {a.attachment_id: a for a in attachments}
-
-    async def run(args: dict[str, Any]) -> str:
-        if not by_id:
-            return "No attachments are available on this load."
-        attachment = by_id.get(_text_arg(args, "attachment_id"))
-        if attachment is None:
-            return _unknown("attachment_id", args, by_id)
-        # Every value comes from outside (a filename is whatever the sender chose), so each
-        # is a JSON string: a newline in one cannot start a line of its own.
-        return (
-            f"attachment {_json(attachment.attachment_id)}\n"
-            f"filename: {_json(attachment.filename)}\n"
-            f"content type: {_json(attachment.content_type)}\n"
-            f"reference: {_json(attachment.ref)}\n"
-            "Content extraction is not available, so the type and the values of this document "
-            "are unknown. Do not guess them: create a Hero task to review the document, with "
-            "the attachment id and the filename."
-        )
-
-    return ToolSpec(
-        name=READ_DOCUMENT,
-        description=(
-            "Read the details of an attachment (BOL, POD, rate confirmation, receipt) "
-            "by its attachment id."
-        ),
-        parameters=_id_schema("attachment_id", "The id of the attachment.", by_id),
-        run=run,
-    )
-
-
-def _text_arg(args: dict[str, Any], name: str) -> str:
-    value = args.get(name)
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _unknown(name: str, args: dict[str, Any], valid: dict[str, Any]) -> str:
-    given = args.get(name)
-    problem = f"Unknown {name} {given!r}." if name in args else f"Missing {name}."
-    return f"{problem} Valid {name} values: {', '.join(_json(v) for v in valid)}."
-
-
-def _json(text: str) -> str:
-    return json.dumps(text, ensure_ascii=False)
-
-
-def _id_schema(name: str, description: str, valid: dict[str, Any]) -> dict[str, Any]:
-    prop: dict[str, Any] = {"type": "string", "description": description}
-    if valid:
-        prop["enum"] = list(valid)
-    return {
-        "type": "object",
-        "properties": {name: prop},
-        "required": [name],
-        "additionalProperties": False,
-    }
+FIELD_DESCRIPTIONS: Mapping[str, str] = {
+    "contact_id": "The contact id, from the Contacts list.",
+    "to_contact_ids": "The contact ids of the recipients, from the Contacts list.",
+    "text": "The text, in plain words.",
+    "body": "The email body.",
+    "subject": "The email subject.",
+    "purpose": "Why the message is sent.",
+    "requests": "The obligation kind the message asks for, if it asks for one.",
+    "title": "A short instruction for the Hero.",
+    "description": "What happened, with local times, what was tried, what the Hero should do.",
+    "urgent": "True when the load is at risk and a person must act now.",
+    "stage": "The new stage.",
+    "kind": "The obligation kind.",
+    "due_in_minutes": "Minutes from now until the follow-up.",
+    "minutes": "Minutes from the message until the promised answer.",
+    "status": "How the obligation ends.",
+}

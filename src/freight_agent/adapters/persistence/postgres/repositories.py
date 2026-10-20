@@ -29,7 +29,7 @@ from freight_agent.adapters.persistence.postgres import rows
 from freight_agent.adapters.persistence.postgres.connection import Session
 from freight_agent.domain.events import Event
 from freight_agent.domain.load import Load
-from freight_agent.domain.obligations import Obligation, ObligationKind, ObligationStatus
+from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
@@ -146,13 +146,13 @@ class PostgresObligationRepository:
         )
         return None if row is None else rows.obligation_from(row)
 
-    async def get_open(self, load_id: str, kind: ObligationKind) -> Obligation | None:
+    async def get_open(self, load_id: str, kind: str) -> Obligation | None:
         row = await self._s.one(
             f"SELECT {_OBLIGATION} FROM obligations"
             " WHERE load_id = %s AND kind = %s AND status = %s"
             " ORDER BY opened_at, id_order(obligation_id), obligation_id"
             " LIMIT 1 FOR NO KEY UPDATE",
-            (load_id, kind.value, ObligationStatus.OPEN.value),
+            (load_id, kind, ObligationStatus.OPEN.value),
         )
         return None if row is None else rows.obligation_from(row)
 

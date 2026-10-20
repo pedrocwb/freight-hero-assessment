@@ -2,6 +2,10 @@
 
 Transactions are serialized with a lock and rolled back by restoring a snapshot,
 so a failed run leaves no partial state, exactly like a database transaction.
+
+The wave 3 repositories (brokers, SOP store, documents) live in their own modules
+(`brokers.py`, `sops.py`, `documents.py`, one per card) over the fields of `_State`
+declared here once: their cards change those modules, never this file.
 """
 
 import asyncio
@@ -12,13 +16,22 @@ from datetime import datetime, timedelta
 from types import TracebackType
 from typing import Self
 
+from freight_agent.adapters.persistence.memory.brokers import MemoryBrokerRepository
+from freight_agent.adapters.persistence.memory.documents import MemoryDocumentRepository
+from freight_agent.adapters.persistence.memory.sops import MemorySopStore
+from freight_agent.domain.broker import Broker
+from freight_agent.domain.documents import Document
 from freight_agent.domain.events import Event
 from freight_agent.domain.load import Load
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
+from freight_agent.domain.sop import SopDocument, SopDraft, SopVersion
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.ports.brokers import BrokerRepository
+from freight_agent.ports.documents import DocumentRepository
+from freight_agent.ports.knowledge import SopStore
 from freight_agent.ports.repositories import (
     EventLog,
     EventQueue,
@@ -55,6 +68,13 @@ class _State:
     claimed_at: dict[str, datetime] = field(default_factory=dict)  # in-flight event_id -> claim
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
+    # Wave 3 (`brokers.py`, `sops.py`, `documents.py`).
+    brokers: dict[str, Broker] = field(default_factory=dict)  # current version
+    broker_versions: dict[tuple[str, int], Broker] = field(default_factory=dict)
+    sop_documents: dict[str, SopDocument] = field(default_factory=dict)
+    sop_drafts: dict[str | None, SopDraft] = field(default_factory=dict)  # None: standard
+    sop_versions: dict[str | None, list[SopVersion]] = field(default_factory=dict)
+    documents: dict[str, Document] = field(default_factory=dict)
 
 
 class MemoryStore:
@@ -117,12 +137,12 @@ class MemoryObligationRepository:
     async def get(self, obligation_id: str) -> Obligation | None:
         return self._s.state.obligations.get(obligation_id)
 
-    async def get_open(self, load_id: str, kind: ObligationKind) -> Obligation | None:
+    async def get_open(self, load_id: str, kind: str) -> Obligation | None:
         return next(
             (
                 o
                 for o in self._s.state.obligations.values()
-                if o.load_id == load_id and o.kind is kind and o.is_open
+                if o.load_id == load_id and o.kind == kind and o.is_open
             ),
             None,
         )
@@ -292,6 +312,9 @@ class MemoryUnitOfWork:
         self.outbox: OutboxRepository = MemoryOutboxRepository(store)
         self.runs: RunRepository = MemoryRunRepository(store)
         self.queue: EventQueue = MemoryEventQueue(store)
+        self.brokers: BrokerRepository = MemoryBrokerRepository(store)
+        self.sops: SopStore = MemorySopStore(store)
+        self.documents: DocumentRepository = MemoryDocumentRepository(store)
 
     async def __aenter__(self) -> Self:
         await self._store.lock.acquire()

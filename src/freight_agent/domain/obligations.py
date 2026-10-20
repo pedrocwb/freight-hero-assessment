@@ -12,6 +12,9 @@ from freight_agent.domain.errors import InvariantViolation
 
 
 class ObligationKind(StrEnum):
+    """The kinds of the standard catalog, as constants. A kind is a string id from the
+    broker's catalog (`domain.broker.ObligationDef.kind`): brokers add their own."""
+
     ETA_REQUEST = "eta_request"
 
 
@@ -36,7 +39,7 @@ class DeferralPolicy(DomainModel):
 class Obligation(DomainModel):
     obligation_id: str
     load_id: str
-    kind: ObligationKind
+    kind: str
     status: ObligationStatus = ObligationStatus.OPEN
     attempts: int = 0
     opened_at: datetime
@@ -56,7 +59,7 @@ class Obligation(DomainModel):
         *,
         obligation_id: str,
         load_id: str,
-        kind: ObligationKind,
+        kind: str,
         at: datetime,
         first_attempt: bool,
         sop_version: str | None = None,

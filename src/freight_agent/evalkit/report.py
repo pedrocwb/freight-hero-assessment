@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError, computed_field
 
+from freight_agent.evalkit.graders import rejections, sections_read, tool_calls
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.results import Failure, ScenarioResult
 from freight_agent.evalkit.suite import (
@@ -181,6 +182,7 @@ def render_markdown(result: SuiteResult, comparison: Comparison | None = None) -
         _scenario_table(result),
         _group_table(result),
         _failures(result),
+        *_agent_loop(result),
         _cost(result),
     ]
     if comparison is not None:
@@ -289,12 +291,52 @@ def _failure_md(item: Failure | str) -> str:
     return f"{where}`{item.check}`: {_flat(item.message)}"
 
 
+def _agent_loop(result: SuiteResult) -> list[str]:
+    """Per scenario, what the agent loop did over its trials: the judge's scores, the tool
+    calls, the refused ones and the sections read. Left out when no trial has any."""
+    rows: list[str] = []
+    for s in result.scenarios:
+        runs = [run for t in s.trials for o in t.observations for run in o.runs]
+        calls = tool_calls(runs)
+        scores = [
+            o.judge.verdict.score
+            for t in s.trials
+            for o in t.observations
+            if o.judge is not None and o.judge.verdict is not None
+        ]
+        if not calls and not scores:
+            continue
+        judge = f"{min(scores):.2f} min, {sum(scores) / len(scores):.2f} mean" if scores else "-"
+        cells = (
+            s.scenario_id,
+            judge,
+            str(len(calls)),
+            str(rejections(runs)),
+            ", ".join(sections_read(runs)) or "-",
+        )
+        rows.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+    if not rows:
+        return []
+    head = [
+        "## Agent loop",
+        "",
+        "Over every trial: the judge's scores of the judged steps, the agent's tool calls, "
+        "the calls a rule refused and the SOP sections it searched up or read.",
+        "",
+        "| Scenario | Judge | Tool calls | Refused | Sections read |",
+        "|---|---|---|---|---|",
+    ]
+    return ["\n".join(head + rows)]
+
+
 def _cost(result: SuiteResult) -> str:
     cap = "none" if result.cost_cap_usd is None else f"${result.cost_cap_usd:.2f}"
+    judge = sum(t.judge_cost_usd for s in result.scenarios for t in s.trials)
+    judged = f" The judge's share: ${judge:.4f}." if judge else ""
     return (
         "## Cost\n\n"
         f"Total: ${result.cost_usd:.4f} over {len(result.scenarios)} scenarios, "
-        f"{result.tokens} tokens, {result.model_calls} model calls. Cost cap: {cap}."
+        f"{result.tokens} tokens, {result.model_calls} model calls. Cost cap: {cap}.{judged}"
     )
 
 
@@ -324,6 +366,7 @@ def _metadata(meta: RunMetadata) -> str:
         ("Run at (UTC)", meta.created_at.isoformat()),
         ("Git commit", f"{meta.git_sha or 'unknown'}{dirty}"),
         ("SOP version", meta.sop_version or "unknown"),
+        ("Broker", meta.broker or "each load fixture's own"),
         ("Mode", meta.mode),
         ("Model set", meta.model_set),
         ("Models", models or "unknown"),

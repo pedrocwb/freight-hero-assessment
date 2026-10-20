@@ -1,7 +1,9 @@
-"""The `UnitOfWork` implementations the contract suite runs on.
+"""The `UnitOfWork` implementations the contract suites run on.
 
-The suite in `test_unit_of_work.py` runs every test once per entry of `UOW_FACTORIES`,
-so putting an implementation through the whole contract is one line in that registry.
+Every contract suite of this folder (`test_unit_of_work.py`, and the wave 3 suites of the
+broker, SOP store and document repositories) runs each test once per entry of
+`UOW_FACTORIES`, through the `uow_factory` fixture of `conftest.py`, so putting an
+implementation through every contract is one line in that registry.
 """
 
 import os
@@ -14,6 +16,10 @@ from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.adapters.persistence.postgres.store import open_store
 from freight_agent.ports.repositories import UnitOfWorkFactory
+
+# How many failed attempts make a queued event a dead letter, in every contract store:
+# the queue tests count them.
+MAX_QUEUE_ATTEMPTS = 3
 
 
 class OpenStore(Protocol):

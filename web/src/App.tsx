@@ -5,6 +5,7 @@ import { api, MOCK_MODE } from "./api";
 import { ClockRail } from "./components/ClockRail";
 import { Toasts } from "./components/ui";
 import { useResource } from "./hooks/useResource";
+import { Brokers } from "./screens/Brokers";
 import { BrokerSlack } from "./screens/BrokerSlack";
 import { ControlRoom } from "./screens/ControlRoom";
 import { DriverPhone } from "./screens/DriverPhone";
@@ -13,11 +14,23 @@ import { Evals } from "./screens/Evals";
 import { HealthScreen } from "./screens/Health";
 import { HeroConsole } from "./screens/HeroConsole";
 import { Inspector } from "./screens/Inspector";
+import { SopStudio } from "./screens/SopStudio";
 import { SopViewer } from "./screens/SopViewer";
 import { SimProvider, useSim } from "./state/sim";
 import { ToastProvider } from "./state/toasts";
 
-type ScreenId = "control" | "driver" | "email" | "slack" | "hero" | "inspector" | "sops" | "evals" | "health";
+type ScreenId =
+  | "control"
+  | "driver"
+  | "email"
+  | "slack"
+  | "hero"
+  | "inspector"
+  | "sops"
+  | "evals"
+  | "health"
+  | "brokers"
+  | "studio";
 
 interface ScreenDef {
   id: ScreenId;
@@ -35,6 +48,8 @@ const SCREENS: ScreenDef[] = [
   { id: "sops", label: "SOP viewer", group: "Look inside" },
   { id: "evals", label: "Evals", group: "Look inside" },
   { id: "health", label: "Health", group: "Look inside" },
+  { id: "brokers", label: "Brokers", group: "Onboard a broker" },
+  { id: "studio", label: "SOP studio", group: "Onboard a broker" },
 ];
 
 function screenFromHash(): ScreenId {
@@ -184,6 +199,8 @@ function Shell() {
         {screen === "sops" && <SopViewer />}
         {screen === "evals" && <Evals />}
         {screen === "health" && <HealthScreen resource={health} />}
+        {screen === "brokers" && <Brokers />}
+        {screen === "studio" && <SopStudio />}
       </main>
       <Toasts />
     </div>

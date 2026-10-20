@@ -18,8 +18,14 @@ pnpm dev            # http://localhost:5173, /api is proxied to http://localhost
 ```
 
 Without the backend, `pnpm dev:mock` runs the page on an in-memory mock (`VITE_MOCK=1`)
-seeded with the assignment's story (load 481207, steps A1 to A4) and a Keystone load.
-The mock records messages and pings but runs no agent; the header says "Mock data".
+seeded with the assignment's story (load 481207, steps A1 to A4), a Keystone load, and an
+Acme load run by the agent loop (tool calls accepted and rejected, a POD read by the
+document pipeline). Its brokers are the standard one, Northline, Keystone and Acme,
+onboarded as in the plan: created from the standard broker, a Markdown SOP published as
+config version 2, and a draft compiled from `acme_sop.pdf` waiting for review (a proposed
+`detention_request` intent, a POD required at delivery within 120 minutes). Accepting it
+and publishing works on the mock, as do rollouts, uploads and broker eval runs. The mock
+records messages and pings but runs no agent; the header says "Mock data".
 
 | Command | What it does |
 |---|---|
@@ -35,14 +41,16 @@ The mock records messages and pings but runs no agent; the header says "Mock dat
 | Screen | What you do there |
 |---|---|
 | Control room | Pick or create a load (fixture JSON, editable), send a low, medium or high ping, set the inbound latency, see the load card, the TMS notes and every load |
-| Driver phone | The SMS thread; you write as the load's driver |
-| Main email thread | The thread with the dispatcher, the broker and the agent; write as either contact |
+| Driver phone | The SMS thread; you write as the load's driver, and can attach a file (a POD or BOL photo) |
+| Main email thread | The thread with the dispatcher, the broker and the agent; write as either contact, with an attachment if you like |
 | Broker Slack | The broker's channel with the agent's alerts; write as the broker |
 | Hero console | Tasks across loads, urgent first; filter open, done or all; complete with a note |
-| Agent inspector | Each run: trigger, status, gate intent and reason, SOP sections, plan, validator drops, skip or escalation reason, tokens, cost, latency; the ledger, the timers and the spend per load against $1 |
-| SOP viewer | Sections that apply for a client, load types, intent and stage, the catalog, the SOP version |
-| Evals | Scenarios with tags; run the suite or one scenario in scripted or replay mode, k trials; results with pass^k, failures and cost |
+| Agent inspector | Each run: trigger, status, intent, the broker and config version it ran on, gate intent and reason, SOP sections, the trajectory (every tool call with its arguments, result, accepted or rejected, cost), rejections and sections searched, the staged plan, validator drops, tokens, cost, latency; the ledger, the load's documents with their checks, the timers and the spend per load against $1 |
+| SOP viewer | Sections that apply for a broker, load types, intent (from the broker's catalog) and stage, the catalog, the SOP version, and the agent's SOP search |
+| Evals | Scenarios with tags; run the suite or one scenario in scripted or replay mode, k trials, or a whole suite on one broker (also live, with a cost cap); results with pass^k, failures, cost and the LangSmith link of a live run |
 | Health | Status and reasons, queue age against the 5-minute SLA, run p95, spend per load, outbox, settings (secrets only as set or unset) |
+| Brokers | Each broker's profile: intents (system ones read-only), obligation types, document types and requirements, limits and the agent's budget (`max_steps: 0` is the single-plan mode); create one as a copy of the standard broker; save as a new config version; the rollout (share of loads on the current version, rollback to 0%) and the version list |
+| SOP studio | Upload a broker's SOP (PDF or Markdown), review the compiled draft (sections with their intents, stages, mode and source pages; proposed intents with evidence, document requirements and obligations), see the lint, publish (optionally as a canary), list the published versions, run the broker's eval suite |
 
 The clock sits beside every screen: +1, +5 and +30 minutes, "To next timer" (advances to
 `next_timer_due_at`), tick and reset. Every time is shown in the current stop's timezone
@@ -51,12 +59,17 @@ with its abbreviation, for example "07:31 PDT".
 ## How it is built
 
 - `src/api.ts`: the typed client. Shapes mirror the API contract and the Python models it
-  serializes. `createApi(fetch)` takes the fetch function, which the tests and the mock use.
+  serializes (the wave 3 ones `api/schemas.py`: brokers, knowledge, documents, broker
+  evals; each names the backend card that serves it). `createApi(fetch)` takes the fetch
+  function, which the tests and the mock use. Intents and brokers are data from the API
+  (`GET /api/brokers`, `GET /api/brokers/{id}`); only the stages are fixed in the page.
 - `src/hooks/useEventStream.ts`: `EventSource` on `/api/stream` (`run`, `outbox`, `clock`,
   `load`). While the stream is down, every panel refreshes every 5 seconds instead.
 - `src/lib/bus.ts` and `src/hooks/useResource.ts`: panels subscribe to refresh topics;
   stream events, polling and the page's own writes publish them, coalesced per burst.
-- `src/lib/`: pure helpers (time formatting, conversation merge, eval summary), unit tested.
+- `src/lib/`: pure helpers (time formatting, conversation merge, eval summary, the
+  trajectory table, broker catalog edits and checks, the SOP draft's pre-publish lint),
+  unit tested.
 - `src/screens/`: one file per screen. `src/mocks/`: the mock backend, loaded only when
   `VITE_MOCK=1`, so it is not in the normal build.
 

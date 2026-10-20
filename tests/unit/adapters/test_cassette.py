@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import Usage
 from freight_agent.ports.llm import (
+    ImageInput,
     LlmError,
     LlmRequest,
     LlmResponse,
@@ -27,6 +29,7 @@ from freight_agent.ports.llm import (
 )
 
 MODEL_ID = "openai/gpt-4o-mini"
+PAGE = ImageInput(data=b"a scanned page", media_type="image/png")
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
 USAGE = Usage(role="gate", model=MODEL_ID, input_tokens=120, output_tokens=14, cost_usd=0.0001)
 TRANSCRIPT: tuple[dict[str, Any], ...] = (
@@ -114,7 +117,7 @@ def test_key_ignores_the_timeout_and_the_tool_implementation() -> None:
 @pytest.mark.parametrize(
     "change",
     [
-        {"role": ModelRole.DECIDE},
+        {"role": ModelRole.AGENT},
         {"system": "You classify driver messages. Be brief."},
         {"user": "Driver: ok thanks!"},
         {"max_tool_rounds": 2},
@@ -123,6 +126,8 @@ def test_key_ignores_the_timeout_and_the_tool_implementation() -> None:
         {"tools": (_tool(name="read_document"),)},
         {"tools": (_tool(description="Read a section."),)},
         {"tools": (_tool(parameters={"type": "object", "properties": {}}),)},
+        {"images": (PAGE,)},
+        {"max_cost_usd": 0.05},
     ],
     ids=lambda change: next(iter(change)),
 )
@@ -130,6 +135,91 @@ def test_any_request_change_changes_the_key(change: dict[str, Any]) -> None:
     base = cassette_key(MODEL_ID, _request(), GateDecision)
 
     assert cassette_key(MODEL_ID, _request(**change), GateDecision) != base
+
+
+@pytest.mark.unit
+def test_images_are_keyed_by_their_bytes_and_type_in_order() -> None:
+    other = ImageInput(data=b"another page", media_type="image/png")
+    jpeg = replace(PAGE, media_type="image/jpeg")
+
+    def key(*images: ImageInput) -> str:
+        return cassette_key(MODEL_ID, _request(images=images), GateDecision)
+
+    assert key(PAGE) == key(ImageInput(data=PAGE.data, media_type=PAGE.media_type))
+    assert len({key(PAGE), key(other), key(jpeg), key(PAGE, other), key(other, PAGE)}) == 5
+
+
+@pytest.mark.unit
+def test_cost_caps_are_part_of_the_key() -> None:
+    def key(cap: float) -> str:
+        return cassette_key(MODEL_ID, _request(max_cost_usd=cap), GateDecision)
+
+    assert key(0.05) == key(0.05) != key(0.01)
+
+
+@pytest.mark.unit
+def test_a_request_without_images_or_cap_keeps_its_pre_wave_3_key() -> None:
+    """The key material grows only when a request has images or a cap, so a gate call
+    recorded before wave 3 still replays (its prompt is rendered the same)."""
+    request = _request()
+    material = {
+        "model_id": MODEL_ID,
+        "role": request.role.value,
+        "system": request.system,
+        "user": request.user,
+        "tools": [
+            {"name": t.name, "description": t.description, "parameters": t.parameters}
+            for t in request.tools
+        ],
+        "schema": {"name": "GateDecision", "json_schema": GateDecision.model_json_schema()},
+        "max_tool_rounds": request.max_tool_rounds,
+    }
+    text = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    assert (
+        cassette_key(MODEL_ID, request, GateDecision) == hashlib.sha256(text.encode()).hexdigest()
+    )
+
+
+@pytest.mark.unit
+async def test_the_summary_names_the_image_hashes_and_the_cap_never_the_bytes(
+    tmp_path: Path,
+) -> None:
+    request = _request(images=(PAGE,), max_cost_usd=0.05)
+    model = CassetteModel(tmp_path, MODEL_ID, "record", inner=_recorder())
+    await model.generate(request, GateDecision)
+
+    text = model.path_for(request, GateDecision).read_text(encoding="utf-8")
+    summary = json.loads(text)["request"]
+
+    assert summary["images"] == [f"image/png:{hashlib.sha256(PAGE.data).hexdigest()}"]
+    assert summary["max_cost_usd"] == 0.05
+    assert "scanned page" not in text
+
+
+@pytest.mark.unit
+async def test_replay_returns_the_recorded_transcript_for_the_agent_to_fold(
+    tmp_path: Path,
+) -> None:
+    """Tools never run in replay: the agent stages its plan from the recorded tool calls."""
+    staged: tuple[dict[str, Any], ...] = (
+        {"role": "system", "content": "s"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "send_sms", "args": {"contact_id": "drv"}}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "cached_tokens": 0, "cost_usd": 1e-6},
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "send_sms", "content": "accepted"},
+    )
+    request = _request(tools=(_tool(name="send_sms"),), max_tool_rounds=8, max_cost_usd=0.05)
+    await CassetteModel(tmp_path, MODEL_ID, "record", inner=_recorder(staged)).generate(
+        request, GateDecision
+    )
+
+    replayed = await CassetteModel(tmp_path, MODEL_ID, "replay").generate(request, GateDecision)
+
+    assert replayed.transcript == staged
 
 
 @pytest.mark.unit
@@ -296,7 +386,7 @@ def _doctor(document: dict[str, Any], field: str, value: Any) -> Any:
         ("<root>", ["not", "an", "object"], "not a JSON object"),
         ("version", 99, "format version 99"),
         ("key", "0" * 64, "holds key"),
-        ("parsed", {"intent": "not_an_intent", "act": False, "reason": "x"}, "parsed output"),
+        ("parsed", {"intent": 42, "act": False, "reason": "x"}, "parsed output"),
         ("usage", {"role": "gate"}, "bad usage"),
         ("transcript", "not a list", "transcript"),
         ("transcript", ["not an object"], "transcript"),

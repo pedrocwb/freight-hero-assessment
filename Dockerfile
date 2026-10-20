@@ -49,7 +49,10 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
-# What the app reads at run time, at the Settings defaults (relative to /app).
+# What the app reads at run time, at the Settings defaults (relative to /app): the SOP
+# tree (`agent sop import sops/` seeds a database from it), the scenarios, their fixtures
+# (load metadata, the Acme SOP, the POD and BOL PDFs) and cassettes, the model sets, the
+# migrations and the built UI.
 COPY sops ./sops
 COPY evals ./evals
 COPY config ./config
@@ -57,15 +60,17 @@ COPY migrations ./migrations
 COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
-# them; it may only write eval results (`agent eval run`).
+# them; it may only write eval results (`agent eval run`) and blobs: the uploaded
+# attachments and SOP files (BLOBS_DIR, a volume in docker-compose.yml).
 RUN useradd --system --user-group --no-log-init --create-home --uid 10001 app \
-    && mkdir -p evals/results \
-    && chown app:app evals/results
+    && mkdir -p evals/results blobs \
+    && chown app:app evals/results blobs
 USER app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     LLM_MODE=replay \
-    WEB_DIST=/app/web/dist
+    WEB_DIST=/app/web/dist \
+    BLOBS_DIR=/app/blobs
 
 EXPOSE 8000
 

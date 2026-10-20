@@ -23,24 +23,20 @@ from freight_agent.domain.actions import (
     CloseObligation,
     CreateHeroTask,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
     PostInternalSlack,
-    Purpose,
     ScheduleTimer,
     SendEmail,
     SendSms,
     UpdateStage,
     WriteTmsNote,
 )
+from freight_agent.domain.documents import DocumentStatus
 from freight_agent.domain.errors import InvariantViolation
 from freight_agent.domain.events import Direction, Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
-from freight_agent.domain.obligations import (
-    DeferralPolicy,
-    Obligation,
-    ObligationKind,
-    ObligationStatus,
-)
+from freight_agent.domain.obligations import DeferralPolicy, Obligation, ObligationStatus
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.timers import Timer, TimerStatus, follow_up_due_at, later
 from freight_agent.ports.clock import Clock, IdGenerator
@@ -66,16 +62,19 @@ class ExecutionResult:
 
 
 class Executor:
-    def __init__(self, clock: Clock, ids: IdGenerator, deferral: DeferralPolicy) -> None:
+    """Applies a run's approved actions. The deferral policy and the document requirements
+    are the run's broker's (`ctx.broker`)."""
+
+    def __init__(self, clock: Clock, ids: IdGenerator) -> None:
         self._clock = clock
         self._ids = ids
-        self._deferral = deferral
 
     async def apply(
         self, uow: UnitOfWork, *, run_id: str, ctx: RunContext, actions: Sequence[Action]
     ) -> ExecutionResult:
+        policy = ctx.broker.limits.validation.deferral
         execution = _Execution(
-            uow, run_id=run_id, ctx=ctx, now=self._clock.now(), ids=self._ids, policy=self._deferral
+            uow, run_id=run_id, ctx=ctx, now=self._clock.now(), ids=self._ids, policy=policy
         )
         for index, action in enumerate(actions):
             await execution.apply(index, action)
@@ -132,7 +131,7 @@ def _message_for(action: Action, load: Load) -> _Message | None:
         case UpdateStage(stage=stage):
             body = f"Stage updated to {stage.value}"
             return _Message(OutboxKind.STAGE_UPDATE, {"stage": stage.value}, body)
-        case _:  # ScheduleTimer, DeferObligation, CloseObligation
+        case _:  # ScheduleTimer, DeferObligation, CloseObligation, OpenObligation
             return None
 
 
@@ -159,6 +158,7 @@ class _Execution:
         self._run_id = run_id
         self._event = ctx.event
         self._load = ctx.load
+        self._broker = ctx.broker
         self._now = now
         self._ids = ids
         self._policy = policy
@@ -235,10 +235,13 @@ class _Execution:
 
     async def _change_state(self, action: Action) -> None:
         match action:
-            case SendSms(purpose=Purpose.ETA_REQUEST):
-                await self._count_eta_request()
+            case SendSms(requests=str() as kind) | SendEmail(requests=str() as kind):
+                await self._count_request(kind)
+            case OpenObligation(kind=kind):
+                await self._open(kind)
             case UpdateStage(stage=stage):
                 await self._update_stage(stage)
+                await self._open_requirements(stage)
             case ScheduleTimer(kind=kind, due_in_minutes=minutes):
                 await self._schedule_timer(kind, minutes)
             case DeferObligation(kind=kind, minutes=minutes):
@@ -248,15 +251,16 @@ class _Execution:
             case _:
                 pass  # outbox only
 
-    async def _count_eta_request(self) -> None:
-        current = await self._uow.obligations.get_open(
-            self._load.load_id, ObligationKind.ETA_REQUEST
-        )
+    async def _count_request(self, kind: str) -> None:
+        """An SMS or an email that asks for `kind` (`requests`) opens its obligation
+        (attempts 1) or counts one more attempt. The validator refuses a kind outside the
+        broker's catalog and a request over the kind's attempt cap."""
+        current = await self._uow.obligations.get_open(self._load.load_id, kind)
         if current is None:
             updated = Obligation.open(
                 obligation_id=self._ids.new("obl"),
                 load_id=self._load.load_id,
-                kind=ObligationKind.ETA_REQUEST,
+                kind=kind,
                 at=self._now,
                 first_attempt=True,
             )
@@ -264,12 +268,60 @@ class _Execution:
             updated = current.record_attempt(self._now)
         await self._save_obligation(updated)
 
+    async def _open(self, kind: str) -> None:
+        """Open an obligation of `kind` with no attempt yet (a document the load owes)."""
+        if await self._uow.obligations.get_open(self._load.load_id, kind) is not None:
+            raise InvariantViolation(f"an open {kind} obligation already exists")
+        opened = Obligation.open(
+            obligation_id=self._ids.new("obl"),
+            load_id=self._load.load_id,
+            kind=kind,
+            at=self._now,
+            first_attempt=False,
+        )
+        await self._save_obligation(opened)
+
     async def _update_stage(self, stage: Stage) -> None:
         current = await self._uow.loads.get(self._load.load_id) or self._load
         self._load = current.model_copy(update={"stage": stage})
         await self._uow.loads.save(self._load)
 
-    async def _schedule_timer(self, kind: ObligationKind, minutes: int) -> None:
+    async def _open_requirements(self, stage: Stage) -> None:
+        """The documents the broker requires once the load reaches `stage` (a POD at
+        delivery): each requirement's `opens_obligation` opens with no attempt, with a
+        follow-up timer after `within_minutes` when set. Nothing opens when one is already
+        open, or when a clean processed document of that type is already in hand (the
+        document pipeline closes the obligation only once it exists)."""
+        for requirement in self._broker.requirements_at(stage):
+            kind = requirement.opens_obligation
+            if kind is None:
+                continue
+            if await self._uow.obligations.get_open(self._load.load_id, kind) is not None:
+                continue
+            if await self._has_clean_document(requirement.type_id):
+                continue
+            opened = Obligation.open(
+                obligation_id=self._ids.new("obl"),
+                load_id=self._load.load_id,
+                kind=kind,
+                at=self._now,
+                first_attempt=False,
+            )
+            await self._save_obligation(opened)
+            if requirement.within_minutes is not None:
+                due_at = follow_up_due_at(
+                    requested=later(self._now, timedelta(minutes=requirement.within_minutes)),
+                    deferred_until=None,
+                    grace=self._grace,
+                )
+                reason = f"{requirement.type_id} due within {requirement.within_minutes} min"
+                await self._replace_timer(opened, due_at, reason=reason)
+
+    async def _has_clean_document(self, type_id: str) -> bool:
+        documents = await self._uow.documents.list_for_load(self._load.load_id)
+        return any(d.type_id == type_id and d.status == DocumentStatus.PROCESSED for d in documents)
+
+    async def _schedule_timer(self, kind: str, minutes: int) -> None:
         obligation = await self._open_obligation(kind, "schedule a timer")
         due_at = follow_up_due_at(
             requested=later(self._now, timedelta(minutes=minutes)),
@@ -278,7 +330,7 @@ class _Execution:
         )
         await self._replace_timer(obligation, due_at, reason="schedule_timer")
 
-    async def _defer(self, kind: ObligationKind, minutes: int) -> None:
+    async def _defer(self, kind: str, minutes: int) -> None:
         """Count the promise from the message time; push any active timer past it."""
         obligation = await self._open_obligation(kind, "defer")
         said_at = self._event.occurred_at
@@ -291,16 +343,16 @@ class _Execution:
         due_at = follow_up_due_at(requested=active.due_at, deferred_until=until, grace=self._grace)
         await self._replace_timer(deferred, due_at, reason="defer_obligation")
 
-    async def _close(self, kind: ObligationKind, status: ObligationStatus) -> None:
+    async def _close(self, kind: str, status: ObligationStatus) -> None:
         obligation = await self._open_obligation(kind, "close")
         closed = obligation.close(status)
         await self._mark_pending_timers(obligation, TimerStatus.CANCELLED)
         await self._save_obligation(closed)
 
-    async def _open_obligation(self, kind: ObligationKind, operation: str) -> Obligation:
+    async def _open_obligation(self, kind: str, operation: str) -> Obligation:
         obligation = await self._uow.obligations.get_open(self._load.load_id, kind)
         if obligation is None:
-            raise InvariantViolation(f"no open {kind.value} obligation to {operation}")
+            raise InvariantViolation(f"no open {kind} obligation to {operation}")
         return obligation
 
     async def _active_timer(self, obligation: Obligation) -> Timer | None:

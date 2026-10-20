@@ -13,12 +13,15 @@ node_modules/
 web/dist/
 evals/results/*
 !evals/results/.gitkeep
+# Attachment and SOP file bytes of a local run (BLOBS_DIR).
+/blobs/
 *.egg-info/
 .DS_Store
 .import_linter_cache/
 .claude/worktrees/
 .claude/settings.local.json
 .pgtest/
+videos/**
 videos/**/frames/
 videos/**/out/
 videos/**/audio/

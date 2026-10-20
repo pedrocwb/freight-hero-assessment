@@ -16,6 +16,7 @@ from freight_agent.domain.actions import (
     CloseStatus,
     CreateHeroTask,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
     PostInternalSlack,
     Purpose,
@@ -28,9 +29,10 @@ from freight_agent.domain.actions import (
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import DeferralPolicy, Obligation, ObligationKind
 from freight_agent.domain.rules import (
+    AttemptCap,
     ChannelAllowed,
     DeferralWithinPolicy,
-    EtaAttemptCap,
+    KnownObligationKind,
     NoContactDetailsInText,
     NoDuplicateAction,
     ObligationExists,
@@ -296,6 +298,24 @@ def test_obligation_exists_ignores_other_actions(load: Load) -> None:
     assert check(ObligationExists(), eta_sms(), context(load)) is None
 
 
+@pytest.mark.unit
+def test_obligation_exists_allows_a_timer_after_the_plan_opened_the_obligation(
+    load: Load,
+) -> None:
+    timer = ScheduleTimer(kind="pod", due_in_minutes=120)
+
+    assert check(ObligationExists(), timer, context(load), (OpenObligation(kind="pod"),)) is None
+    dropped(ObligationExists(), timer, context(load), (OpenObligation(kind="bol"),))
+
+
+@pytest.mark.unit
+def test_obligation_exists_counts_an_sms_that_requests_the_kind(load: Load) -> None:
+    timer = ScheduleTimer(kind="pod", due_in_minutes=120)
+    ask_pod = SendSms(contact_id=DRIVER, text="Please send the POD.", requests="pod")
+
+    assert check(ObligationExists(), timer, context(load), (ask_pod,)) is None
+
+
 # --- deferral_policy ------------------------------------------------------------------
 
 
@@ -353,64 +373,164 @@ def test_deferral_policy_ignores_other_actions(load: Load) -> None:
     assert check(DeferralWithinPolicy(), timer, context(load)) is None
 
 
-# --- eta_attempt_cap ------------------------------------------------------------------
+# --- attempt_cap ----------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("obligations", [(), (eta_obligation(attempts=1),)])
-def test_eta_attempt_cap_allows_requests_below_the_cap(
+def test_attempt_cap_allows_requests_below_the_cap(
     load: Load, obligations: tuple[Obligation, ...]
 ) -> None:
     ctx = context(load, open_obligations=obligations)
 
-    assert check(EtaAttemptCap(), eta_sms(), ctx) is None
+    assert check(AttemptCap(), eta_sms(), ctx) is None
 
 
 @pytest.mark.unit
-def test_eta_attempt_cap_drops_a_request_at_the_cap(load: Load) -> None:
+def test_attempt_cap_drops_a_request_at_the_cap(load: Load) -> None:
     ctx = context(load, open_obligations=(eta_obligation(attempts=2),))
 
-    violation = dropped(EtaAttemptCap(), eta_sms(), ctx)
+    violation = dropped(AttemptCap(), eta_sms(), ctx)
 
     assert violation.severity is Severity.LOW
-    assert "2" in violation.message
+    assert violation.message == (
+        "eta_request was already requested 2 times (cap 2): its requests are used up"
+    )
 
 
 @pytest.mark.unit
-def test_eta_attempt_cap_counts_requests_approved_earlier_in_the_plan(load: Load) -> None:
+def test_attempt_cap_counts_requests_approved_earlier_in_the_plan(load: Load) -> None:
     ctx = context(load, open_obligations=(eta_obligation(attempts=1),))
 
-    dropped(EtaAttemptCap(), eta_sms("Your ETA, please?"), ctx, (eta_sms(),))
+    dropped(AttemptCap(), eta_sms("Your ETA, please?"), ctx, (eta_sms(),))
 
 
 @pytest.mark.unit
-def test_eta_attempt_cap_starts_over_after_the_plan_closes_the_obligation(load: Load) -> None:
+def test_attempt_cap_starts_over_after_the_plan_closes_the_obligation(load: Load) -> None:
     ctx = context(load, open_obligations=(eta_obligation(attempts=2),))
     close = CloseObligation(kind=ETA, status=CloseStatus.EXHAUSTED)
 
     assert (
-        check(EtaAttemptCap(), eta_sms(), ctx, (close, CreateHeroTask(title="t", description="")))
+        check(AttemptCap(), eta_sms(), ctx, (close, CreateHeroTask(title="t", description="")))
         is None
     )
 
 
 @pytest.mark.unit
-def test_eta_attempt_cap_reads_the_configured_cap(load: Load) -> None:
+def test_attempt_cap_reads_the_configured_cap(load: Load) -> None:
     ctx = context(
         load,
         open_obligations=(eta_obligation(attempts=1),),
-        config=ValidationConfig(max_eta_attempts=1),
+        config=ValidationConfig(max_attempts={"eta_request": 1}),
     )
 
-    dropped(EtaAttemptCap(), eta_sms(), ctx)
+    dropped(AttemptCap(), eta_sms(), ctx)
 
 
 @pytest.mark.unit
-def test_eta_attempt_cap_ignores_sms_with_another_purpose(load: Load) -> None:
+def test_attempt_cap_ignores_messages_that_request_nothing(load: Load) -> None:
     ctx = context(load, open_obligations=(eta_obligation(attempts=2),))
 
-    assert check(EtaAttemptCap(), sms(text="PO 55821"), ctx) is None
-    assert check(EtaAttemptCap(), WriteTmsNote(text="note"), ctx) is None
+    assert check(AttemptCap(), sms(text="PO 55821"), ctx) is None
+    assert check(AttemptCap(), email(DISPATCHER), ctx) is None
+    assert check(AttemptCap(), WriteTmsNote(text="note"), ctx) is None
+
+
+@pytest.mark.unit
+def test_attempt_cap_is_per_kind(load: Load) -> None:
+    """Two POD requests are the cap of `pod`; the ETA requests do not count against it."""
+    pod = Obligation(obligation_id="obl_2", load_id="481207", kind="pod", attempts=2, opened_at=NOW)
+    config = ValidationConfig(max_attempts={"eta_request": 2, "pod": 2})
+    ctx = context(load, open_obligations=(eta_obligation(attempts=1), pod), config=config)
+    ask_pod = SendSms(contact_id=DRIVER, text="Please send the POD.", requests="pod")
+
+    violation = dropped(AttemptCap(), ask_pod, ctx)
+    assert violation.message.startswith("pod was already requested 2 times (cap 2)")
+    assert check(AttemptCap(), eta_sms(), ctx) is None
+
+
+@pytest.mark.unit
+def test_attempt_cap_counts_an_email_that_requests_the_kind(load: Load) -> None:
+    """An email that asks for the ETA is a request too, like the executor counts it."""
+    ask = SendEmail(to_contact_ids=(DISPATCHER,), body="ETA?", purpose=Purpose.ETA_REQUEST)
+    ctx = context(load, open_obligations=(eta_obligation(attempts=1),))
+
+    assert check(AttemptCap(), ask, ctx) is None
+    dropped(AttemptCap(), eta_sms(), ctx, (ask,))
+    dropped(AttemptCap(), ask, context(load, open_obligations=(eta_obligation(attempts=2),)))
+
+
+@pytest.mark.unit
+def test_attempt_cap_leaves_a_kind_without_a_cap_alone(load: Load) -> None:
+    pod = Obligation(obligation_id="obl_2", load_id="481207", kind="pod", attempts=9, opened_at=NOW)
+    ask_pod = SendSms(contact_id=DRIVER, text="Please send the POD.", requests="pod")
+
+    assert check(AttemptCap(), ask_pod, context(load, open_obligations=(pod,))) is None
+
+
+# --- known_obligation_kind ------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "action",
+    [
+        SendSms(contact_id=DRIVER, text="POD please", requests="pod"),
+        SendEmail(to_contact_ids=(DISPATCHER,), body="POD please", requests="pod"),
+        ScheduleTimer(kind="pod", due_in_minutes=30),
+        DeferObligation(kind="pod", minutes=5),
+        CloseObligation(kind="pod", status=CloseStatus.CANCELLED),
+        OpenObligation(kind="pod"),
+    ],
+)
+def test_known_obligation_kind_drops_a_kind_outside_the_catalog(load: Load, action: Action) -> None:
+    ctx = context(load, obligation_kinds=("eta_request",))
+
+    violation = dropped(KnownObligationKind(), action, ctx)
+
+    assert violation.message == (
+        "pod is not an obligation kind of this broker (kinds: eta_request)"
+    )
+
+
+@pytest.mark.unit
+def test_known_obligation_kind_allows_catalog_kinds_and_other_actions(load: Load) -> None:
+    ctx = context(load, obligation_kinds=("eta_request", "pod"))
+
+    assert check(KnownObligationKind(), OpenObligation(kind="pod"), ctx) is None
+    assert check(KnownObligationKind(), eta_sms(), ctx) is None
+    assert check(KnownObligationKind(), sms(text="PO 55821"), ctx) is None
+    assert check(KnownObligationKind(), WriteTmsNote(text="note"), ctx) is None
+
+
+@pytest.mark.unit
+def test_known_obligation_kind_without_a_catalog_allows_any_kind(load: Load) -> None:
+    assert check(KnownObligationKind(), OpenObligation(kind="anything"), context(load)) is None
+
+
+@pytest.mark.unit
+def test_known_obligation_kind_with_an_empty_catalog_says_none(load: Load) -> None:
+    violation = dropped(KnownObligationKind(), eta_sms(), context(load, obligation_kinds=()))
+
+    assert violation.message.endswith("(kinds: none)")
+
+
+# --- open_obligation ------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_obligation_exists_drops_opening_an_obligation_that_is_open(load: Load) -> None:
+    pod = Obligation(obligation_id="obl_2", load_id="481207", kind="pod", attempts=0, opened_at=NOW)
+
+    violation = dropped(
+        ObligationExists(), OpenObligation(kind="pod"), context(load, open_obligations=(pod,))
+    )
+
+    assert violation.message == "an open pod obligation already exists"
+    assert check(ObligationExists(), OpenObligation(kind="pod"), context(load)) is None
+    dropped(
+        ObligationExists(), OpenObligation(kind="pod"), context(load), (OpenObligation(kind="pod"),)
+    )
 
 
 # --- no_duplicate_action --------------------------------------------------------------
@@ -584,7 +704,8 @@ def test_default_rules_hold_every_rule_once_security_first() -> None:
             "sms_rate_limit",
             "obligation_exists",
             "deferral_policy",
-            "eta_attempt_cap",
+            "attempt_cap",
+            "known_obligation_kind",
             "no_duplicate_action",
             "no_contact_details_in_text",
             "stage_moves_forward",

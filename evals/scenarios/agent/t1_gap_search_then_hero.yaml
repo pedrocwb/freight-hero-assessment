@@ -1,0 +1,79 @@
+# T1: a gap in the SOP, searched before it is handed to a Hero. The driver asks us to
+# book a hotel for the night. No intent of the catalog covers it (the gate says `other`)
+# and no section names `other`, so the knowledge node finds no procedure.
+#
+# With the agent loop (card W3-AGT) the knowledge node no longer escalates a gap itself:
+# the agent searches the SOP (`search_sop`), reads what the search found
+# (`read_sop_section escalation`: "no procedure covers it, do not improvise, open a Hero
+# task"), and answers `no_procedure: true` with no action. Nothing accepted and no
+# procedure: the run escalates as a gap (`escalation.sop_gap`, "No SOP for this
+# situation"), one Hero task that quotes the driver's message.
+#
+# Expected timeline (Client A, load 481207 to_delivery, 2026-10-13, America/Los_Angeles):
+#   step 0  19:00  driver SMS about a hotel.
+#           19:01  run: gate (other, act), one agent call with two read tools. Escalated
+#                  with the gap task. Nothing to the driver.
+#
+# The judge reads the Hero task (live and replay; scripted mode uses the verdict below).
+# The bake-off checks that live models use search_sop here (plan, "Integração" step 6).
+id: t1_gap_search_then_hero
+title: A request no SOP covers is searched first, then handed to a Hero without a promise
+suite: agent
+tags: [regression, scripted_only, sop:escalation, sop:communication_rules]
+description: >-
+  A hotel request no procedure covers: the agent searches the SOP, reads the escalation
+  section, says there is no procedure, and the run hands the case to a Hero with the
+  driver's words.
+load: fixtures/load_481207.json
+load_overrides:
+  stage: to_delivery
+date: 2026-10-13
+start: "18:55"
+steps:
+  - at: "19:00"
+    note: "Out of hours, the driver asks us to book a hotel near Reno"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: "im out of hours after this leg. can you book me a hotel near reno tonight?"
+    script:
+      gate:
+        - {intent: other, act: true, reason: "A hotel booking request; no intent covers it."}
+      agent:
+        - rationale: >-
+            No section covers booking hotels. The escalation section says not to
+            improvise when no procedure covers a request, so a Hero takes it.
+          intent: other
+          no_procedure: true
+          tool_calls:
+            - name: search_sop
+              args: {query: "driver hotel booking overnight hours of service"}
+              result: "1. escalation: Escalation to the Hero team (When to create a Hero task). 2. communication_rules: Communication rules."
+            - name: read_sop_section
+              args: {section_id: escalation}
+              result: "Create a Hero task when ... 5. A message is unclear, or no procedure covers it. Do not improvise."
+          actions: []
+      judge:
+        - reasons:
+            - "The task quotes the driver's request for a hotel near Reno tonight."
+            - "It says the agent did not act on the message and asks a person to handle it."
+            - "No message went to the driver, so nothing was promised."
+          score: 0.9
+    expect:
+      intent: other
+      tools_used: [search_sop]
+      sections_read: [escalation]
+      max_rejections: 0
+      actions:
+        - {kind: hero_task, contains: ["hotel"], count: 1}
+      run_status: [escalated]
+      llm_calls: 2
+      judge:
+        rubric: |-
+          1. A Hero task tells a person what the driver asked for: a hotel near Reno for tonight.
+          2. It makes clear that the agent did not answer the driver or book anything, and that a person must handle it.
+          3. No text to the driver promises a booking, a payment or a call back.
+        min_score: 0.7
+    forbid:
+      - {kind: sms}
+      - {kind: email}
