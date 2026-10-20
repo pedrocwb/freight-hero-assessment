@@ -294,10 +294,6 @@ a {
   background: var(--warn);
 }
 
-.stream--mock .stream-dot {
-  background: var(--info);
-}
-
 .rail {
   position: sticky;
   top: 50px;

@@ -17,20 +17,9 @@ pnpm install
 pnpm dev            # http://localhost:5173, /api is proxied to http://localhost:8000
 ```
 
-Without the backend, `pnpm dev:mock` runs the page on an in-memory mock (`VITE_MOCK=1`)
-seeded with the assignment's story (load 481207, steps A1 to A4), a Keystone load, and an
-Acme load run by the agent loop (tool calls accepted and rejected, a POD read by the
-document pipeline). Its brokers are the standard one, Northline, Keystone and Acme,
-onboarded as in the plan: created from the standard broker, a Markdown SOP published as
-config version 2, and a draft compiled from `acme_sop.pdf` waiting for review (a proposed
-`detention_request` intent, a POD required at delivery within 120 minutes). Accepting it
-and publishing works on the mock, as do rollouts, uploads and broker eval runs. The mock
-records messages and pings but runs no agent; the header says "Mock data".
-
 | Command | What it does |
 |---|---|
 | `pnpm dev` | Dev server on :5173 with the `/api` proxy |
-| `pnpm dev:mock` | Same, on the mock backend |
 | `pnpm build` | Type-check, then build to `dist/` |
 | `pnpm preview` | Serve `dist/` on :4173 (same proxy) |
 | `pnpm typecheck` | `tsc --noEmit` |
@@ -61,7 +50,7 @@ with its abbreviation, for example "07:31 PDT".
 - `src/api.ts`: the typed client. Shapes mirror the API contract and the Python models it
   serializes (the wave 3 ones `api/schemas.py`: brokers, knowledge, documents, broker
   evals; each names the backend card that serves it). `createApi(fetch)` takes the fetch
-  function, which the tests and the mock use. Intents and brokers are data from the API
+  function, which the tests use. Intents and brokers are data from the API
   (`GET /api/brokers`, `GET /api/brokers/{id}`); only the stages are fixed in the page.
 - `src/hooks/useEventStream.ts`: `EventSource` on `/api/stream` (`run`, `outbox`, `clock`,
   `load`). While the stream is down, every panel refreshes every 5 seconds instead.
@@ -70,8 +59,7 @@ with its abbreviation, for example "07:31 PDT".
 - `src/lib/`: pure helpers (time formatting, conversation merge, eval summary, the
   trajectory table, broker catalog edits and checks, the SOP draft's pre-publish lint),
   unit tested.
-- `src/screens/`: one file per screen. `src/mocks/`: the mock backend, loaded only when
-  `VITE_MOCK=1`, so it is not in the normal build.
+- `src/screens/`: one file per screen.
 
 Errors from the API (`{"detail": ...}`) show as toasts; a panel whose data fails to load
 shows the error inline with a retry button.

@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { api, MOCK_MODE } from "./api";
+import { api } from "./api";
 import { ClockRail } from "./components/ClockRail";
 import { Toasts } from "./components/ui";
 import { useResource } from "./hooks/useResource";
@@ -69,9 +69,8 @@ function useScreen(): [ScreenId, (id: ScreenId) => void] {
 
 function StreamBadge() {
   const { stream } = useSim();
-  const label = MOCK_MODE
-    ? "Mock data"
-    : stream === "live"
+  const label =
+    stream === "live"
       ? "Live"
       : stream === "polling"
         ? "Polling every 5 s"
@@ -81,7 +80,7 @@ function StreamBadge() {
       ? "The event stream is down, so panels refresh every 5 seconds"
       : "Panels refresh as the agent works";
   return (
-    <span className={clsx("stream", `stream--${MOCK_MODE ? "mock" : stream}`)} title={title}>
+    <span className={clsx("stream", `stream--${stream}`)} title={title}>
       <span className="stream-dot" aria-hidden="true" />
       {label}
     </span>

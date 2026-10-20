@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { api, MOCK_MODE, type LoadSummary, type OutboxItem, type RunRecord, type SimState } from "../api";
+import { api, type LoadSummary, type OutboxItem, type RunRecord, type SimState } from "../api";
 
 export type StreamEvent =
   | { type: "run"; data: RunRecord }
@@ -15,10 +15,6 @@ export const POLL_MS = 5000;
 const OPEN_TIMEOUT_MS = 4000; // no stream by then: start polling while it keeps trying
 const REOPEN_MS = 15000; // after the browser gives up on a stream, try a new one
 
-export interface StreamSource {
-  subscribe(onEvent: (event: StreamEvent) => void): () => void;
-}
-
 /** Parse one SSE message: one JSON object per `data:` line. */
 export function parseStreamData(raw: string): unknown {
   try {
@@ -31,7 +27,7 @@ export function parseStreamData(raw: string): unknown {
 /**
  * Live updates from `GET /api/stream`. While the stream is down (never opened, dropped,
  * or closed by the browser), `onPoll` runs every 5 s so the panels still refresh; once the
- * stream is back, polling stops. In mock mode the in-memory backend is the source.
+ * stream is back, polling stops.
  */
 export function useEventStream(
   onEvent: (event: StreamEvent) => void,
@@ -42,20 +38,6 @@ export function useEventStream(
   handlers.current = { onEvent, onPoll };
 
   useEffect(() => {
-    if (MOCK_MODE) {
-      let unsubscribe: (() => void) | undefined;
-      let cancelled = false;
-      void import("../mocks").then(({ mockStream }) => {
-        if (cancelled) return;
-        unsubscribe = mockStream.subscribe((event) => handlers.current.onEvent(event));
-        setStatus("live");
-      });
-      return () => {
-        cancelled = true;
-        unsubscribe?.();
-      };
-    }
-
     let source: EventSource | null = null;
     let poll: ReturnType<typeof setInterval> | null = null;
     let openTimer: ReturnType<typeof setTimeout> | null = null;

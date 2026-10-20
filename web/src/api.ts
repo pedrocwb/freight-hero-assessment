@@ -8,7 +8,7 @@
  * them.
  *
  * `createApi` takes the fetch function, so tests check the requests it builds without a
- * network and mock mode swaps in an in-memory backend.
+ * network.
  *
  * The wave 3 shapes (brokers, the knowledge base, documents, broker evals, the agent's
  * trajectory) name the backend card that serves them: BRK, KNW, DOC, EVK, AGT.
@@ -1101,14 +1101,7 @@ export function createApi(fetcher: Fetcher, base = "/api") {
 
 export type Api = ReturnType<typeof createApi>;
 
-/** True when the page runs on the in-memory mock backend (`VITE_MOCK=1`). */
-export const MOCK_MODE = import.meta.env.VITE_MOCK === "1";
-
-const defaultFetcher: Fetcher = MOCK_MODE
-  ? async (input, init) => (await import("./mocks")).mockFetch(input, init)
-  : (input, init) => fetch(input, init);
-
-export const api = createApi(defaultFetcher);
+export const api = createApi((input, init) => fetch(input, init));
 
 // --- derived values ----------------------------------------------------------------------
 

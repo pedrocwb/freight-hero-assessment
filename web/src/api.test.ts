@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   ApiError,
   attachmentForm,
-  brokerInput,
   buildRequest,
   buildUrl,
   createApi,
@@ -11,11 +10,9 @@ import {
   errorDetail,
   inboundMessage,
   runCost,
-  type Broker,
   type Fetcher,
   type SopDraft,
 } from "./api";
-import { newBroker } from "./mocks/brokers";
 
 interface Call {
   url: string;
@@ -217,17 +214,6 @@ describe("brokers (card BRK)", () => {
       "POST /api/brokers",
     ]);
     expect(bodyOf(calls[2])).toEqual({ broker_id: "acme", name: "Acme Freight" });
-  });
-
-  it("puts only the editable fields: the API owns the versions and the rollout", async () => {
-    const { calls, api } = recorder(200, {});
-    const broker: Broker = { ...newBroker("acme", "Acme Freight"), config_version: 4, rollout: { percent: 50, previous_version: 3 } };
-    await api.updateBroker("acme", brokerInput(broker));
-    expect(calls[0]?.init?.method).toBe("PUT");
-    expect(calls[0]?.url).toBe("/api/brokers/acme");
-    const body = bodyOf(calls[0]);
-    expect(Object.keys(body).sort()).toEqual(["document_types", "documents", "intents", "limits", "name", "obligations", "triage"]);
-    expect(body.limits.max_steps).toBe(8);
   });
 
   it("reads the versions and sets the rollout", async () => {

@@ -6,9 +6,7 @@
   "description": "Simulation platform for the freight load agent: play every role and inspect each run.",
   "scripts": {
     "dev": "vite",
-    "dev:mock": "VITE_MOCK=1 vite",
     "build": "tsc --noEmit && vite build",
-    "build:mock": "VITE_MOCK=1 vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
