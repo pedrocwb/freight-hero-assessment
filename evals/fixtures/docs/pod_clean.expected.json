@@ -1,0 +1,65 @@
+{
+  "file": "pod_clean.pdf",
+  "load_id": "481207",
+  "type_id": "pod",
+  "pages": 1,
+  "text_layer": true,
+  "vision_path": false,
+  "extracted": {
+    "receiver": "Valley DC",
+    "signed": true,
+    "delivered_at": "2026-10-14T09:42",
+    "exceptions": "",
+    "po_numbers": "55821"
+  },
+  "not_in_standard_type": [
+    "po_numbers"
+  ],
+  "also_on_document": {
+    "received_by": "Dana Whitfield",
+    "load_number": "481207",
+    "bol_number": "RBF-30417",
+    "carrier_name": "Prairie Haul LLC",
+    "mc_number": "778120",
+    "driver": "Marco Ruiz",
+    "shipper": "Riverbend Foods",
+    "trailer_number": "PH-5327",
+    "seal_number": "SL-44120",
+    "seal_intact": true,
+    "pieces": "1600 cases",
+    "weight": 38000
+  },
+  "checks": [
+    {
+      "field": "receiver",
+      "check": "stop_name",
+      "expected": "Valley DC",
+      "found": "Valley DC",
+      "ok": true
+    },
+    {
+      "field": "signed",
+      "check": "signature",
+      "expected": "true",
+      "found": "true",
+      "ok": true
+    },
+    {
+      "field": "delivered_at",
+      "check": "date_in_window",
+      "expected": "2026-10-14T09:30",
+      "found": "2026-10-14T09:42",
+      "ok": true
+    },
+    {
+      "field": "po_numbers",
+      "check": "po_number",
+      "expected": "55821",
+      "found": "55821",
+      "ok": true
+    }
+  ],
+  "exceptions_noted": false,
+  "status": "processed",
+  "review_reasons": []
+}
