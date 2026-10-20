@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     # Secrets
     openrouter_api_key: SecretStr | None = None
     langsmith_api_key: SecretStr | None = None
-    telegram_bot_token: SecretStr | None = None
 
     # Tracing: LangSmith when on and the key is set, otherwise no tracing
     langsmith_tracing: bool = False

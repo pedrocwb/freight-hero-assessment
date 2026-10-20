@@ -13,7 +13,6 @@ VARIABLES = tuple(name.upper() for name in Settings.model_fields)
 SECRETS = {
     "OPENROUTER_API_KEY": "sk-or-v1-settings-test-secret",
     "LANGSMITH_API_KEY": "lsv2_pt_settings-test-secret",
-    "TELEGRAM_BOT_TOKEN": "123456:telegram-test-secret",
 }
 
 
@@ -210,12 +209,11 @@ def test_no_secret_shows_in_repr_str_or_a_json_dump(monkeypatch: pytest.MonkeyPa
 @pytest.mark.unit
 def test_describe_shows_secrets_only_as_set_or_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", SECRETS["OPENROUTER_API_KEY"])
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")  # blank counts as not set
+    monkeypatch.setenv("LANGSMITH_API_KEY", "   ")  # blank counts as not set
 
     summary = _settings().describe()
 
     assert summary["OPENROUTER_API_KEY"] == "set"
-    assert summary["TELEGRAM_BOT_TOKEN"] == "unset"
     assert summary["LANGSMITH_API_KEY"] == "unset"
 
 
