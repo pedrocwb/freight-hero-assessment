@@ -21,6 +21,7 @@ evals/results/*
 .claude/worktrees/
 .claude/settings.local.json
 .pgtest/
+videos/**
 videos/**/frames/
 videos/**/out/
 videos/**/audio/
