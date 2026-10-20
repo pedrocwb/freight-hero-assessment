@@ -36,7 +36,7 @@ from freight_agent.adapters.observability.langsmith import LangSmithTracer
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
-from freight_agent.application.documents import DocumentPipeline
+from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.bootstrap import (
     BootstrapError,
