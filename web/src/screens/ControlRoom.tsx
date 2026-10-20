@@ -299,8 +299,8 @@ function SimulationSettings() {
     <Panel title="Simulation">
       <dl className="facts facts--single">
         <div>
-          <dt>Model mode</dt>
-          <dd>{sim.state?.llm_mode ?? "n/a"}</dd>
+          <dt>Model</dt>
+          <dd>{sim.state?.model_ready === false ? "no API key" : "live"}</dd>
         </div>
         <div>
           <dt>Events queued</dt>

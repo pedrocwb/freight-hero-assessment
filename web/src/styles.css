@@ -273,6 +273,10 @@ a {
   color: var(--ink-2);
 }
 
+.mode--off strong {
+  color: var(--critical);
+}
+
 .stream {
   display: inline-flex;
   align-items: center;

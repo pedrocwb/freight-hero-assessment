@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { api } from "./api";
+import { api, langsmithProject, modelReady } from "./api";
 import { ClockRail } from "./components/ClockRail";
 import { Toasts } from "./components/ui";
 import { useResource } from "./hooks/useResource";
@@ -75,6 +75,31 @@ function StreamBadge() {
   );
 }
 
+/** Whether the agent can run (live on OpenRouter), and where its traces go. */
+function ModelBadge() {
+  const { state } = useSim();
+  if (!state) return null;
+  const project = langsmithProject(state);
+  return (
+    <>
+      {modelReady(state) ? (
+        <span className="mode" title="Every run calls the models on OpenRouter and costs money">
+          Model: <strong>live</strong>
+        </span>
+      ) : (
+        <span className="mode mode--off" title="Set OPENROUTER_API_KEY and restart the API">
+          Model: <strong>no API key</strong>
+        </span>
+      )}
+      {project ? (
+        <a href={project} target="_blank" rel="noreferrer">
+          LangSmith project
+        </a>
+      ) : null}
+    </>
+  );
+}
+
 function LoadPicker() {
   const { loads, selectedLoadId, selectLoad } = useSim();
   return (
@@ -132,9 +157,7 @@ function Shell() {
         </div>
         <LoadPicker />
         <div className="topbar-meta">
-          <span className="mode" title="How the agent's model answers">
-            Model: <strong>{sim.state?.llm_mode ?? "n/a"}</strong>
-          </span>
+          <ModelBadge />
           <StreamBadge />
         </div>
       </header>

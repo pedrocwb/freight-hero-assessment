@@ -204,7 +204,6 @@ function RunCard(props: {
               <dt>Broker config</dt>
               <dd>
                 {run.broker_id ? <span className="mono">{run.broker_id}</span> : <span className="muted">unknown broker</span>}
-                {run.broker_config_version !== null && run.broker_config_version !== undefined ? `, version ${run.broker_config_version}` : null}
                 {run.sop_version ? <span className="cell-sub">SOP {run.sop_version.slice(0, 12)}</span> : null}
               </dd>
             </div>

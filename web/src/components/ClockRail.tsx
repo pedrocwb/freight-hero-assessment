@@ -27,7 +27,6 @@ export function ClockRail() {
   const [last, setLast] = useState<string | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [start, setStart] = useState(DEFAULT_START);
-  const [mode, setMode] = useState<"" | "replay" | "live">("");
 
   const stop = load ? currentStop(load) : undefined;
   const now = state?.now;
@@ -43,7 +42,7 @@ export function ClockRail() {
 
   async function reset() {
     setResetOpen(false);
-    const result = await sim.perform(() => api.resetSim({ start: start.trim(), llm_mode: mode || null }));
+    const result = await sim.perform(() => api.resetSim({ start: start.trim() }));
     if (result) {
       sim.setState(result);
       setLast(`Reset to ${formatTime(result.now, timezone)}`);
@@ -122,14 +121,6 @@ export function ClockRail() {
         <label className="field">
           <span className="field-label">Start time (ISO 8601 with offset)</span>
           <input className="input mono" value={start} onChange={(e) => setStart(e.target.value)} spellCheck={false} />
-        </label>
-        <label className="field">
-          <span className="field-label">Model mode</span>
-          <select className="input" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-            <option value="">Keep the server setting ({state?.llm_mode ?? "replay"})</option>
-            <option value="replay">Replay (recorded answers, offline)</option>
-            <option value="live">Live (needs OPENROUTER_API_KEY)</option>
-          </select>
         </label>
       </Modal>
     </div>

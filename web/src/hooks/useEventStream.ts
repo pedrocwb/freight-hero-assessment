@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 
-import { api, type LoadSummary, type OutboxItem, type RunRecord, type SimState } from "../api";
+import { api, type LoadSummary, type OutboxItem, type RunRecord, type ScenarioRun, type SimState } from "../api";
 
 export type StreamEvent =
   | { type: "run"; data: RunRecord }
   | { type: "outbox"; data: OutboxItem }
   | { type: "clock"; data: SimState }
-  | { type: "load"; data: LoadSummary };
+  | { type: "load"; data: LoadSummary }
+  | { type: "scenario"; data: ScenarioRun };
 
 export type StreamStatus = "connecting" | "live" | "polling";
 
-const EVENT_TYPES = ["run", "outbox", "clock", "load"] as const;
+const EVENT_TYPES = ["run", "outbox", "clock", "load", "scenario"] as const;
 export const POLL_MS = 5000;
 const OPEN_TIMEOUT_MS = 4000; // no stream by then: start polling while it keeps trying
 const REOPEN_MS = 15000; // after the browser gives up on a stream, try a new one

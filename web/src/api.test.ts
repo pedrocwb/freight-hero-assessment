@@ -8,6 +8,8 @@ import {
   createApi,
   errorDetail,
   inboundMessage,
+  langsmithProject,
+  modelReady,
   runCost,
   type Fetcher,
 } from "./api";
@@ -181,6 +183,58 @@ describe("multipart requests", () => {
     expect(result.document_id).toBe("d1");
   });
 
+});
+
+describe("graph and scenarios", () => {
+  it("reads the run graph and the scenarios", async () => {
+    const { calls, api } = recorder(200, { mermaid: "graph TD;", nodes: [] });
+    await api.graph();
+    await api.scenarios();
+    expect(calls.map((c) => `${c.init?.method} ${c.url}`)).toEqual(["GET /api/graph", "GET /api/scenarios"]);
+  });
+
+  it("starts a scenario by id, with no body", async () => {
+    const { calls, api } = recorder(202, { scenario_id: "a b", load_id: "481207" });
+    const started = await api.runScenario("a b");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(calls[0]?.url).toBe("/api/scenarios/a%20b/run");
+    expect(calls[0]?.init?.body).toBeUndefined();
+    expect(started.load_id).toBe("481207");
+  });
+
+  it("raises the 409 of a scenario already playing with the API's words", async () => {
+    const { api } = recorder(409, { detail: "a scenario run is in progress" });
+    await expect(api.runScenario("a")).rejects.toMatchObject({ status: 409, detail: "a scenario run is in progress" });
+  });
+
+  it("reads no scenario run yet, a 404 or an empty body, as null", async () => {
+    expect(await recorder(404, { detail: "no scenario run yet" }).api.scenarioRun()).toBeNull();
+    expect(await recorder(200, "").api.scenarioRun()).toBeNull();
+    expect(await recorder(200, null).api.scenarioRun()).toBeNull();
+    await expect(recorder(500, { detail: "boom" }).api.scenarioRun()).rejects.toMatchObject({ status: 500 });
+  });
+
+  it("resets the world with a start time only: there is no model mode", async () => {
+    const { calls, api } = recorder(200, {});
+    await api.resetSim({ start: "2026-10-13T06:55:00-07:00" });
+    expect(bodyOf(calls[0])).toEqual({ start: "2026-10-13T06:55:00-07:00" });
+  });
+});
+
+describe("model and LangSmith state", () => {
+  it("is ready unless the API says false", () => {
+    expect(modelReady({ model_ready: true })).toBe(true);
+    expect(modelReady({ model_ready: false })).toBe(false);
+    expect(modelReady(undefined)).toBe(true);
+  });
+
+  it("links the LangSmith project only when tracing is on", () => {
+    const url = "https://smith.langchain.com/o/x/projects/p/y";
+    expect(langsmithProject({ langsmith: { enabled: true, project_url: url } })).toBe(url);
+    expect(langsmithProject({ langsmith: { enabled: false, project_url: url } })).toBeNull();
+    expect(langsmithProject({ langsmith: { enabled: true, project_url: null } })).toBeNull();
+    expect(langsmithProject(undefined)).toBeNull();
+  });
 });
 
 describe("SOP search", () => {

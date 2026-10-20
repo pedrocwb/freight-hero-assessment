@@ -246,15 +246,16 @@ export interface RunRecord {
   usage: Usage[];
   skip_reason: string | null;
   error: string | null;
+  /** The run's LangSmith trace when tracing is on. */
   trace_url: string | null;
   sop_version?: string | null;
-  // Card AGT. Records stored before wave 3 read back with these defaults.
   intent: Intent | null;
   broker_id: string | null;
-  broker_config_version: number | null;
   trajectory: TrajectoryStep[];
   sections_searched: string[];
   rejections: number;
+  /** The graph nodes the run went through, in order, one entry per visit (`GET /api/graph` ids). */
+  nodes: string[];
 }
 
 // --- API read models -----------------------------------------------------------------
@@ -270,13 +271,20 @@ export interface LoadSummary {
   cost_usd: number;
 }
 
+export interface LangSmith {
+  enabled: boolean;
+  project_url: string | null;
+}
+
 export interface SimState {
   now: string;
   timezone: string;
   next_timer_due_at: string | null;
-  llm_mode: string;
   queue_size: number;
   loads: LoadSummary[];
+  /** False when OPENROUTER_API_KEY is unset: the agent cannot run, so nothing that runs it can. */
+  model_ready: boolean;
+  langsmith: LangSmith;
 }
 
 export interface AdvanceResult {
@@ -414,6 +422,71 @@ export interface AttachmentUploadResult {
   event_id: string;
 }
 
+// --- run graph and scenarios ----------------------------------------------------------
+
+/** `GET /api/graph`: the run graph as LangGraph draws it; its node ids are `RunRecord.nodes`. */
+export interface RunGraph {
+  mermaid: string;
+  nodes: string[];
+}
+
+/** `wait` injects nothing: the clock moves so that the timers due by then fire. */
+export type ScenarioStepKind = "message" | "ping" | "attachment" | "wait";
+
+export interface ScenarioStep {
+  index: number;
+  /** Load time, "HH:MM". */
+  at: string;
+  note: string;
+  kind: ScenarioStepKind;
+}
+
+export interface Scenario {
+  id: string;
+  title: string;
+  suite: string;
+  tags: string[];
+  description: string;
+  steps: ScenarioStep[];
+}
+
+/** `POST /api/scenarios/{id}/run` (202): the scenario plays live in a reset world, on this load. */
+export interface ScenarioStart {
+  scenario_id: string;
+  load_id: string;
+}
+
+export type ScenarioRunStatus = "running" | "passed" | "failed" | "error";
+export type ScenarioStepStatus = "pending" | "running" | "passed" | "failed";
+
+export interface ScenarioCheck {
+  name: string;
+  passed: boolean;
+  detail: string | null;
+}
+
+export interface ScenarioRunStep {
+  index: number;
+  at: string;
+  note: string;
+  status: ScenarioStepStatus;
+  checks: ScenarioCheck[];
+  /** The agent runs the step caused, on the scenario's load. */
+  run_ids: string[];
+}
+
+/** `GET /api/scenarios/run` and the stream's `scenario` event: the current or last scenario run. */
+export interface ScenarioRun {
+  scenario_id: string;
+  load_id: string;
+  status: ScenarioRunStatus;
+  error: string | null;
+  cost_usd: number;
+  started_at: string;
+  finished_at: string | null;
+  steps: ScenarioRunStep[];
+}
+
 // --- ingress ---------------------------------------------------------------------------
 
 /** `InboundMessage`; the API fills `message_id` when it is left out. */
@@ -446,7 +519,6 @@ export interface IngestResult {
 
 export interface ResetRequest {
   start: string;
-  llm_mode: "live" | "replay" | null;
 }
 
 export type AdvanceBy = { minutes: number } | { to: string };
@@ -585,6 +657,16 @@ export function createApi(fetcher: Fetcher, base = "/api") {
     return payload as T;
   }
 
+  /** A 404 or an empty body read as "there is none yet" (no scenario has run). */
+  async function orNull<T>(request: Promise<T | null | undefined>): Promise<T | null> {
+    try {
+      return (await request) ?? null;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   const load = (id: string) => `/loads/${encodeURIComponent(id)}`;
 
   return {
@@ -667,7 +749,15 @@ export function createApi(fetcher: Fetcher, base = "/api") {
         query: { q: args.q.trim(), broker_id: args.brokerId, load_types: args.loadTypes, k: args.k },
       }),
 
-    // Card DOC: attachments and the documents the pipeline made of them.
+    graph: () => call<RunGraph>({ method: "GET", path: "/graph" }),
+
+    scenarios: () => call<Scenario[]>({ method: "GET", path: "/scenarios" }),
+    /** 409 while a scenario plays, 503 when the model is not ready. */
+    runScenario: (scenarioId: string) =>
+      call<ScenarioStart>({ method: "POST", path: `/scenarios/${encodeURIComponent(scenarioId)}/run` }),
+    scenarioRun: () => orNull(call<ScenarioRun | null>({ method: "GET", path: "/scenarios/run" })),
+
+    // Attachments and the documents the pipeline made of them.
     uploadAttachment: (loadId: string, upload: AttachmentUpload, latencySeconds?: number) =>
       call<AttachmentUploadResult>({
         method: "POST",
@@ -687,6 +777,16 @@ export type Api = ReturnType<typeof createApi>;
 export const api = createApi((input, init) => fetch(input, init));
 
 // --- derived values ----------------------------------------------------------------------
+
+/** Whether the agent can run. Only an explicit false says no (an older API leaves it out). */
+export function modelReady(state: Pick<SimState, "model_ready"> | undefined): boolean {
+  return state?.model_ready !== false;
+}
+
+/** The LangSmith project of this session's traces, when tracing is on. */
+export function langsmithProject(state: Pick<SimState, "langsmith"> | undefined): string | null {
+  return state?.langsmith?.enabled ? state.langsmith.project_url ?? null : null;
+}
 
 export function runCost(run: Pick<RunRecord, "usage">): number {
   return run.usage.reduce((sum, u) => sum + (u.cost_usd || 0), 0);
