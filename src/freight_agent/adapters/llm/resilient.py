@@ -30,7 +30,7 @@ class BreakerState(StrEnum):
 
 @dataclass(frozen=True)
 class BreakerStatus:
-    """One model's breaker, as health checks report it."""
+    """One model's breaker, as `ResilientModel.status` reports it."""
 
     name: str
     state: BreakerState
@@ -172,5 +172,5 @@ class ResilientModel:
         raise AllModelsFailed(failures)
 
     def status(self) -> tuple[BreakerStatus, ...]:
-        """Every breaker, in chain order, for the health endpoint."""
+        """Every breaker, in chain order."""
         return tuple(self._breakers[name].status(name) for name, _ in self._chain)

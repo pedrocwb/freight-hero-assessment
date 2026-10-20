@@ -290,10 +290,6 @@ class MemoryEventQueue:
     async def size(self) -> int:
         return len(self._s.state.queue)
 
-    async def oldest_queued(self) -> Event | None:
-        state = self._s.state
-        return state.events[state.queue[0]] if state.queue else None
-
     async def dead_letters(self) -> list[Event]:
         return [self._s.state.events[i] for i in self._s.state.dead]
 

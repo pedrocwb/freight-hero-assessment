@@ -27,13 +27,11 @@ from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.api import views
 from freight_agent.api.bus import EventBus, sse_message
 from freight_agent.api.errors import BadRequest, Conflict, NotFound
-from freight_agent.api.health import health_report
 from freight_agent.api.schemas import (
     AdvanceRequest,
     AttachmentUploadResult,
     ConversationChannel,
     ConversationEntry,
-    HealthReport,
     HeroTask,
     LoadSummary,
     MessageIn,
@@ -434,23 +432,7 @@ class SimulationService:
             self.bus.publish("hero_task", task)
         return task
 
-    # --- health and stream ----------------------------------------------------------------
-
-    async def health(self) -> HealthReport:
-        session = self._session
-        snapshots = await self._snapshots(session)
-        async with session.uow() as uow:
-            oldest = await uow.queue.oldest_queued()
-            size = await uow.queue.size()
-            dead = await uow.queue.dead_letters()
-        return health_report(
-            snapshots,
-            oldest_queued=oldest,
-            queue_size=size,
-            dead_letters=dead,
-            now=session.now(),
-            settings=self._settings.describe(),
-        )
+    # --- stream ---------------------------------------------------------------------------
 
     def stream(self, *, heartbeat_s: float = DEFAULT_HEARTBEAT_S) -> AsyncIterator[str]:
         """The SSE body for one subscriber: the current clock first, then every change."""

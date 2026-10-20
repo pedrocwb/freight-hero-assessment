@@ -15,16 +15,6 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from freight_agent.application.contracts import InboundMessage, LocationPing
-from freight_agent.application.metrics import (
-    CostMetrics,
-    HealthLevel,
-    HealthReason,
-    OutboxMetrics,
-    QueueMetrics,
-    RunMetrics,
-    StalledObligation,
-    TimerLagMetrics,
-)
 from freight_agent.domain.broker import (
     Broker,
     BrokerLimits,
@@ -205,7 +195,7 @@ class Fixture(_Body):
     metadata: dict[str, Any]
 
 
-# --- SOPs and health --------------------------------------------------------------------------
+# --- SOPs -------------------------------------------------------------------------------------
 
 
 class SopView(_Body):
@@ -213,18 +203,6 @@ class SopView(_Body):
     client_id: str
     load_types: tuple[str, ...]
     sections: tuple[ResolvedSection, ...]
-
-
-class HealthReport(_Body):
-    status: HealthLevel
-    reasons: tuple[HealthReason, ...]
-    queue: QueueMetrics
-    runs: RunMetrics
-    cost: CostMetrics
-    outbox: OutboxMetrics
-    timers: TimerLagMetrics
-    stalled: tuple[StalledObligation, ...]
-    settings: dict[str, str] = Field(description="Settings.describe(): secrets only as set/unset")
 
 
 # --- brokers (card W3-BRK) -------------------------------------------------------------------

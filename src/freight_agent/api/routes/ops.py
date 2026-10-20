@@ -1,18 +1,11 @@
-"""Health and the event stream."""
+"""The event stream."""
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from freight_agent.api.deps import HeartbeatSeconds, Service
-from freight_agent.api.schemas import HealthReport
 
 router = APIRouter(tags=["ops"])
-
-
-@router.get("/health")
-async def health(service: Service) -> HealthReport:
-    """One verdict from our own data, with the settings (secrets only as set or unset)."""
-    return await service.health()
 
 
 @router.get("/stream", response_class=StreamingResponse)

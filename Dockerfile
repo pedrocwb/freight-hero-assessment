@@ -71,10 +71,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
-# Liveness: /api/health answers 200 while the app serves (its status field is about the
-# simulation, not the process). No curl in the slim image, so the venv's Python asks.
+# Liveness: /api/sim/state answers 200 while the app serves. No curl in the slim image, so
+# the venv's Python asks.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/sim/state', timeout=4)"]
 
 # The `agent` CLI of the venv, so `docker compose run --rm app eval run --mode replay`
 # works too.

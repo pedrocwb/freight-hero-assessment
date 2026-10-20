@@ -233,8 +233,7 @@ Copy `.env.example` to `.env`. Every value is optional for the quick start.
 | `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `CASSETTES_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals, cassettes and the built UI live |
 | `BLOBS_DIR` | `blobs` | bytes of uploaded attachments and SOP files, created on the first upload |
 
-Secrets are read as secrets: they are never printed, logged or returned by the API
-(`/api/health` shows them only as set or unset).
+Secrets are read as secrets: they are never printed, logged or returned by the API.
 
 ## Repository layout
 
@@ -246,7 +245,7 @@ src/freight_agent/
                  embedder, blobs, page reader, document processor, gateways, language
                  model, clock, tracer
   application/   run context, prefilter, triage, the agent loop and its tools, executor,
-                 the LangGraph run graph, runtime, document pipeline, SOP ingestion, metrics
+                 the LangGraph run graph, runtime, document pipeline, SOP ingestion
   adapters/      the memory store, OpenRouter / cassette / scripted models, the SOP
                  index (memory, pgvector) and embedders, SOP files, lint and importer, blobs
                  and the PDF page reader, LangSmith

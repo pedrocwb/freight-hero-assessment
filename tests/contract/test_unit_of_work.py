@@ -1053,23 +1053,3 @@ async def test_concurrent_units_of_work_are_serialized(uow_factory: UnitOfWorkFa
     async with uow_factory() as uow:
         obligation = await uow.obligations.get("obl_1")
     assert obligation is not None and obligation.attempts == 1 + workers
-
-
-async def _oldest(uow_factory: UnitOfWorkFactory) -> str | None:
-    async with uow_factory() as uow:
-        event = await uow.queue.oldest_queued()
-    return None if event is None else event.event_id
-
-
-@pytest.mark.usefixtures("loads")
-async def test_oldest_queued_is_the_longest_waiting_unclaimed_event(
-    uow_factory: UnitOfWorkFactory,
-) -> None:
-    assert await _oldest(uow_factory) is None
-    await _ingest(uow_factory, _message("a1"), _message("b1", minute=1, load_id=B))
-    assert await _oldest(uow_factory) == "a1"
-
-    assert await _claim(uow_factory) == "a1"
-    assert await _oldest(uow_factory) == "b1"  # in flight is not waiting
-    await _release(uow_factory, "a1")
-    assert await _oldest(uow_factory) == "a1"

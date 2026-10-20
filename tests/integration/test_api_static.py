@@ -117,14 +117,14 @@ async def test_the_page_cannot_be_posted_to(tmp_path: Path, dist: Path) -> None:
 # --- /api stays untouched ---------------------------------------------------------------
 
 API_PROBES = [
-    ("GET", "/api/health"),
+    ("GET", "/api/sim/state"),
     ("GET", "/api/fixtures"),
     ("GET", "/api"),
     ("GET", "/api/"),
     ("GET", "/api/nothing-here"),
     ("GET", "/api/loads/"),
     ("POST", "/api/nothing-here"),
-    ("POST", "/api/health"),
+    ("POST", "/api/sim/state"),
     ("DELETE", "/api/loads"),
 ]
 
@@ -151,7 +151,7 @@ async def test_the_api_docs_still_answer(tmp_path: Path, dist: Path) -> None:
         schema = await client.get("/openapi.json")
 
     assert schema.status_code == 200
-    assert "/api/health" in schema.json()["paths"]
+    assert "/api/sim/state" in schema.json()["paths"]
 
 
 # --- without a bundle -------------------------------------------------------------------
@@ -166,11 +166,11 @@ async def test_without_a_bundle_only_the_api_answers(tmp_path: Path, make: str) 
     async with client_for(tmp_path, web_dist=folder) as client:
         root = await client.get("/")
         deep = await client.get("/loads/481207")
-        health = await client.get("/api/health")
+        state = await client.get("/api/sim/state")
 
     assert (root.status_code, deep.status_code) == (404, 404)
     assert root.json() == {"detail": "Not Found"}
-    assert health.status_code == 200
+    assert state.status_code == 200
 
 
 # --- where the bundle is found ----------------------------------------------------------

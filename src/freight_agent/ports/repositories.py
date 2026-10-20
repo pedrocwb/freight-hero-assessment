@@ -111,10 +111,6 @@ class EventQueue(Protocol):
 
     async def size(self) -> int: ...
 
-    async def oldest_queued(self) -> Event | None:
-        """The longest-waiting event not yet claimed, for the queue-age SLA."""
-        ...
-
     async def dead_letters(self) -> list[Event]: ...
 
 
