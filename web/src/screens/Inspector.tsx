@@ -1,11 +1,13 @@
 import clsx from "clsx";
 import { useState } from "react";
 
-import { runCost, runLatencyMs, runTokens, type Action, type Load, type LoadEvent, type RunRecord } from "../api";
+import { runCost, runLatencyMs, runTokens, type Action, type Load, type LoadEvent, type RunRecord, type TrajectoryStep } from "../api";
+import { DocumentsPanel } from "../components/Documents";
 import { LedgerPanel, TimersPanel } from "../components/Ledger";
 import { Empty, InlineError, Meter, NoLoad, Panel, ScreenHead, StatusChip, Tag, usd } from "../components/ui";
 import { channelLabel, humanize, roleLabel, stageLabel } from "../lib/load";
 import { formatDuration, formatTimeSeconds } from "../lib/time";
+import { clip, compactArgs, rejectionRule, stepVerdict, tallyTrajectory } from "../lib/trajectory";
 import { useSim } from "../state/sim";
 
 const BUDGET_USD = 1;
@@ -34,7 +36,7 @@ export function Inspector() {
     <>
       <ScreenHead
         title="Agent inspector"
-        lede="Each run of the agent on this load: what woke it, how the gate read the event, the SOP sections it used, the plan, and what the validator dropped."
+        lede="Each run of the agent on this load: what woke it, the intent, the broker config it ran on, every tool call it made and what the rules said, the plan, and what the validator dropped."
         actions={
           runs.length ? (
             <button
@@ -82,6 +84,7 @@ export function Inspector() {
         </section>
         <div className="col-side">
           <LedgerPanel snapshot={snapshot.data} />
+          <DocumentsPanel />
           <TimersPanel snapshot={snapshot.data} />
           <BudgetPanel />
         </div>
@@ -101,10 +104,15 @@ function describeEvent(event: LoadEvent | undefined, load: Load | undefined, eve
     case "inbound_message": {
       const role = load?.contacts.find((c) => c.id === event.sender_contact_id)?.role;
       const from = event.sender_contact_id ? `${roleLabel(role)} ${event.sender_contact_id}` : "Unknown sender";
-      return `${from} by ${channelLabel(event.channel)}`;
+      const files = event.attachments.length ? `, with ${event.attachments.map((a) => a.filename).join(", ")}` : "";
+      return `${from} by ${channelLabel(event.channel)}${files}`;
     }
     case "attachment_received":
       return `Attachment ${event.attachments.map((a) => a.filename).join(", ")}`;
+    case "document_processed": {
+      const type = typeof data.type_id === "string" && data.type_id ? humanize(data.type_id) : "Document";
+      return `${type} read by the pipeline (${humanize(String(data.status ?? "processed")).toLowerCase()})`;
+    }
     case "hero_update":
       return "Hero update";
     default:
@@ -129,6 +137,10 @@ function RunCard(props: {
   const bodyId = `run-${run.run_id}`;
   const dropped = new Map<number, RunRecord["violations"]>();
   for (const v of run.violations) dropped.set(v.action_index, [...(dropped.get(v.action_index) ?? []), v]);
+  const trajectory = run.trajectory ?? [];
+  const tally = tallyTrajectory(trajectory);
+  const searched = run.sections_searched ?? [];
+  const intent = run.intent ?? run.gate?.intent ?? null;
 
   return (
     <li className={clsx("run", `run--${run.status}`)}>
@@ -139,7 +151,10 @@ function RunCard(props: {
             {formatTimeSeconds(run.started_at, timezone)}
           </time>
           <StatusChip status={run.status} />
-          <span className="run-trigger">{describeEvent(event, load, run.event_id)}</span>
+          <span className="run-trigger">
+            {describeEvent(event, load, run.event_id)}
+            {intent ? <span className="run-intent mono">{intent}</span> : null}
+          </span>
           <span className="run-cost">{usd(cost)}</span>
           <span className="run-caret" aria-hidden="true" />
         </button>
@@ -158,6 +173,21 @@ function RunCard(props: {
               </dd>
             </div>
             <div className="run-cell">
+              <dt>Intent</dt>
+              <dd>
+                {intent ? (
+                  <>
+                    <span className="strong">{humanize(intent)}</span> <span className="mono muted">{intent}</span>
+                    {run.gate && run.gate.intent !== intent ? (
+                      <span className="cell-sub">the gate read {humanize(run.gate.intent).toLowerCase()}</span>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="muted">not labelled</span>
+                )}
+              </dd>
+            </div>
+            <div className="run-cell">
               <dt>Gate</dt>
               <dd>
                 {run.gate ? (
@@ -168,6 +198,14 @@ function RunCard(props: {
                 ) : (
                   <span className="muted">not reached</span>
                 )}
+              </dd>
+            </div>
+            <div className="run-cell">
+              <dt>Broker config</dt>
+              <dd>
+                {run.broker_id ? <span className="mono">{run.broker_id}</span> : <span className="muted">unknown broker</span>}
+                {run.broker_config_version !== null && run.broker_config_version !== undefined ? `, version ${run.broker_config_version}` : null}
+                {run.sop_version ? <span className="cell-sub">SOP {run.sop_version.slice(0, 12)}</span> : null}
               </dd>
             </div>
             <div className="run-cell">
@@ -184,6 +222,36 @@ function RunCard(props: {
                 )}
               </dd>
             </div>
+            <div className="run-cell">
+              <dt>Agent loop</dt>
+              <dd>
+                {trajectory.length ? (
+                  <>
+                    {tally.steps} tool call{tally.steps === 1 ? "" : "s"}: {tally.accepted} accepted, {tally.rejected} rejected, {tally.reads} read
+                    {tally.reads === 1 ? "" : "s"}
+                    <span className={clsx("cell-sub", (run.rejections ?? 0) > 0 && "text-warn")}>
+                      {run.rejections ?? 0} rejection{run.rejections === 1 ? "" : "s"} counted against the budget
+                    </span>
+                  </>
+                ) : run.plan ? (
+                  <span className="muted">no tool call: the plan came in the answer</span>
+                ) : (
+                  <span className="muted">not reached</span>
+                )}
+              </dd>
+            </div>
+            {searched.length ? (
+              <div className="run-cell">
+                <dt>Sections searched</dt>
+                <dd className="tag-list">
+                  {searched.map((id) => (
+                    <Tag key={id} tone="sop">
+                      {id}
+                    </Tag>
+                  ))}
+                </dd>
+              </div>
+            ) : null}
             <div className="run-cell">
               <dt>Tokens</dt>
               <dd>
@@ -230,7 +298,9 @@ function RunCard(props: {
             </div>
           ) : null}
 
-          <h4 className="subhead">Plan</h4>
+          {trajectory.length ? <Trajectory steps={trajectory} /> : null}
+
+          <h4 className="subhead">{trajectory.length ? "Staged plan" : "Plan"}</h4>
           {run.plan && run.plan.actions.length ? (
             <ol className="plan">
               {run.plan.actions.map((action, i) => {
@@ -287,6 +357,57 @@ function RunCard(props: {
   );
 }
 
+const VERDICT_LABEL = { read: "Read", accepted: "Accepted", rejected: "Rejected" } as const;
+const VERDICT_CHIP = { read: "chip--neutral", accepted: "chip--pass", rejected: "chip--fail" } as const;
+
+/** Every tool call of the loop, in order: what the model asked and what it was told. */
+function Trajectory({ steps }: { steps: readonly TrajectoryStep[] }) {
+  return (
+    <>
+      <h4 className="subhead">Trajectory</h4>
+      <div className="table-wrap usage-wrap">
+        <table className="table table--compact trajectory">
+          <caption className="visually-hidden">Tool calls of the agent loop, in order</caption>
+          <thead>
+            <tr>
+              <th scope="col" className="num">Step</th>
+              <th scope="col">Tool</th>
+              <th scope="col">Arguments</th>
+              <th scope="col">Result</th>
+              <th scope="col">Rules</th>
+              <th scope="col" className="num">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {steps.map((s, i) => {
+              const verdict = stepVerdict(s);
+              const rule = verdict === "rejected" ? rejectionRule(s.result) : null;
+              const args = compactArgs(s.args);
+              return (
+                <tr key={i} className={clsx(verdict === "rejected" && "row--fail")}>
+                  <td className="num">{i + 1}</td>
+                  <td className="mono">{s.tool}</td>
+                  <td className="mono trajectory-args" title={JSON.stringify(s.args, null, 2)}>
+                    {clip(args, 160)}
+                  </td>
+                  <td className="trajectory-result" title={s.result}>
+                    {clip(s.result, 180)}
+                  </td>
+                  <td>
+                    <span className={clsx("chip", VERDICT_CHIP[verdict])}>{s.tool === "finish" && verdict === "read" ? "Answer" : VERDICT_LABEL[verdict]}</span>
+                    {rule ? <span className="cell-sub mono">{rule}</span> : null}
+                  </td>
+                  <td className="num">{usd(s.cost_usd, 5)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
 function ActionLine({ action }: { action: Action }) {
   switch (action.type) {
     case "send_sms":
@@ -294,6 +415,7 @@ function ActionLine({ action }: { action: Action }) {
         <p className="action">
           <span className="action-kind">Text</span> <span className="mono">{action.contact_id}</span>
           <Tag tone="muted">{humanize(action.purpose)}</Tag>
+          {action.requests && action.requests !== action.purpose ? <Tag tone="muted">requests {humanize(action.requests)}</Tag> : null}
           <span className="action-text">{action.text}</span>
         </p>
       );
@@ -302,6 +424,7 @@ function ActionLine({ action }: { action: Action }) {
         <p className="action">
           <span className="action-kind">Email</span> <span className="mono">{action.to_contact_ids.join(", ")}</span>
           <Tag tone="muted">{humanize(action.purpose)}</Tag>
+          {action.requests && action.requests !== action.purpose ? <Tag tone="muted">requests {humanize(action.requests)}</Tag> : null}
           {action.subject ? <span className="action-text strong">{action.subject}</span> : null}
           <span className="action-text">{action.body}</span>
         </p>
@@ -357,7 +480,13 @@ function ActionLine({ action }: { action: Action }) {
     case "close_obligation":
       return (
         <p className="action">
-          <span className="action-kind">Close</span> {humanize(action.kind).toLowerCase()} as {action.status}
+          <span className="action-kind">Close</span> {humanize(action.kind)} as {action.status}
+        </p>
+      );
+    case "open_obligation":
+      return (
+        <p className="action">
+          <span className="action-kind">Open</span> {humanize(action.kind)}
         </p>
       );
     default: {
