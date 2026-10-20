@@ -184,12 +184,12 @@ def compile_graph(deps: GraphDeps) -> _Compiled:
     builder.add_node(VALIDATE, validate_node(deps.rules))
     builder.add_edge(START, PREFILTER)
     for node, after in ((PREFILTER, TRIAGE), (TRIAGE, KNOWLEDGE)):
-        builder.add_conditional_edges(node, _unless_decided(after), {after: after, END: END})
+        builder.add_conditional_edges(node, _unless_decided(node, after), {after: after, END: END})
     builder.add_edge(KNOWLEDGE, AGENT)
     builder.add_conditional_edges(
-        AGENT, _after_agent, {TOOLS: TOOLS, VALIDATE: VALIDATE, AGENT: AGENT}
+        AGENT, after_agent, {TOOLS: TOOLS, VALIDATE: VALIDATE, AGENT: AGENT}
     )
-    builder.add_conditional_edges(TOOLS, _after_tools, {AGENT: AGENT, VALIDATE: VALIDATE})
+    builder.add_conditional_edges(TOOLS, after_tools, {AGENT: AGENT, VALIDATE: VALIDATE})
     builder.add_edge(VALIDATE, END)
     return builder.compile()
 
@@ -198,16 +198,17 @@ def build_graph(deps: GraphDeps) -> RunGraph:
     return RunGraph(compile_graph(deps))
 
 
-def _unless_decided(next_node: str) -> Callable[[RunState], str]:
-    """Go on to `next_node` unless the node that just ran ended the run."""
+def _unless_decided(node: str, next_node: str) -> Callable[[RunState], str]:
+    """Go on to `next_node` unless `node`, which just ran, ended the run."""
 
     def route(state: RunState) -> str:
         return END if state.verdict is not None else next_node
 
+    route.__name__ = f"after_{node}"  # the edge's name in a trace
     return route
 
 
-def _after_agent(state: RunState) -> str:
+def after_agent(state: RunState) -> str:
     if state.pending_calls:
         return TOOLS
     if state.outcome is not None:
@@ -215,6 +216,6 @@ def _after_agent(state: RunState) -> str:
     return AGENT  # prose: the next round must answer
 
 
-def _after_tools(state: RunState) -> str:
+def after_tools(state: RunState) -> str:
     over_budget = state.rejections > state.ctx.broker.limits.max_rejections
     return VALIDATE if state.outcome is not None or over_budget else AGENT
