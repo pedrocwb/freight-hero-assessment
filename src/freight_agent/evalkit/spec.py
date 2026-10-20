@@ -1,6 +1,8 @@
-"""Scenario specification: the contract between scenario authors and the eval runner.
+"""Scenario specification: the contract between scenario authors and the player.
 
-Runner semantics (implemented in `evalkit.runner`):
+Every scenario is played live, on the models of `config/models.yaml`: in a LangSmith
+experiment (`evalkit.experiment`) or on the platform (`POST /api/scenarios/{id}/run`).
+Player semantics (implemented in `evalkit.runner`):
 
 1. The virtual clock starts at `date` + `start` in `timezone`.
 2. For each step, the runner first advances the clock to the step's `at` time,
@@ -17,44 +19,36 @@ Runner semantics (implemented in `evalkit.runner`):
 5. Expectations are checked against the outbox items created during the step
    and against the ledger and timers at the end of the step. The trajectory checks
    (`intent`, `tools_used`, `tools_refused`, `sections_read`, `min_rejections`,
-   `max_rejections`) read the step's run records; `judge` asks the judge model to grade
-   the texts the step created against a rubric (`evalkit.judge`).
-6. In `scripted` mode, model calls consume `script` entries in order, per role.
-   Only inbound messages call the gate model; risk changes, timers and
-   attachments get their intent from code and consume no gate entry. A run
-   whose gate acts consumes one plan (`script.agent`; `script.decide` is its
-   older name and is merged into it). An agent entry may list the `tool_calls` the
-   agent made before its answer: the model returns them as its transcript, and the
-   agent node folds them into the staged plan as it does live. Each document the
-   pipeline reads consumes one `script.extract` entry. Runs skipped or escalated by
-   the prefilter consume nothing. The judge consumes `script.judge`, after the step;
-   with no scripted verdict the judge check is skipped with a warning. Unused or
-   missing script entries fail the step. In `replay` and `live` modes `script` is
-   ignored.
-7. `load_overrides` is merged into the fixture's top-level keys before the load
+   `max_rejections`) read the step's run records; `judge` asks the judge model, right
+   after the step, to grade the texts the step created against a rubric
+   (`evalkit.judge`). `llm_calls` counts the model calls of the step with an agent
+   loop as one call, whatever its rounds (`evalkit.counting`): the gate's call, one per
+   agent run, one per document read.
+6. `load_overrides` is merged into the fixture's top-level keys before the load
    is built (a key in the override replaces the fixture's value), for example
    `{"broker": {"id": "keystone", "name": "Keystone Freight"}, "load_types": ["reefer"]}`.
-8. Tags of the form `sop:<section_id>` declare which SOP sections a scenario
+7. Tags of the form `sop:<section_id>` declare which SOP sections a scenario
    covers; the SOP coverage lint reads them.
 """
 
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from freight_agent.domain.actions import AgentOutcome, Purpose
-from freight_agent.domain.intents import GateDecision
+from freight_agent.domain.actions import Purpose
 from freight_agent.domain.load import Channel, DelayRisk, Stage
 from freight_agent.domain.obligations import ObligationStatus
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.runs import RunStatus
-from freight_agent.evalkit.judge import JudgeSpec, JudgeVerdict
+from freight_agent.evalkit.judge import JudgeSpec
 
 _TIME = re.compile(r"^\d{2}:\d{2}(:\d{2})?$")
+
+StepKind = Literal["message", "ping", "attachment", "wait"]
 
 
 class _Spec(BaseModel):
@@ -171,73 +165,6 @@ class Expectation(_Spec):
         return self
 
 
-class ScriptedToolCall(_Spec):
-    """One tool call a scripted agent made before its answer (wave 3 spec, section 1.5).
-
-    Tools never run in scripted mode: `result` is what the tool answered the model, as
-    written here (by default a note that it did not run). The agent node recomputes which
-    action calls were accepted or refused from the calls themselves, by the rules, so an
-    action tool's `result` decides nothing.
-    """
-
-    name: str = Field(min_length=1)
-    args: dict[str, Any] = Field(default_factory=dict)
-    result: str | None = None
-
-
-class AgentTurn(AgentOutcome):
-    """One scripted answer of the agent role: the outcome (a plan, its intent label and
-    `no_procedure`), plus the tool calls made before it, in order."""
-
-    tool_calls: tuple[ScriptedToolCall, ...] = ()
-
-    def outcome(self) -> AgentOutcome:
-        """The answer without the tool calls, as the model returns it."""
-        return AgentOutcome.model_validate(self.model_dump(exclude={"tool_calls"}))
-
-
-class ScriptedLlm(_Spec):
-    """What each role's model answers in scripted mode, in call order.
-
-    `decide` is the older name of `agent`: its entries are merged in front of `agent`'s,
-    so the scenarios written before wave 3 run unchanged. `extract` entries are the
-    document pipeline's answers, written as the extraction schema's JSON; `judge` entries
-    are verdicts for the step's rubric.
-    """
-
-    gate: tuple[GateDecision, ...] = ()
-    agent: tuple[AgentTurn, ...] = ()
-    extract: tuple[dict[str, Any], ...] = ()
-    judge: tuple[JudgeVerdict, ...] = ()
-
-    @model_validator(mode="before")
-    @classmethod
-    def _decide_is_agent(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "decide" not in data:
-            return data
-        fields = dict(cast(dict[str, Any], data))
-        decide = fields.pop("decide") or ()
-        fields["agent"] = (*decide, *(fields.get("agent") or ()))
-        return fields
-
-    @field_validator("agent", mode="before")
-    @classmethod
-    def _plans_are_turns(cls, value: Any) -> Any:
-        """A `Plan` given from code (a test's rescript) is a turn with no tool calls."""
-        if not isinstance(value, list | tuple):
-            return value
-        entries = cast("list[Any] | tuple[Any, ...]", value)
-        return [
-            e.model_dump() if isinstance(e, BaseModel) and not isinstance(e, AgentTurn) else e
-            for e in entries
-        ]
-
-    @property
-    def decide(self) -> tuple[AgentTurn, ...]:
-        """The `agent` entries, by their older name."""
-        return self.agent
-
-
 class Step(_Spec):
     at: str
     note: str = ""
@@ -245,7 +172,6 @@ class Step(_Spec):
     ping: PingStep | None = None
     expect: Expectation = Expectation()
     forbid: tuple[ActionMatcher, ...] = ()
-    script: ScriptedLlm = ScriptedLlm()
 
     @model_validator(mode="after")
     def _check(self) -> "Step":
@@ -254,6 +180,14 @@ class Step(_Spec):
         if self.message is not None and self.ping is not None:
             raise ValueError("a step injects at most one message or ping")
         return self
+
+    @property
+    def kind(self) -> StepKind:
+        """What the step injects; `wait` injects nothing, the clock moves so due timers
+        fire."""
+        if self.message is not None:
+            return "attachment" if self.message.attachments else "message"
+        return "ping" if self.ping is not None else "wait"
 
 
 class Scenario(_Spec):

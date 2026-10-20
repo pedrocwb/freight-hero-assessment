@@ -1,33 +1,27 @@
-"""Deterministic scenario runner: one trial of one scenario.
+"""The scenario player: plays a scenario's steps on a runtime and observes what each step
+changed. It does not grade: graders judge the observations separately, so the two are
+built and tested on their own. The timing rules are the ones in the `evalkit.spec`
+docstring.
 
-It drives the same `AgentRuntime` facade the product uses, on a virtual clock,
-with recording gateways and in-memory storage, and observes what each step
-changed. It does not grade: graders judge the observations separately, so the
-two are built and tested on their own. The timing rules are the ones in the
-`evalkit.spec` docstring.
+One player, two places:
 
-Per trial the runner builds the runtime from `TrialDeps` (clock, counting model,
-gateways, SOP index and a blob store with the scenario's attachments). Two kinds of
-factory build it:
+- a LangSmith experiment (`evalkit.experiment`) plays each example on a fresh trial
+  runtime (`play_scenario`): the product runtime on a memory store, with a virtual
+  clock, recording gateways, deterministic ids and the document pipeline;
+- the platform (`api.scenarios`) plays a scenario inside its simulation, after a reset,
+  step by step (`ScenarioPlayer`), so its load and runs show in the UI as they happen.
 
-- a `TrialFactory(deps)`: the default, `build_trial_runtime`, runs the product runtime
-  on a fresh memory store with the document pipeline when card W3-DOC provides it;
-- a `RuntimeFactory(clock, model, gateways, knowledge)`, the pre-wave-3 contract, still
-  accepted (a test's fake runtime, another store): it gets no blob store.
-
-The judge (`evalkit.judge`) runs after a step that has a rubric, on the trial's inner
-model: its calls never pass through the counting wrapper, so `llm_calls` counts the
-agent's calls only.
+The model is always the live one. The player counts its calls through `CountingModel`
+(an agent loop counts once), and runs the judge (`evalkit.judge`) right after a step that
+has a rubric, on the uncounted model, so `llm_calls` counts the agent's calls only.
 """
 
-import importlib
 import json
-from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict
@@ -35,7 +29,7 @@ from pydantic import BaseModel, ConfigDict
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
-from freight_agent.adapters.llm.scripted import ScriptedModel, ScriptedReply
+from freight_agent.adapters.documents.pdfium import PdfiumPageReader
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.contracts import (
@@ -44,46 +38,28 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
-from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
-from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Load
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.runs import RunRecord, Usage
 from freight_agent.evalkit.counting import CountingModel
-from freight_agent.evalkit.judge import Judge, JudgeResult, skipped
-from freight_agent.evalkit.observe import NullObserver, Observer
-from freight_agent.evalkit.results import Failure, StepObservation
-from freight_agent.evalkit.spec import AgentTurn, Scenario, ScriptedToolCall, Step
-from freight_agent.ports.clock import Clock
-from freight_agent.ports.documents import BlobStore, DocumentProcessor
-from freight_agent.ports.gateways import Gateways
+from freight_agent.evalkit.judge import Judge, JudgeResult
+from freight_agent.evalkit.results import StepObservation
+from freight_agent.evalkit.spec import Scenario, Step
+from freight_agent.ports.documents import BlobStore
 from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, ModelRole
-
-Mode = Literal["scripted", "replay", "live"]
+from freight_agent.ports.llm import LanguageModel
 
 # Each tick fires every due timer, so a timer still due after this many ticks at
 # one instant means the runtime never fires it; stop instead of looping forever.
 _MAX_TICKS_AT_ONE_INSTANT = 100
 
-# What a scripted tool call answered, when the scenario does not say: tools never run.
-SCRIPTED_TOOL_RESULT = "(scripted: the tool did not run)"
-
-# Roles whose script entries the runner pushes and accounts for, per step.
-_SCRIPTED_ROLES = (ModelRole.GATE, ModelRole.AGENT, ModelRole.EXTRACT, ModelRole.JUDGE)
-
-# The document pipeline and the page reader of card W3-DOC, found by name like the
-# composition root does (`bootstrap.DOCUMENT_PIPELINE`, `bootstrap.PAGE_READER`), so the
-# eval reads documents exactly as the product does once they exist.
-_PIPELINE = ("freight_agent.application.documents", "DocumentPipeline")
-_PAGE_READER = ("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
-
 
 class RuntimeLike(Protocol):
-    """The part of the `AgentRuntime` facade the runner uses."""
+    """The part of the `AgentRuntime` facade the player uses."""
 
     async def register_load(self, load: Load) -> None: ...
 
@@ -98,370 +74,127 @@ class RuntimeLike(Protocol):
     async def snapshot(self, load_id: str) -> LoadSnapshot: ...
 
 
-@dataclass(frozen=True)
-class TrialDeps:
-    """What the runner gives the runtime of one trial."""
-
-    clock: Clock
-    model: LanguageModel  # the counting model: every call the runtime makes counts
-    gateways: Gateways
-    knowledge: SopIndex
-    blobs: BlobStore  # holds the bytes of the scenario's attachments
-
-
-TrialFactory = Callable[[TrialDeps], RuntimeLike]
-RuntimeFactory = Callable[[Clock, LanguageModel, Gateways, SopIndex], RuntimeLike]
-
-
-def build_trial_runtime(deps: TrialDeps) -> RuntimeLike:
-    """The product runtime on a fresh memory store, with deterministic ids and no tracing.
-
-    Documents are read by the product's pipeline once card W3-DOC provides it (until then
-    by nothing).
-    """
-    uow_factory = MemoryStore().unit_of_work
-    runtime_deps = RuntimeDeps(
-        uow_factory=uow_factory,
-        clock=deps.clock,
-        ids=SequentialIdGenerator(),
-        llm=deps.model,
-        knowledge=deps.knowledge,
-        gateways=deps.gateways,
-        tracer=NullTracer(),
-        blobs=deps.blobs,
-        # An eval must fail loudly on a harness error (a missing cassette, a bug), not
-        # record it as a failed run and move on.
-        config=RuntimeConfig(reraise_unexpected=True),
-    )
-    runtime_deps = replace(runtime_deps, documents=document_processor(runtime_deps))
-    return AgentRuntime(runtime_deps)
-
-
-def build_runtime(
-    clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
-) -> RuntimeLike:
-    """`build_trial_runtime` through the pre-wave-3 `RuntimeFactory` signature."""
-    return build_trial_runtime(
-        TrialDeps(
-            clock=clock,
-            model=model,
-            gateways=gateways,
-            knowledge=knowledge,
-            blobs=MemoryBlobStore(),
-        )
-    )
-
-
-def from_runtime_factory(factory: RuntimeFactory) -> TrialFactory:
-    """A `TrialFactory` over a pre-wave-3 `RuntimeFactory`."""
-
-    def build(deps: TrialDeps) -> RuntimeLike:
-        return factory(deps.clock, deps.model, deps.gateways, deps.knowledge)
-
-    return build
-
-
-def document_processor(deps: RuntimeDeps) -> DocumentProcessor:
-    pipeline, pages = _adapter(*_PIPELINE), _adapter(*_PAGE_READER)
-    if pipeline is None or pages is None:
-        return NullDocumentProcessor()
-    return pipeline(
-        uow_factory=deps.uow_factory,
-        clock=deps.clock,
-        ids=deps.ids,
-        llm=deps.llm,
-        blobs=deps.blobs,
-        pages=pages(),
-        knowledge=deps.knowledge,
-        timeout_s=deps.config.llm_timeout_s,
-    )
-
-
-def _adapter(module: str, attribute: str) -> Any | None:
-    """The attribute, or None while its card has not landed (as `bootstrap.LazyAdapter`)."""
-    try:
-        found = importlib.import_module(module)
-    except ModuleNotFoundError as exc:
-        missing = exc.name or ""
-        if module != missing and not module.startswith(f"{missing}."):
-            raise
-        return None
-    return getattr(found, attribute, None)
-
-
-# --- scripted answers --------------------------------------------------------------------
-
-
-class ScriptedJson(BaseModel):
-    """A scripted answer written as plain JSON (`script.extract`): the schema the model is
-    asked for validates it at the call, so the scenario does not import that schema."""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-
-def scripted_transcript(calls: Sequence[ScriptedToolCall]) -> tuple[dict[str, Any], ...]:
-    """The tool calls as the OpenRouter adapter's transcript (wave 3 spec, section 1.5):
-    one assistant round per call, then the tool's answer. The final answer is the
-    reply's `parsed` output, not a transcript entry."""
-    entries: list[dict[str, Any]] = []
-    for number, call in enumerate(calls, 1):
-        call_id = f"call_{number}"
-        entries.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"id": call_id, "name": call.name, "args": dict(call.args)}],
-            }
-        )
-        entries.append(
-            {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": call.name,
-                "content": SCRIPTED_TOOL_RESULT if call.result is None else call.result,
-            }
-        )
-    return tuple(entries)
-
-
-def scripted_reply(turn: AgentTurn) -> AgentOutcome | ScriptedReply:
-    """What the scripted model answers for one agent turn: the outcome, with its tool
-    calls as the transcript when it made any."""
-    outcome = turn.outcome()
-    if not turn.tool_calls:
-        return outcome
-    return ScriptedReply(parsed=outcome, transcript=scripted_transcript(turn.tool_calls))
-
-
-# --- the runner --------------------------------------------------------------------------
-
-
-class RunOutcome(BaseModel):
-    """Everything one trial produced, ungraded."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    scenario_id: str
-    trial: int = 1
-    observations: tuple[StepObservation, ...] = ()
-    failures: tuple[Failure, ...] = ()  # script accounting only (check "script")
-    usage: tuple[Usage, ...] = ()  # every successful model call, in call order
-    judge_usage: tuple[Usage, ...] = ()  # the judge's calls, not counted in `usage`
-    warnings: tuple[str, ...] = ()
-    error: str | None = None  # the scenario could not start, or the runtime raised
-
-
 class RunnerError(Exception):
-    """The runtime broke a rule the runner depends on."""
+    """The runtime broke a rule the player depends on."""
 
 
 class ScenarioSetupError(Exception):
     """The scenario cannot start: missing or invalid fixture, unknown timezone."""
 
 
-class ScenarioRunner:
-    """Runs trials of scenarios. Every trial gets its own clock, storage and gateways."""
-
-    def __init__(
-        self,
-        evals_dir: Path,
-        knowledge: SopIndex,
-        mode: Mode,
-        model: LanguageModel | None = None,
-        runtime_factory: RuntimeFactory | None = None,
-        observer: Observer | None = None,
-        *,
-        trial_factory: TrialFactory | None = None,
-    ) -> None:
-        if mode == "scripted" and model is not None:
-            raise ValueError("scripted mode feeds its own ScriptedModel; do not pass a model")
-        if mode != "scripted" and model is None:
-            raise ValueError(f"{mode} mode needs a model")
-        if runtime_factory is not None and trial_factory is not None:
-            raise ValueError("pass a runtime_factory or a trial_factory, not both")
-        self._evals_dir = evals_dir
-        self._knowledge = knowledge
-        self._model = model
-        if trial_factory is not None:
-            self._factory = trial_factory
-        elif runtime_factory is not None:
-            self._factory = from_runtime_factory(runtime_factory)
-        else:
-            self._factory = build_trial_runtime
-        self._observer: Observer = observer or NullObserver()
-
-    async def run(self, scenario: Scenario, trial: int = 1) -> RunOutcome:
-        try:
-            tz = _timezone(scenario.timezone)
-            load = self._read_load(scenario)
-            files = self._read_attachments(scenario)
-        except ScenarioSetupError as exc:
-            return RunOutcome(scenario_id=scenario.id, trial=trial, error=str(exc))
-
-        inner, script = self._trial_model()
-        model = CountingModel(inner)
-        clock = VirtualClock(_local(scenario.date, scenario.start, tz))
-        blobs = MemoryBlobStore()
-        deps = TrialDeps(
-            clock=clock,
-            model=model,
-            gateways=RecordingGateways().as_gateways(),
-            knowledge=self._knowledge,
-            blobs=blobs,
-        )
-        try:
-            runtime = self._factory(deps)
-        except ScenarioSetupError as exc:
-            return RunOutcome(scenario_id=scenario.id, trial=trial, error=str(exc))
-        play = _Trial(
-            scenario,
-            tz,
-            load.load_id,
-            clock,
-            runtime,
-            model,
-            script,
-            self._observer,
-            judge=Judge(inner),
-            blobs=blobs,
-            files=files,
-        )
-        error = await play.run(load)
-        return RunOutcome(
-            scenario_id=scenario.id,
-            trial=trial,
-            observations=tuple(play.observations),
-            failures=tuple(play.failures),
-            usage=tuple(model.usage),
-            judge_usage=tuple(play.judge_usage),
-            warnings=tuple(play.warnings),
-            error=error,
-        )
-
-    def _trial_model(self) -> tuple[LanguageModel, ScriptedModel | None]:
-        """The given model in replay and live modes; a fresh ScriptedModel per trial otherwise."""
-        if self._model is not None:
-            return self._model, None
-        script = ScriptedModel()
-        return script, script
-
-    def _read_load(self, scenario: Scenario) -> Load:
-        try:
-            with (self._evals_dir / scenario.load).open(encoding="utf-8") as handle:
-                data: Any = json.load(handle)
-        except FileNotFoundError as exc:
-            raise ScenarioSetupError(f"load fixture not found: {scenario.load}") from exc
-        except (OSError, ValueError) as exc:
-            raise ScenarioSetupError(f"cannot read load fixture {scenario.load}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise ScenarioSetupError(f"load fixture {scenario.load} must be a JSON object")
-        metadata = {**cast(dict[str, Any], data), **scenario.load_overrides}
-        try:
-            return Load.from_metadata(metadata)
-        except DomainError as exc:
-            raise ScenarioSetupError(f"{scenario.load}: {exc}") from exc
-
-    def _read_attachments(self, scenario: Scenario) -> dict[str, bytes]:
-        """Every attachment fixture's bytes, read before the trial starts: a missing file
-        is a setup error, not a failure halfway through."""
-        files: dict[str, bytes] = {}
-        for step in scenario.steps:
-            for attachment in step.message.attachments if step.message is not None else ():
-                if attachment.fixture in files:
-                    continue
-                try:
-                    files[attachment.fixture] = (self._evals_dir / attachment.fixture).read_bytes()
-                except OSError as exc:
-                    raise ScenarioSetupError(
-                        f"attachment fixture not found: {attachment.fixture}"
-                    ) from exc
-        return files
+# --- what a scenario needs before it starts ---------------------------------------------
 
 
-class _Trial:
-    """One pass through a scenario's steps: moves the clock, injects, observes."""
+def scenario_timezone(scenario: Scenario) -> ZoneInfo:
+    try:
+        return ZoneInfo(scenario.timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ScenarioSetupError(f"unknown timezone {scenario.timezone!r}") from exc
+
+
+def scenario_start(scenario: Scenario) -> datetime:
+    """When the scenario's clock starts, as an aware datetime."""
+    return local_time(scenario.date, scenario.start, scenario_timezone(scenario))
+
+
+def read_load(evals_dir: Path, scenario: Scenario) -> Load:
+    """The scenario's load: its fixture with `load_overrides` merged over the top-level
+    keys."""
+    try:
+        with (evals_dir / scenario.load).open(encoding="utf-8") as handle:
+            data: Any = json.load(handle)
+    except FileNotFoundError as exc:
+        raise ScenarioSetupError(f"load fixture not found: {scenario.load}") from exc
+    except (OSError, ValueError) as exc:
+        raise ScenarioSetupError(f"cannot read load fixture {scenario.load}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ScenarioSetupError(f"load fixture {scenario.load} must be a JSON object")
+    metadata = {**cast(dict[str, Any], data), **scenario.load_overrides}
+    try:
+        return Load.from_metadata(metadata)
+    except DomainError as exc:
+        raise ScenarioSetupError(f"{scenario.load}: {exc}") from exc
+
+
+def read_attachments(evals_dir: Path, scenario: Scenario) -> dict[str, bytes]:
+    """Every attachment fixture's bytes, read before the scenario starts: a missing file
+    is a setup error, not a failure halfway through."""
+    files: dict[str, bytes] = {}
+    for step in scenario.steps:
+        for attachment in step.message.attachments if step.message is not None else ():
+            if attachment.fixture in files:
+                continue
+            try:
+                files[attachment.fixture] = (evals_dir / attachment.fixture).read_bytes()
+            except OSError as exc:
+                raise ScenarioSetupError(
+                    f"attachment fixture not found: {attachment.fixture}"
+                ) from exc
+    return files
+
+
+# --- the player -------------------------------------------------------------------------
+
+
+class ScenarioPlayer:
+    """Plays one scenario on one runtime, a step at a time: moves the clock, injects,
+    observes. `model` is the runtime's own model, counted; `judge` grades the steps that
+    have a rubric (None: they are not judged, and their judge check fails)."""
 
     def __init__(
         self,
         scenario: Scenario,
-        tz: ZoneInfo,
-        load_id: str,
-        clock: VirtualClock,
-        runtime: RuntimeLike,
-        model: CountingModel,
-        script: ScriptedModel | None,
-        observer: Observer,
         *,
-        judge: Judge,
+        load: Load,
+        runtime: RuntimeLike,
+        clock: VirtualClock,
+        model: CountingModel,
         blobs: BlobStore,
-        files: dict[str, bytes],
+        files: Mapping[str, bytes],
+        judge: Judge | None,
     ) -> None:
-        self._scenario = scenario
-        self._load_id = load_id
-        self._clock = clock
+        tz = scenario_timezone(scenario)
+        self.scenario = scenario
+        self.load = load
         self._runtime = runtime
+        self._clock = clock
         self._model = model
-        self._script = script
-        self._observer = observer
-        self._judge = judge
         self._blobs = blobs
         self._files = files
-        self._times = [_local(scenario.date, step.at, tz) for step in scenario.steps]
-        self.observations: list[StepObservation] = []
-        self.failures: list[Failure] = []
+        self._judge = judge
+        self.times = [local_time(scenario.date, step.at, tz) for step in scenario.steps]
         self.judge_usage: list[Usage] = []
-        self.warnings: list[str] = []
 
-    async def run(self, load: Load) -> str | None:
-        """Play every step. Returns an error string when the runtime raised."""
-        where = "register_load"
-        try:
-            await self._runtime.register_load(load)
-            for index, step in enumerate(self._scenario.steps):
-                where = f"step {index}"
-                await self._step(index, step)
-        except Exception as exc:  # the trial ends here; other scenarios and trials still run
-            return f"{where}: {type(exc).__name__}: {exc}"
-        return None
+    async def start(self) -> None:
+        await self._runtime.register_load(self.load)
 
-    async def _step(self, index: int, step: Step) -> None:
-        at = self._times[index]
-        async with self._observer.step(self._scenario, index, step, at) as span:
-            before = await self._runtime.snapshot(self._load_id)
-            calls_before = self._model.calls
-            # Pushed before the clock moves: timers that fire on the way consume agent plans.
-            self._push_script(step)
-            await self._advance_to(at)
-            if await self._inject(index, step, at):
-                self._clock.set(self._settle_time(index, at))
-                await self._runtime.tick()
-            after = await self._runtime.snapshot(self._load_id)
-            outbox = _created(before.outbox, after.outbox, key=lambda item: item.outbox_id)
-            llm_calls = self._model.calls - calls_before  # before the judge, which is apart
-            observation = StepObservation(
-                step_index=index,
-                at=at,
-                outbox=outbox,
-                runs=_created(before.runs, after.runs, key=lambda run: run.run_id),
-                llm_calls=llm_calls,
-                snapshot=after,
-                judge=await self._judged(index, step, outbox),
-            )
-            self.observations.append(observation)
-            span.observed(observation)
-        self.failures.extend(self._settle_script(index))
+    async def play(self, index: int) -> StepObservation:
+        step = self.scenario.steps[index]
+        at = self.times[index]
+        load_id = self.load.load_id
+        before = await self._runtime.snapshot(load_id)
+        calls_before = self._model.calls
+        await self._advance_to(at)
+        if await self._inject(index, step, at):
+            self._clock.set(self._settle_time(index, at))
+            await self._runtime.tick()
+        after = await self._runtime.snapshot(load_id)
+        outbox = _created(before.outbox, after.outbox, key=lambda item: item.outbox_id)
+        llm_calls = self._model.calls - calls_before  # before the judge, which is apart
+        return StepObservation(
+            step_index=index,
+            at=at,
+            outbox=outbox,
+            runs=_created(before.runs, after.runs, key=lambda run: run.run_id),
+            llm_calls=llm_calls,
+            snapshot=after,
+            judge=await self._judged(step, outbox),
+        )
 
-    async def _judged(
-        self, index: int, step: Step, outbox: Sequence[OutboxItem]
-    ) -> JudgeResult | None:
+    async def _judged(self, step: Step, outbox: Sequence[OutboxItem]) -> JudgeResult | None:
         spec = step.expect.judge
-        if spec is None:
+        if spec is None or self._judge is None:
             return None
-        if self._script is not None and not step.script.judge:
-            self.warnings.append(
-                f"step {index}: the rubric was not judged (scripted mode, no script.judge)"
-            )
-            return skipped(spec, "scripted mode: the step has no script.judge verdict")
         result = await self._judge.grade(spec, outbox)
         if result.usage is not None:
             self.judge_usage.append(result.usage)
@@ -482,11 +215,12 @@ class _Trial:
 
     async def _inject(self, index: int, step: Step, at: datetime) -> bool:
         """Ingest the step's message or ping, if any. Returns whether something was ingested."""
-        derived_id = f"{self._scenario.id}:{index}"
+        derived_id = f"{self.scenario.id}:{index}"
+        load_id = self.load.load_id
         if step.message is not None:
             message = InboundMessage(
                 message_id=step.message.message_id or derived_id,
-                load_id=self._load_id,
+                load_id=load_id,
                 channel=step.message.channel,
                 sender_contact_id=step.message.sender,
                 body=step.message.body,
@@ -498,7 +232,7 @@ class _Trial:
         if step.ping is not None:
             ping = LocationPing(
                 ping_id=derived_id,
-                load_id=self._load_id,
+                load_id=load_id,
                 lat=step.ping.lat,
                 lon=step.ping.lon,
                 occurred_at=at,
@@ -509,7 +243,7 @@ class _Trial:
         return False
 
     async def _attachments(self, step: Step, derived_id: str) -> tuple[Attachment, ...]:
-        """The message's fixture files, stored in the trial's blob store."""
+        """The message's fixture files, stored in the blob store."""
         assert step.message is not None
         attachments: list[Attachment] = []
         for number, spec in enumerate(step.message.attachments, 1):
@@ -528,48 +262,123 @@ class _Trial:
 
     def _settle_time(self, index: int, at: datetime) -> datetime:
         """When the injected event's run happens: after the latency, never past the next step."""
-        settle = at + timedelta(seconds=self._scenario.run_latency_seconds)
-        if index + 1 < len(self._times):
-            settle = min(settle, self._times[index + 1])
+        settle = at + timedelta(seconds=self.scenario.run_latency_seconds)
+        if index + 1 < len(self.times):
+            settle = min(settle, self.times[index + 1])
         return settle
 
-    def _push_script(self, step: Step) -> None:
-        script = self._script
-        if script is None:
-            return
-        script.push(ModelRole.GATE, *step.script.gate)
-        script.push(ModelRole.AGENT, *(scripted_reply(turn) for turn in step.script.agent))
-        script.push(ModelRole.EXTRACT, *(ScriptedJson(**entry) for entry in step.script.extract))
-        # The judge runs after the step; queued now so that a verdict no rubric uses is
-        # reported like any other unused entry.
-        script.push(ModelRole.JUDGE, *step.script.judge)
 
-    def _settle_script(self, index: int) -> list[Failure]:
-        """Report unused and missing script entries for the step, then start the next one clean."""
-        script = self._script
-        if script is None:
-            return []
-        failures: list[Failure] = []
-        for role in _SCRIPTED_ROLES:
-            if left := script.remaining(role):
-                message = f"{left} scripted {role} output(s) were not used"
-                failures.append(Failure(step_index=index, check="script", message=message))
-        missing = Counter(call.role for call in script.exhausted)
-        for role, count in missing.items():
-            message = f"the {role} model was called {count} time(s) with nothing scripted"
-            failures.append(Failure(step_index=index, check="script", message=message))
-        script.reset()
-        return failures
+# --- one scenario on a fresh runtime ------------------------------------------------------
 
 
-def _timezone(name: str) -> ZoneInfo:
+class Played(BaseModel):
+    """Everything one play of a scenario produced, ungraded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scenario_id: str
+    observations: tuple[StepObservation, ...] = ()
+    usage: tuple[Usage, ...] = ()  # every successful model call of the runtime, in order
+    judge_usage: tuple[Usage, ...] = ()  # the judge's calls, not counted in `usage`
+    error: str | None = None  # the scenario could not start, or the runtime raised
+
+    @property
+    def cost_usd(self) -> float:
+        """Everything the play spent, the judge included: the cost cap counts it."""
+        return sum(u.cost_usd for u in (*self.usage, *self.judge_usage))
+
+
+@dataclass(frozen=True)
+class TrialRuntime:
+    runtime: AgentRuntime
+    clock: VirtualClock
+    model: CountingModel
+    blobs: MemoryBlobStore
+
+
+def build_trial_runtime(model: LanguageModel, knowledge: SopIndex, start: datetime) -> TrialRuntime:
+    """The product runtime on a fresh memory store, with a virtual clock at `start`,
+    recording gateways, deterministic ids, the document pipeline and no trace links (in
+    an experiment the runs nest under the example's own trace)."""
+    clock = VirtualClock(start)
+    counted = CountingModel(model)
+    blobs = MemoryBlobStore()
+    deps = RuntimeDeps(
+        uow_factory=MemoryStore().unit_of_work,
+        clock=clock,
+        ids=SequentialIdGenerator(),
+        llm=counted,
+        knowledge=knowledge,
+        gateways=RecordingGateways().as_gateways(),
+        tracer=NullTracer(),
+        blobs=blobs,
+        # A harness error (a bug) must end the play with its own message, not become a
+        # failed run that the scenario then reports as the agent's.
+        config=RuntimeConfig(reraise_unexpected=True),
+    )
+    pipeline = DocumentPipeline(
+        uow_factory=deps.uow_factory,
+        clock=clock,
+        ids=deps.ids,
+        llm=counted,
+        blobs=blobs,
+        pages=PdfiumPageReader(),
+        knowledge=knowledge,
+        timeout_s=deps.config.llm_timeout_s,
+    )
+    deps = replace(deps, documents=pipeline)
+    return TrialRuntime(AgentRuntime(deps), clock, counted, blobs)
+
+
+async def play_scenario(
+    scenario: Scenario,
+    *,
+    evals_dir: Path,
+    knowledge: SopIndex,
+    model: LanguageModel,
+    on_step: Callable[[StepObservation], None] | None = None,
+) -> Played:
+    """Play every step of `scenario` on a fresh trial runtime. An error stops the play
+    there; the steps already played are kept, so the graders still show how far it got."""
     try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise ScenarioSetupError(f"unknown timezone {name!r}") from exc
+        load = read_load(evals_dir, scenario)
+        files = read_attachments(evals_dir, scenario)
+        trial = build_trial_runtime(model, knowledge, scenario_start(scenario))
+    except ScenarioSetupError as exc:
+        return Played(scenario_id=scenario.id, error=str(exc))
+    player = ScenarioPlayer(
+        scenario,
+        load=load,
+        runtime=trial.runtime,
+        clock=trial.clock,
+        model=trial.model,
+        blobs=trial.blobs,
+        files=files,
+        judge=Judge(model),
+    )
+    observations: list[StepObservation] = []
+    where = "register_load"
+    error: str | None = None
+    try:
+        await player.start()
+        for index in range(len(scenario.steps)):
+            where = f"step {index}"
+            observation = await player.play(index)
+            observations.append(observation)
+            if on_step is not None:
+                on_step(observation)
+    except Exception as exc:  # the play ends here; the other examples still run
+        error = f"{where}: {type(exc).__name__}: {exc}"
+    return Played(
+        scenario_id=scenario.id,
+        observations=tuple(observations),
+        usage=tuple(trial.model.usage),
+        judge_usage=tuple(player.judge_usage),
+        error=error,
+    )
 
 
-def _local(day: date, clock_time: str, tz: ZoneInfo) -> datetime:
+def local_time(day: date, clock_time: str, tz: ZoneInfo) -> datetime:
     """A scenario time (HH:MM or HH:MM:SS) on the scenario's date, as an aware datetime."""
     return datetime.combine(day, time.fromisoformat(clock_time), tzinfo=tz)
 

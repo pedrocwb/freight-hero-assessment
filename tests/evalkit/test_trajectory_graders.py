@@ -1,8 +1,9 @@
 """Wave 3 graders: the agent loop's trajectory and the judge's verdict.
 
-The observations are synthetic run records (what card W3-AGT's agent node records), so
-the graders are pinned before the agent loop exists. As in `test_graders.py`, every check
-has a passing case and a failing one, and the failure message lists what happened.
+The observations are synthetic run records (what the graph's agent and tools nodes
+record), so each check is pinned on exactly the runs it reads. As in `test_graders.py`,
+every check has a passing case and a failing one, and the failure message lists what
+happened.
 """
 
 from typing import Any
@@ -26,8 +27,10 @@ from tests.evalkit.test_graders import checks, expect, grade, observe, run
 RUBRIC = "The SMS is polite and asks for the ETA."
 
 
-def tool(name: str, accepted: bool | None = None, **args: Any) -> TrajectoryStep:
-    return TrajectoryStep(tool=name, args=args, result="ok", accepted=accepted)
+def tool(
+    name: str, accepted: bool | None = None, *, result: str = "ok", **args: Any
+) -> TrajectoryStep:
+    return TrajectoryStep(tool=name, args=args, result=result, accepted=accepted)
 
 
 def agent_run(
@@ -50,7 +53,16 @@ def agent_run(
 
 
 SEARCH = tool("search_sop", query="lumper")
-READ = tool("read_sop_section", section_id="escalation")
+
+
+def read(section_id: Any, *, found: bool = True) -> TrajectoryStep:
+    """A `read_sop_section` call; the tool answers `# <id>: <title>` with the section, or
+    the valid ids when it does not know the one asked for."""
+    result = f"# {section_id}: Title\n\nBody" if found else "Unknown section_id. Valid ..."
+    return tool("read_sop_section", result=result, section_id=section_id)
+
+
+READ = read("escalation")
 REFUSED_EMAIL = tool("send_email", accepted=False, to_contact_ids=["x@outside.example"])
 HERO = tool("create_hero_task", accepted=True, title="t", description="d")
 
@@ -69,13 +81,15 @@ def test_a_runs_intent_is_the_agents_label_else_the_gates() -> None:
 def test_sections_read_join_the_searched_ones_and_the_read_calls_once_each() -> None:
     runs = [
         agent_run(SEARCH, READ, searched=("driver_questions", "escalation")),
-        agent_run(tool("read_sop_section", section_id="documents"), run_id="run_2"),
-        agent_run(tool("read_sop_section", section_id=7), run_id="run_3"),  # not an id
+        agent_run(read("documents"), run_id="run_2"),
+        agent_run(read(7), run_id="run_3"),  # not an id
+        agent_run(read("hotels", found=False), run_id="run_4"),  # read nothing
     ]
 
     assert sections_read(runs) == ["driver_questions", "escalation", "documents"]
     assert [c.tool for c in tool_calls(runs)] == [
         "search_sop",
+        "read_sop_section",
         "read_sop_section",
         "read_sop_section",
         "read_sop_section",
@@ -138,6 +152,15 @@ def test_tools_refused_needs_a_call_a_rule_refused() -> None:
     failures = grade(expect(tools_refused=["create_hero_task"]), obs)
     assert checks(failures) == ["expect.tools_refused"]
     assert "send_email refused, create_hero_task" in failures[0].message
+
+
+@pytest.mark.unit
+def test_a_read_tool_or_an_unknown_tool_is_never_a_refusal() -> None:
+    unknown = tool("send_fax", result="Unknown tool 'send_fax'")  # accepted None
+    obs = observe(runs=[agent_run(SEARCH, unknown)])
+
+    assert checks(grade(expect(tools_refused=["send_fax"]), obs)) == ["expect.tools_refused"]
+    assert grade(expect(tools_used=["send_fax"]), obs) == []  # it was called all the same
 
 
 @pytest.mark.unit
@@ -235,13 +258,6 @@ def test_a_verdict_without_reasons_says_so() -> None:
     (failure,) = grade(expect(**JUDGE_STEP), judged(observe(), verdict(0.0)))
 
     assert failure.message.endswith(": no reasons given")
-
-
-@pytest.mark.unit
-def test_a_skipped_judge_is_not_a_failure() -> None:
-    result = JudgeResult(rubric=RUBRIC, min_score=0.7, skipped="scripted, no verdict")
-
-    assert grade(expect(**JUDGE_STEP), judged(observe(), result)) == []
 
 
 @pytest.mark.unit

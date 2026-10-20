@@ -1,4 +1,6 @@
-"""Graders judge one step at a time, plus scenario-wide invariants.
+"""Graders judge one step at a time, plus scenario-wide invariants; `grade` runs them by
+group (one LangSmith evaluator each) and `step_checks` lists every declared check of a
+step, passed or failed, for the platform.
 
 Every check has a positive case and a negative one: a grader that never fails
 proves nothing, so each test that expects a failure also pins its check name.
@@ -32,9 +34,18 @@ from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import RunRecord, RunStatus, Usage
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import Violation
-from freight_agent.evalkit.graders import Budget, check_invariants, grade_step
+from freight_agent.evalkit.graders import (
+    GROUPS,
+    CheckGroup,
+    StepCheck,
+    check_invariants,
+    declared_checks,
+    grade_step,
+    step_checks,
+)
+from freight_agent.evalkit.graders import grade as grade_scenario
 from freight_agent.evalkit.results import Failure, StepObservation
-from freight_agent.evalkit.spec import Step
+from freight_agent.evalkit.spec import Scenario, Step
 
 LA = ZoneInfo("America/Los_Angeles")
 TZ = "America/Los_Angeles"
@@ -651,13 +662,13 @@ def test_run_status_failure_explains_each_run() -> None:
 
 @pytest.mark.unit
 def test_llm_calls_is_exact() -> None:
-    runs = [run(RunStatus.ACTED, usage=[call("gate"), call("decide")])]
+    runs = [run(RunStatus.ACTED, usage=[call("gate"), call("agent")])]
 
     assert grade(expect(llm_calls=2), observe(runs=runs, llm_calls=2)) == []
     failures = grade(expect(llm_calls=1), observe(runs=runs, llm_calls=2))
     assert checks(failures) == ["expect.llm_calls"]
     assert "expected 1 model call(s), got 2" in failures[0].message
-    assert "run_1 on ev_run_1: acted (calls=gate, decide)" in failures[0].message
+    assert "run_1 on ev_run_1: acted (calls=gate, agent)" in failures[0].message
 
 
 @pytest.mark.unit
@@ -786,83 +797,25 @@ def test_a_message_without_a_recipient_fails(outbox: OutboxItem) -> None:
     assert "has no recipient" in failures[0].message
 
 
-# --- invariants: budget -------------------------------------------------------------------
-
-
-def _priced(*runs: RunRecord) -> list[StepObservation]:
-    return [observe(runs=runs[:1]), observe(runs=runs[1:], step_index=1)]
-
-
-@pytest.mark.unit
-def test_no_budget_means_no_budget_check() -> None:
-    expensive = run(RunStatus.ACTED, usage=[call(cost=99.0, tokens_in=10**9, latency_ms=10**9)])
-
-    assert check_invariants(LOAD, [observe(runs=[expensive])]) == []
-    assert check_invariants(LOAD, [observe(runs=[expensive])], budget=Budget()) == []
-
-
-@pytest.mark.unit
-def test_total_cost_is_summed_over_every_run() -> None:
-    observations = _priced(
-        run(RunStatus.ACTED, run_id="run_1", usage=[call(cost=0.25), call(cost=0.125)]),
-        run(RunStatus.NOOP, run_id="run_2", usage=[call(cost=0.125)]),
-    )
-
-    assert check_invariants(LOAD, observations, budget=Budget(max_cost_usd=0.5)) == []
-    failures = check_invariants(LOAD, observations, budget=Budget(max_cost_usd=0.4))
-    assert checks(failures) == ["invariant.budget.cost_usd"]
-    assert failures[0].step_index is None
-    assert "total model cost $0.5000 over 2 run(s) exceeds the budget of $0.4000" in (
-        failures[0].message
-    )
-
-
-@pytest.mark.unit
-def test_tokens_are_capped_per_run() -> None:
-    observations = _priced(
-        run(RunStatus.ACTED, run_id="run_1", usage=[call(tokens_in=600, tokens_out=400)]),
-        run(RunStatus.ACTED, run_id="run_2", usage=[call(tokens_in=500), call(tokens_out=501)]),
-    )
-
-    assert check_invariants(LOAD, observations, budget=Budget(max_tokens_per_run=1001)) == []
-    failures = check_invariants(LOAD, observations, budget=Budget(max_tokens_per_run=1000))
-    assert checks(failures) == ["invariant.budget.tokens"]
-    assert "step 1, run run_2: 1001 input+output tokens exceed the budget of 1000" in (
-        failures[0].message
-    )
-
-
-@pytest.mark.unit
-def test_latency_is_capped_per_run() -> None:
-    observations = _priced(
-        run(RunStatus.ACTED, run_id="run_1", usage=[call(latency_ms=900), call(latency_ms=200)]),
-        run(RunStatus.ACTED, run_id="run_2", usage=[call(latency_ms=1000)]),
-    )
-
-    assert check_invariants(LOAD, observations, budget=Budget(max_latency_ms_per_run=1100)) == []
-    failures = check_invariants(LOAD, observations, budget=Budget(max_latency_ms_per_run=1000))
-    assert checks(failures) == ["invariant.budget.latency_ms"]
-    assert "step 0, run run_1: 1100 ms of model latency exceeds the budget of 1000 ms" in (
-        failures[0].message
-    )
-
-
 @pytest.mark.unit
 def test_invariants_report_every_kind_of_failure_together() -> None:
-    costly = run(RunStatus.ACTED, usage=[call(cost=1.0, tokens_in=5, latency_ms=5)])
     observations = [
-        observe(sms(to="stranger"), item(OutboxKind.TMS_NOTE, key="k:0", text="a"), runs=[costly]),
+        observe(sms(to="stranger"), item(OutboxKind.TMS_NOTE, key="k:0", text="a")),
         observe(item(OutboxKind.TMS_NOTE, key="k:0", text="b"), step_index=1),
     ]
-    budget = Budget(max_cost_usd=0.5, max_tokens_per_run=1, max_latency_ms_per_run=1)
 
-    assert checks(check_invariants(LOAD, observations, budget=budget)) == [
+    assert checks(check_invariants(LOAD, observations)) == [
         "invariant.idempotency",
         "invariant.recipients",
-        "invariant.budget.cost_usd",
-        "invariant.budget.tokens",
-        "invariant.budget.latency_ms",
     ]
+
+
+@pytest.mark.unit
+def test_cost_tokens_and_latency_are_not_invariants() -> None:
+    """The cost is the experiment's cap and a score of its own, not a check that fails."""
+    costly = run(RunStatus.ACTED, usage=[call(cost=99.0, tokens_in=10**9, latency_ms=10**9)])
+
+    assert check_invariants(LOAD, [observe(runs=[costly])]) == []
 
 
 # --- expect.runs and purpose --------------------------------------------------------------
@@ -911,3 +864,206 @@ def test_a_stage_update_matches_its_stage() -> None:
     )
     assert checks(failures) == ["expect.actions[0]"]
     assert "to stage at_delivery" in failures[0].message
+
+
+# --- grade: groups and errors -------------------------------------------------------------
+
+
+def scenario(*steps: dict[str, Any]) -> Scenario:
+    return Scenario.model_validate(
+        {
+            "id": "s1",
+            "title": "t",
+            "suite": "core",
+            "load": "fixtures/load_481207.json",
+            "date": "2026-10-13",
+            "start": "06:55",
+            "steps": [{"at": f"07:0{i + 1}", **s} for i, s in enumerate(steps)],
+        }
+    )
+
+
+# Each group has a failing check: no SMS to the driver (facts), no run with the intent
+# (trajectory), a rubric nobody judged (judge), an SMS to a stranger (invariants).
+EVERY_GROUP = scenario(
+    {
+        "expect": {
+            "actions": [{"kind": "sms", "to": DRIVER}],
+            "intent": "question",
+            "judge": {"rubric": "The SMS is polite."},
+        }
+    }
+)
+
+
+@pytest.mark.unit
+def test_grade_runs_every_group_in_order() -> None:
+    failures = grade_scenario(EVERY_GROUP, [observe(sms(to="stranger"))])
+
+    assert GROUPS == ("facts", "trajectory", "judge", "invariants")
+    assert checks(failures) == [
+        "expect.actions[0]",
+        "expect.intent",
+        "expect.judge",
+        "invariant.recipients",
+    ]
+    assert [f.step_index for f in failures] == [0, 0, 0, None]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("group", "check"),
+    [
+        ("facts", "expect.actions[0]"),
+        ("trajectory", "expect.intent"),
+        ("judge", "expect.judge"),
+        ("invariants", "invariant.recipients"),
+    ],
+)
+def test_grade_keeps_only_the_checks_of_the_groups_asked(group: CheckGroup, check: str) -> None:
+    failures = grade_scenario(EVERY_GROUP, [observe(sms(to="stranger"))], groups=(group,))
+
+    assert checks(failures) == [check]
+
+
+@pytest.mark.unit
+def test_a_play_that_stopped_is_graded_on_the_steps_it_reached_and_fails_every_group() -> None:
+    two_steps = scenario({"expect": {"llm_calls": 1}}, {"expect": {"llm_calls": 1}})
+
+    for group in GROUPS:
+        failures = grade_scenario(
+            two_steps, [observe(llm_calls=1)], error="step 1: RuntimeError: boom", groups=(group,)
+        )
+        assert failures == [
+            Failure(step_index=None, check="error", message="step 1: RuntimeError: boom")
+        ]
+    failures = grade_scenario(two_steps, [observe(llm_calls=2)], error="step 1: boom")
+    assert [(f.step_index, f.check) for f in failures] == [
+        (None, "error"),
+        (0, "expect.llm_calls"),
+    ]
+
+
+@pytest.mark.unit
+def test_a_play_with_no_step_has_only_its_error() -> None:
+    failures = grade_scenario(EVERY_GROUP, [], error="unknown timezone 'Mars/Olympus'")
+
+    assert [f.describe() for f in failures] == ["error: unknown timezone 'Mars/Olympus'"]
+
+
+@pytest.mark.unit
+def test_steps_are_graded_with_the_step_index_of_their_observation() -> None:
+    two_steps = scenario({"expect": {"no_actions": True}}, {"expect": {"no_actions": True}})
+
+    failures = grade_scenario(two_steps, [observe(), observe(sms(), step_index=1)])
+
+    assert [(f.step_index, f.check) for f in failures] == [(1, "expect.no_actions")]
+
+
+# --- step_checks: what the platform shows per step ---------------------------------------
+
+
+@pytest.mark.unit
+def test_declared_checks_name_every_check_of_the_step_in_spec_order() -> None:
+    spec = step(
+        expect={
+            "judge": {"rubric": "polite"},
+            "actions": [{"kind": "sms"}, {"kind": "email"}],
+            "no_actions": True,
+            "obligations": {"eta_request": None, "pod": {"status": "open"}},
+            "timers": {"pending": 0},
+            "run_status": ["acted"],
+            "llm_calls": 1,
+            "runs": 1,
+            "intent": "question",
+            "tools_used": ["send_sms"],
+            "tools_refused": ["send_email"],
+            "sections_read": ["escalation"],
+            "min_rejections": 0,
+            "max_rejections": 1,
+        },
+        forbid=[{"kind": "hero_task"}],
+    )
+
+    assert declared_checks(spec) == [
+        "expect.actions[0]",
+        "expect.actions[1]",
+        "expect.no_actions",
+        "forbid[0]",
+        "expect.obligations.eta_request",
+        "expect.obligations.pod",
+        "expect.timers",
+        "expect.run_status",
+        "expect.llm_calls",
+        "expect.runs",
+        "expect.intent",
+        "expect.tools_used",
+        "expect.tools_refused",
+        "expect.sections_read",
+        "expect.min_rejections",
+        "expect.max_rejections",
+        "expect.judge",
+    ]
+    assert declared_checks(step()) == []
+
+
+@pytest.mark.unit
+def test_step_checks_list_every_declared_check_passed_or_failed() -> None:
+    spec = step(
+        expect={
+            "actions": [{"kind": "sms", "to": DRIVER}, {"kind": "email"}],
+            "obligations": {"eta_request": {"status": "open", "attempts": 2}},
+            "timers": {"pending": 1, "due_at": "07:31"},
+            "llm_calls": 1,
+            "intent": "question",
+            "judge": {"rubric": "polite"},
+        },
+        forbid=[{"kind": "hero_task"}],
+    )
+    obs = observe(
+        sms(),
+        obligations=[obligation()],
+        timers=[timer("timer_1", T0 + timedelta(minutes=31))],
+        llm_calls=1,
+    )
+
+    found = step_checks(spec, obs, timezone=TZ)
+
+    assert [(c.name, c.passed) for c in found] == [
+        ("expect.actions[0]", True),
+        ("expect.actions[1]", False),
+        ("forbid[0]", True),
+        ("expect.obligations.eta_request", False),  # its `attempts` sub-check failed
+        ("expect.timers", True),
+        ("expect.llm_calls", True),
+        ("expect.intent", False),
+        ("expect.judge", False),
+    ]
+    assert all(c.detail is None for c in found if c.passed)
+    by_name = {c.name: c for c in found}
+    assert by_name["expect.obligations.eta_request"].detail is not None
+    assert by_name["expect.obligations.eta_request"].detail.startswith("expected attempts 2, got 1")
+    assert by_name["expect.judge"] == StepCheck(
+        name="expect.judge",
+        passed=False,
+        detail="the step has a rubric but the judge did not run",
+    )
+
+
+@pytest.mark.unit
+def test_two_failed_sub_checks_fail_their_check_once_with_both_details() -> None:
+    spec = expect(timers={"pending": 2, "due_at": "08:00"})
+    obs = observe(timers=[timer("timer_1", T0 + timedelta(minutes=31))])
+
+    (check,) = step_checks(spec, obs, timezone=TZ)
+
+    assert (check.name, check.passed) == ("expect.timers", False)
+    assert check.detail is not None
+    first, second = check.detail.split("; timers: timer_1 due 07:31 pending; ", 1)
+    assert first.startswith("expected 2 pending timer(s), got 1")
+    assert second.startswith("expected the earliest pending timer due at 08:00")
+
+
+@pytest.mark.unit
+def test_a_step_that_declares_nothing_has_no_checks() -> None:
+    assert step_checks(step(), observe(sms()), timezone=TZ) == []

@@ -27,10 +27,9 @@ the web UI. Docker is optional.
 
 ```bash
 make setup         # uv sync (on macOS with Homebrew Python; elsewhere: uv sync --python 3.13)
-make eval          # every eval suite (core, agent, docs), in scripted mode
-make eval-replay   # the same suites on the real models' recorded answers, offline
 make test          # unit, contract and property tests
-make ci            # everything CI runs: lint, types, layer rules, coverage gate, SOP lint, evals
+make ci            # everything CI runs: lint, types, layer rules, coverage gate, SOP lint
+make eval          # every eval suite live, as LangSmith experiments: spends money, needs both keys
 ```
 
 `make eval` runs every scenario through the real agent runtime with a virtual clock and
@@ -46,7 +45,7 @@ The assignment's situation is `evals/scenarios/core/a_client_a_high_risk.yaml`. 
 alone with:
 
 ```bash
-uv run agent eval run --scenario a_client_a_high_risk
+uv run agent eval run --scenario a_client_a_high_risk --cost-cap-usd 0.05
 ```
 
 ## Evals: three ways to supply the model
@@ -69,11 +68,10 @@ Graders check facts (actions, recipients, ledger, timers, statuses), the traject
 judge on the `judge` role, which never counts as an agent call).
 
 ```bash
-uv run agent eval run --suite agent --mode replay
-uv run agent eval run --mode live --k 3 --cost-cap-usd 1   # pass^3: a scenario passes only if all 3 trials pass
-uv run agent eval list                                    # scenarios and tags
-uv run agent eval report evals/results/<run>/results.json --compare evals/results/<baseline>/results.json
-uv run agent sop lint                                     # SOP files + "is every section covered by a scenario?"
+uv run agent eval run --suite agent --cost-cap-usd 0.05
+uv run agent eval run --k 3 --cost-cap-usd 0.30   # pass^3: a scenario passes only if all 3 repetitions pass
+uv run agent eval list                            # scenarios and tags
+uv run agent sop lint                             # SOP files + "is every section covered by a scenario?"
 ```
 
 Exit codes: 0 pass, 1 a regression scenario failed, 2 the harness could not run (bad
@@ -84,11 +82,11 @@ runs every suite even after one fails, and exits with the worst code.
 Live runs need the key in `.env` (copy `.env.example`; `.env` is gitignored and a
 pre-commit hook refuses to commit it). Always pass `--cost-cap-usd`.
 
-**LangSmith experiments.** `--langsmith` records a live (or record) run as a LangSmith
-experiment; `make eval-langsmith` runs the core suite at pass^3 that way:
+**LangSmith experiments.** `agent eval run` records every run as a LangSmith experiment;
+the core suite at pass^3:
 
 ```bash
-uv run agent eval run --suite core --mode live --k 3 --cost-cap-usd 0.10 --langsmith
+uv run agent eval run --suite core --k 3 --cost-cap-usd 0.30
 ```
 
 - The suite's scenarios are synced to the dataset `freight-agent-<suite>` first: one example
@@ -119,9 +117,9 @@ choice on the single-plan design (22/22 at pass^3, about $0.0002 per run); the j
 `extract` (documents, page images included), `compile` (SOP drafts) and the embedding
 model for SOP search. The agent role was measured again on the loop by the wave 3
 bake-off, which also gives the measured cost per load. Its thresholds are fixed in
-`evals/RESULTS.md` ("Wave 3: the agent loop") and its results are filled there. `make eval-replay` replays the chosen models' recorded answers offline;
-after a prompt, SOP, scenario or model change, re-record each suite with
-`uv run agent eval run --suite S --mode record --cost-cap-usd 0.20`.
+`evals/RESULTS.md` ("Wave 3: the agent loop") and its results are filled there. After a prompt, SOP, scenario or model change, run each suite
+again with
+`uv run agent eval run --suite S --cost-cap-usd 0.10`.
 
 ## The simulation platform
 
@@ -143,10 +141,8 @@ Or build the UI once and let the API serve it on port 8000:
 cd web && pnpm install && pnpm build && cd .. && uv run agent serve
 ```
 
-The agent's model in the platform comes from `LLM_MODE`. `replay` (the default) only
-answers prompts that were recorded from eval scenarios, so free-form play needs
-`LLM_MODE=live uv run agent serve` and spends from the OpenRouter key; the platform never
-switches to the live model on its own. The reset dialog can also pick the mode per session.
+The platform's model is always the live one: `uv run agent serve` with
+`OPENROUTER_API_KEY` set spends from the OpenRouter key on every run.
 
 To replay the assignment: create load 481207 from the fixture, send a `high` delay-risk
 ping, then from the driver's phone ask "What's the PO number?", advance the clock to 07:31
@@ -155,9 +151,8 @@ and to 08:01, and watch the SMS, the email to the dispatcher and the Hero task a
 ### Docker
 
 ```bash
-docker compose up --build                # UI + API on http://localhost:8000
-LLM_MODE=live docker compose up          # the live model (reads OPENROUTER_API_KEY from .env)
-docker compose run --rm app eval run --suite core --mode replay
+docker compose up --build                # UI + API on http://localhost:8000 (the live model: OPENROUTER_API_KEY from .env)
+docker compose run --rm app eval list
 docker compose down                      # add -v to drop the blobs volume
 ```
 
@@ -170,10 +165,9 @@ Copy `.env.example` to `.env`. Every value is optional for the quick start.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | unset | live and record modes: model calls |
-| `LLM_MODE` | `replay` | `scripted`, `replay`, `live` or `record` |
-| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run. `LANGSMITH_API_KEY` also enables `agent eval run --langsmith` |
-| `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `CASSETTES_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals, cassettes and the built UI live |
+| `OPENROUTER_API_KEY` | unset | the model calls of the platform and the evals |
+| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run. `LANGSMITH_API_KEY` is needed by `agent eval run` |
+| `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals and the built UI live |
 | `BLOBS_DIR` | `blobs` | bytes of uploaded attachments, created on the first upload |
 
 Secrets are read as secrets: they are never printed, logged or returned by the API.

@@ -1,13 +1,16 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith sop-lint diagrams ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint diagrams ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
 
-# The scenario suites `make eval` and `make eval-replay` run, in this order: core (the
-# assignment and the SOP procedures), agent (the tool loop's guardrails) and docs (the
-# document pipeline). A suite runs once its folder exists under evals/scenarios/.
+# The scenario suites `make eval` runs, in this order: core (the assignment and the SOP
+# procedures), agent (the tool loop's outcomes) and docs (the document pipeline). A suite
+# runs once its folder exists under evals/scenarios/.
 SUITES ?= core agent docs
 EVAL_SUITES := $(notdir $(wildcard $(addprefix evals/scenarios/,$(SUITES))))
+# Repetitions per scenario, and the most one suite's experiment may spend (USD).
+EVAL_K ?= 1
+EVAL_COST_CAP_USD ?= 0.10
 
 # Runs `agent eval run --suite S <args>` for every suite of EVAL_SUITES, even after a
 # failure, and exits with the highest exit code (1 regression, 2 harness, 3 cost cap).
@@ -30,7 +33,7 @@ fmt:
 	uv run ruff format src tests
 
 test:
-	uv run pytest -m "not eval_live"
+	uv run pytest
 
 lint:
 	uv run ruff check src tests
@@ -44,20 +47,14 @@ arch:
 
 # The coverage threshold lives in pyproject.toml ([tool.coverage.report] fail_under).
 cov:
-	uv run pytest -m "not eval_live" --cov --cov-report=term-missing
+	uv run pytest --cov --cov-report=term-missing
 
-# Scripted mode: no network and no model.
+# Every suite live on OpenRouter, each as a LangSmith experiment. It spends money from
+# OPENROUTER_API_KEY (about $0.05 for the three suites at k=1) and needs LANGSMITH_API_KEY.
+# Not part of `make ci`.
 eval:
-	$(call each_suite,--mode scripted)
-
-# The real model's recorded answers (evals/cassettes): offline, no key.
-eval-replay:
-	$(call each_suite,--mode replay)
-
-# The real models, pass^3, recorded as a LangSmith experiment. Spends about $0.03 from
-# OPENROUTER_API_KEY; needs LANGSMITH_API_KEY. Not part of `make ci`.
-eval-langsmith:
-	uv run agent eval run --suite core --mode live --k 3 --cost-cap-usd 0.10 --langsmith
+	@echo "make eval: the $(EVAL_SUITES) suites, live on OpenRouter, k=$(EVAL_K). This spends money: at most \$$$(EVAL_COST_CAP_USD) per suite."
+	$(call each_suite,--k $(EVAL_K) --cost-cap-usd $(EVAL_COST_CAP_USD))
 
 sop-lint:
 	uv run agent sop lint
@@ -66,7 +63,7 @@ sop-lint:
 diagrams:
 	node docs/build_diagrams.js $(or $(TMPDIR:%/=%),/tmp)/architecture-page.html docs/architecture.html
 
-# The gates of .github/workflows/ci.yml, in the same order.
-ci: lint typecheck arch cov sop-lint eval eval-replay
+# The gates of .github/workflows/ci.yml, in the same order. No evals: they are live.
+ci: lint typecheck arch cov sop-lint
 
 all: lint typecheck arch cov

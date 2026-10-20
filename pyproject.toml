@@ -51,8 +51,6 @@ markers = [
     "unit: fast tests with no network",
     "contract: port contract suites, run against the memory store",
     "property: hypothesis property tests",
-    "eval_replay: scenario evals replayed from recorded cassettes",
-    "eval_live: scenario evals against a real model",
 ]
 
 [tool.ruff]

@@ -1,16 +1,18 @@
-"""What the runner observes per step, and what graders return.
+"""What the player observes per step, and what graders return.
 
-Shared by the runner (which produces observations) and the graders (which
-judge them), so both can be built and tested independently.
+Shared by the player (which produces observations) and the graders (which judge them),
+so both can be built and tested independently. An observation travels as JSON in an
+experiment's outputs (`compact`), and the graders read it back from there.
 """
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.domain.outbox import OutboxItem
-from freight_agent.domain.runs import RunRecord, Usage
+from freight_agent.domain.runs import RunRecord
 from freight_agent.evalkit.judge import JudgeResult
 
 
@@ -23,9 +25,18 @@ class StepObservation(_Result):
     at: datetime  # the step's scheduled time, timezone-aware
     outbox: tuple[OutboxItem, ...]  # items created during the step, in creation order
     runs: tuple[RunRecord, ...]  # runs that started during the step, in order
-    llm_calls: int  # model calls made during the step (all roles)
+    llm_calls: int  # model calls made during the step (all roles, an agent loop as one)
     snapshot: LoadSnapshot  # state at the end of the step
     judge: JudgeResult | None = None  # the judge's verdict, for a step with a rubric
+
+    def compact(self) -> dict[str, Any]:
+        """The observation as JSON, without what the graders never read: the snapshot's
+        event log, outbox and runs (the step's own outbox items and runs stay)."""
+        data = self.model_dump(mode="json")
+        snapshot = data["snapshot"]
+        for key in ("events", "outbox", "runs"):
+            snapshot[key] = []
+        return data
 
 
 class Failure(_Result):
@@ -33,23 +44,6 @@ class Failure(_Result):
     check: str  # e.g. "expect.actions[0]", "forbid[1]", "invariant.recipients"
     message: str
 
-
-class ScenarioResult(_Result):
-    scenario_id: str
-    trial: int = 1
-    passed: bool
-    failures: tuple[Failure, ...] = ()
-    observations: tuple[StepObservation, ...] = ()
-    usage: tuple[Usage, ...] = ()  # the agent's model calls (what `llm_calls` counts)
-    judge_usage: tuple[Usage, ...] = ()  # the judge's calls, reported apart (F10)
-    warnings: tuple[str, ...] = ()  # e.g. a rubric not judged in scripted mode
-    error: str | None = None  # the scenario could not run (bad fixture, missing cassette)
-
-    @property
-    def cost_usd(self) -> float:
-        """Everything the trial spent, the judge included: the cost cap counts it."""
-        return sum(u.cost_usd for u in (*self.usage, *self.judge_usage))
-
-    @property
-    def judge_cost_usd(self) -> float:
-        return sum(u.cost_usd for u in self.judge_usage)
+    def describe(self) -> str:
+        where = f"step {self.step_index}: " if self.step_index is not None else ""
+        return f"{where}{self.check}: {self.message}"

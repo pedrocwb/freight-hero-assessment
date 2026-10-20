@@ -1,7 +1,7 @@
 # The quality gates of every change: lint, types, layer rules, tests with coverage and
-# the scenario evals (core, agent and docs suites) in scripted and replay mode. Each gate
-# is a Makefile target, so `make ci` runs the same checks locally. The image build is a
-# job of its own (`docker build .`).
+# the SOP lint. Each gate is a Makefile target, so `make ci` runs the same checks locally.
+# The scenario evals are live LangSmith experiments that spend money, so they run by hand
+# (evals-live.yml), never here. The image build is a job of its own (`docker build .`).
 name: CI
 
 on:
@@ -24,7 +24,7 @@ env:
 
 jobs:
   checks:
-    name: Lint, types, layers, tests, evals
+    name: Lint, types, layers, tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,22 +72,8 @@ jobs:
       - name: SOP lint
         run: make sop-lint
 
-      # Every suite under evals/scenarios/ of `make eval` (core, agent, docs), each run
-      # even when one before it failed. Exit 1: a regression scenario failed; 2: the
-      # harness could not run a scenario.
-      - name: Evals, scripted mode
-        run: make eval
-
-      # The real model's recorded answers (evals/cassettes), offline and without a key.
-      # A changed prompt, SOP, scenario or model misses its recording and fails here:
-      # re-record each suite with `uv run agent eval run --suite S --mode record
-      # --cost-cap-usd 0.20`.
-      # Scenarios tagged scripted_only (guardrail controls) are skipped here.
-      - name: Evals, replay mode
-        run: make eval-replay
-
   # The image `docker compose up --build` runs: it builds (web UI included), starts with
-  # no key (replay, memory), answers its health check and serves the UI.
+  # no key (the platform says the model is not ready), answers and serves the UI.
   image:
     name: Docker image
     needs: checks

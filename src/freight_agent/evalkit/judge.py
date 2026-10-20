@@ -6,17 +6,13 @@ to do. A step that sets `expect.judge {rubric, min_score}` gets one call on the 
 role, with the rubric and every text the step created (SMS, emails, Slack posts, Hero
 tasks, TMS notes), and passes when the verdict's score reaches `min_score`.
 
-The runner calls the judge on the trial's inner model, never through the counting
-wrapper, so a judge call is not one of the agent's model calls: `expect.llm_calls` and
-the per-step call counts mean the same with or without a judge (wave 3 spec, F10). Its
-usage is reported apart (`ScenarioResult.judge_usage`) and still counts toward the run's
-cost cap.
-
-Modes: in scripted mode the verdict comes from the step's `script.judge`; a step with a
-rubric and no scripted verdict is not judged (a warning, not a failure), so a scenario
-can carry a rubric for live runs before anyone scripts a verdict. In replay mode the
-verdict comes from the cassettes, like any other call; in live mode from the judge model
-(`config/models.yaml`, no fallback: a verdict from another model is not comparable).
+The player calls the judge right after the step, on the uncounted model, never through
+the counting wrapper, so a judge call is not one of the agent's model calls:
+`expect.llm_calls` means the same with or without a judge. Its usage is reported apart
+(`Played.judge_usage`) and still counts toward the experiment's cost cap. The verdict is
+part of the step's observation, so the `judge` evaluator reads it from the outputs like
+the code graders read theirs. The judge model is `config/models.yaml`'s, with no
+fallback: a verdict from another model is not comparable.
 """
 
 import json
@@ -59,20 +55,17 @@ class JudgeVerdict(_Frozen):
 
 
 class JudgeResult(_Frozen):
-    """What the runner records for a step with a rubric. Exactly one of `verdict`,
-    `skipped` and `error` is set."""
+    """What the player records for a step with a rubric. Exactly one of `verdict` and
+    `error` is set."""
 
     rubric: str
     min_score: float
     verdict: JudgeVerdict | None = None
-    skipped: str | None = None  # not judged, and not a failure (scripted, no verdict)
     error: str | None = None  # could not judge: a failure (nothing to judge, model error)
     usage: Usage | None = None
 
     @property
     def passed(self) -> bool:
-        if self.skipped is not None:
-            return True
         return self.verdict is not None and self.verdict.score >= self.min_score
 
 
@@ -142,7 +135,7 @@ class Judge:
 
     async def grade(self, spec: JudgeSpec, outbox: Sequence[OutboxItem]) -> JudgeResult:
         """`LlmError` becomes an error result (a failed check); anything else propagates:
-        a missing cassette is a broken harness, not a bad answer."""
+        a bug is a broken harness, not a bad answer."""
         texts = judged_texts(outbox)
         if not texts:
             return JudgeResult(
@@ -154,7 +147,6 @@ class Judge:
             role=ModelRole.JUDGE,
             system=JUDGE_SYSTEM_PROMPT,
             user=render_judge_prompt(spec.rubric, texts),
-            max_tool_rounds=0,
             timeout_s=self._timeout_s,
         )
         try:
@@ -171,10 +163,6 @@ class Judge:
             verdict=response.parsed,
             usage=response.usage,
         )
-
-
-def skipped(spec: JudgeSpec, reason: str) -> JudgeResult:
-    return JudgeResult(rubric=spec.rubric, min_score=spec.min_score, skipped=reason)
 
 
 def prompt_fingerprint() -> str:
