@@ -7,9 +7,8 @@ diagrams are in `docs/architecture.html`, and the shared contracts are in
 **Conventions.** Python paths leave out `src/freight_agent/`: `application/runtime.py`
 means `src/freight_agent/application/runtime.py`. Other paths start at the repository
 root. Scenario ids name files in `evals/scenarios/<suite>/`. **Not built yet** marks a part
-that is designed but not in the code. **Bake-off** marks a number the wave 3 bake-off
-measures (`evals/RESULTS.md`, "Wave 3: the agent loop"); until then the page gives the
-plan or the wave 2 measurement, and says which.
+that is designed but not in the code. Measured numbers of the agent loop come from the
+wave 3 bake-off of 2026-10-20 (`evals/RESULTS.md`, "Wave 3: the agent loop").
 
 | Built | Not built yet |
 |---|---|
@@ -156,7 +155,9 @@ there, with a follow-up timer; `pod_follow_up_due` then asks the driver for the 
 The fixtures are real PDFs (`evals/fixtures/docs/`: a clean POD, a POD with exceptions and
 the wrong PO, a scanned POD with no text layer, a BOL) with the expected values in
 `*.expected.json`. The `extract` model (`google/gemini-2.5-flash`, fallback
-`openai/gpt-4.1-mini`) is confirmed on them by one call each (**Bake-off**). OCR (AWS
+`openai/gpt-4.1-mini`) read the clean POD and the POD with exceptions correctly in every
+live trial of the docs suite (`p1`, `p2`, both bake-off rounds); the scanned POD and the
+BOL are covered by the unit tests with a scripted extraction only. OCR (AWS
 Textract) plus a text model would be cheaper on digital PDFs but weaker on phone photos.
 
 ## 2. Instructions
@@ -490,7 +491,7 @@ reported as a pass^k matrix per model and scenario group.
   the `embedding` model), with fallbacks from another provider family, a pinned provider
   for reproducible evals, and `require_parameters` (only endpoints that honour
   `tool_choice`).
-- **Bake-off of the agent role on the loop** (`make bakeoff`; **Bake-off**): `gptoss`,
+- **Bake-off of the agent role on the loop** (`make bakeoff`, 2026-10-20): `gptoss`,
   `haiku` and `gemini` screened at k = 1 on the core, agent and docs suites with
   `--langsmith`, then k = 3 on the best two. Thresholds fixed before the round: groups A
   and B at pass^3 = 100%, no `must_act` case skipped by triage, cost per run within
@@ -500,7 +501,12 @@ reported as a pass^k matrix per model and scenario group.
   that pydantic validates, so a malformed answer is an `LlmError` (fallback, then a Hero
   task), never a half-read plan. The rules hold for any model, at the call and in
   `validate`.
-- **Canary** on a share of loads, compared on the metrics of 4.1.
+- **Canary** on a share of loads, compared on the metrics of 4.1. **Result:** `openai/gpt-oss-120b` is the only set that met every threshold
+  (A and B at pass^3, $0.00066 per model-calling run, 0.00 to 0.04 refused calls per run);
+  Claude Haiku 5.5 passed 22/22 but at $0.00241 per run, over the cost threshold, and
+  stays the first upgrade; Gemini 2.5 Flash missed a group A scenario at k = 1. The round
+  also moved three guardrail controls to scripted mode only and replaced a path check with
+  an outcome check (`evals/RESULTS.md` explains why). $0.96 in total.
 
 **The wave 2 bake-off ran on the single plan** (`evals/RESULTS.md`, 17 rounds on
 2026-10-19, $0.58 in total). Each round changed one thing and ran live on real models:
@@ -581,8 +587,9 @@ time the event happened.
 The 240-second deadline leaves 60 seconds for the queue wait and delivery. The step
 ceilings in `docs/architecture.html` ("Budgets") are targets: a loop round is one model
 round trip (about 3 to 5 seconds on the wave 2 models), so 8 rounds fit inside the agent's
-ceiling. The loop's measured p50 and p95 come from the bake-off (**Bake-off**), from
-`Usage.latency_ms`.
+ceiling. Measured (`Usage.latency_ms`, gpt-oss-120b, bake-off round 2): the agent call, all
+its rounds, takes 5.1 s at p50 and 9.6 s at p95 on the core suite, and 16.5 s at p95 on the
+docs suite, far inside the 240-second deadline.
 
 A claim lease (`EventQueue.reclaim_expired`, `RuntimeConfig.claim_lease_s`) returns an
 event whose worker died mid-run to the queue, counted as a failed attempt.
@@ -605,7 +612,7 @@ about 7.5 million messages a month, about 10 per second in US business hours (22
 | Postgres | Built (`adapters/persistence/postgres/`), works through Neon's pooler | Neon or RDS. The events table partitioned by month on `occurred_at`; closed loads archived to S3; a pooler; read replicas for the platform and metrics |
 | SOP index | Published sections with their embeddings in Postgres, an HNSW index (pgvector) and a GIN full-text index; embedded once, at publish | The same tables; a read replica for search; a cache of each broker's published version by hash |
 | Documents | Blobs on the filesystem (`BLOBS_DIR`); the pipeline in the worker's tick | S3 behind the same `BlobStore` port; the pipeline as its own worker pool, scaled on pending documents |
-| Models | About 5 million tokens per minute in business hours on the single plan; more with the loop (**Bake-off**) | About 10 times that: higher rate limits or provisioned throughput, more provider families in the fallback chain, per-broker limits, priority for risk and timer events |
+| Models | About 5 million tokens per minute in business hours on the single plan; about four times that on the loop (the core suite used 2.34 million tokens at k = 3, against 0.59 million on the single plan) | About 10 times that: higher rate limits or provisioned throughput, more provider families in the fallback chain, per-broker limits, priority for risk and timer events |
 | Tracing | One trace per run, a bounded pool | Sampling (all escalations and failures, a share of the rest), batched export or self-hosting |
 | Cost | Under $1 per load (5.3) | The same per load; total spend grows linearly |
 
@@ -619,8 +626,8 @@ change.
 expensive call, the agent loop has a round and a cost limit per run, prompts stay small,
 and a meter watches each load. The single-plan design measured about $0.0002 per agent run
 and about $0.03 per load. The loop resends its prompt on every round, so it costs more per
-run; the plan below puts a typical load at about $0.07 on the current agent model, and the
-bake-off replaces it with a measured figure (**Bake-off**).
+run. The plan below put a typical load at about $0.07 on the current agent model; the
+bake-off measured about $0.04 (last row).
 
 **Measured on the single plan** (characters / 4, over the 67 requests of the 22 core
 scenarios, rendered by `application/prompts.py` with the seed SOPs, before wave 3):
@@ -669,7 +676,8 @@ prompt as about 1.7 times the tokens) and `google/gemini-2.5-flash` $0.30 / $2.5
 | **Total against $1** | **about $0.07** | **about $0.11** |
 | Agent on Claude Haiku 5.5 instead | about $0.25 | about $0.45 |
 | Agent on Gemini 2.5 Flash instead | about $0.46 | about $0.83 |
-| **Measured on the loop** | **Bake-off** | **Bake-off** |
+| **Measured on the loop** (gpt-oss-120b: triage $0.000099 and agent $0.000656 per call, bake-off round 2; documents as planned) | **about $0.04** | **about $0.07** |
+| Measured with the agent on Claude Haiku 5.5 ($0.0025 per agent call) | about $0.12 | about $0.21 |
 
 The margin comes from cheap models and few rounds: the same loop on a model at $3 / $12
 per million and no caching would cost about 42 × (30,000 × $3 + 600 × $12)/M = about $4
