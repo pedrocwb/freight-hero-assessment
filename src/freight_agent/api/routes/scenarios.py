@@ -28,6 +28,6 @@ async def run(request: Request, scenario_id: str) -> ScenarioStarted:
 
 
 @router.get("/run")
-async def current(request: Request) -> ScenarioRun:
-    """The scenario run in progress, or the last one."""
-    return _runner(request).current
+async def current(request: Request) -> ScenarioRun | None:
+    """The scenario run in progress, or the last one; null before the first."""
+    return _runner(request).last

@@ -127,6 +127,12 @@ class ScenarioRunner:
         return self._service.settings
 
     @property
+    def last(self) -> ScenarioRun | None:
+        """The run in progress or the last one; None before the first (not an error: the
+        UI asks on every page load)."""
+        return self._run
+
+    @property
     def current(self) -> ScenarioRun:
         if self._run is None:
             raise NotFound("no scenario has run yet: POST /api/scenarios/{id}/run starts one")

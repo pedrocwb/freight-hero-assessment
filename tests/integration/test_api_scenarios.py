@@ -160,11 +160,10 @@ async def test_the_old_eval_routes_are_gone(api: Api) -> None:
 # --- starting a run ---------------------------------------------------------------------------
 
 
-async def test_no_run_is_a_404_before_the_first_one(api: Api) -> None:
+async def test_no_run_is_null_before_the_first_one(api: Api) -> None:
     response = await api.client.get("/api/scenarios/run")
 
-    assert response.status_code == 404
-    assert "POST /api/scenarios/{id}/run" in response.json()["detail"]
+    assert (response.status_code, response.json()) == (200, None)
 
 
 async def test_an_unknown_scenario_is_a_404(api: Api) -> None:
@@ -172,7 +171,7 @@ async def test_an_unknown_scenario_is_a_404(api: Api) -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "no scenario 'nope' (GET /api/scenarios lists them)"}
-    assert (await api.client.get("/api/scenarios/run")).status_code == 404
+    assert (await api.client.get("/api/scenarios/run")).json() is None
 
 
 async def test_without_the_key_a_scenario_is_a_503_and_nothing_is_reset() -> None:
@@ -184,7 +183,7 @@ async def test_without_the_key_a_scenario_is_a_503_and_nothing_is_reset() -> Non
         assert response.status_code == 503
         assert "OPENROUTER_API_KEY" in response.json()["detail"]
         assert [s["load_id"] for s in await api.loads()] == [LOAD_ID]
-        assert (await api.client.get("/api/scenarios/run")).status_code == 404
+        assert (await api.client.get("/api/scenarios/run")).json() is None
         assert api.model.calls == []
 
 
