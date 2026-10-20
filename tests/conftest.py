@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import langsmith
 import pytest
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
@@ -30,6 +31,19 @@ def _no_tracing_to_langsmith(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     for name in [n for n in os.environ if n.startswith(_TRACING_PREFIXES)]:
         del os.environ[name]
+
+
+@pytest.fixture(autouse=True)
+def _no_prompt_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads or writes the LangSmith Prompt Hub: a test of the Hub adapter or of
+    `agent prompts` gives it a fake client, and anything else that reaches the real one
+    fails here instead of calling the network."""
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a test called the LangSmith Prompt Hub")
+
+    for name in ("pull_prompt", "pull_prompt_commit", "push_prompt", "get_prompt"):
+        monkeypatch.setattr(langsmith.Client, name, refuse)
 
 
 @pytest.fixture
