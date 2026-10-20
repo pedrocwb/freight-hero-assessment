@@ -26,7 +26,11 @@ class BlobStore(Protocol):
 
 class PageReader(Protocol):
     def pages(self, data: bytes, content_type: str) -> list[Page]:
-        """The file's pages in order. A page with too little text also carries its image."""
+        """The file's pages in order. A page with too little text also carries its image.
+
+        Synchronous and possibly slow (the pipeline calls it in a worker thread). Raises
+        for a file it cannot read; the pipeline then marks the document `failed`.
+        """
         ...
 
 
