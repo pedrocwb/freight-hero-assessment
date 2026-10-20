@@ -78,7 +78,6 @@ export function RunDetail({ run, outbox }: { run: RunRecord; outbox: readonly Ou
 function RunFacts({ run }: { run: RunRecord }) {
   const tokens = runTokens(run);
   const cost = runCost(run);
-  const duration = run.finished_at !== null ? (Date.parse(run.finished_at) - Date.parse(run.started_at)) / 1000 : null;
   const tally = tallyTrajectory(run.trajectory ?? []);
   const intent = run.intent ?? run.gate?.intent ?? null;
   return (
@@ -126,7 +125,7 @@ function RunFacts({ run }: { run: RunRecord }) {
           {usd(cost)}, {formatDuration(runLatencyMs(run) / 1000)} in model calls
           <span className="cell-sub">
             {tokens.input.toLocaleString("en-US")} tokens in, {tokens.output.toLocaleString("en-US")} out
-            {duration !== null ? `; run took ${formatDuration(duration)} of load time` : ""}
+            {tokens.cached ? `, ${tokens.cached.toLocaleString("en-US")} cached` : ""}
           </span>
         </dd>
       </div>

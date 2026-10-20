@@ -82,7 +82,7 @@ export function RiskChip({ risk }: { risk: DelayRisk }) {
   );
 }
 
-export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" | "agent" | "proposed" }) {
+export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" }) {
   return <span className={clsx("tag", tone && `tag--${tone}`)}>{children}</span>;
 }
 

@@ -31,7 +31,6 @@ export function Composer(props: {
   disabledReason?: string;
   multiline?: "chat" | "email";
   suggestions?: readonly string[];
-  className?: string;
 }) {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -83,7 +82,7 @@ export function Composer(props: {
 
   return (
     <form
-      className={clsx("composer", `composer--${mode}`, props.className)}
+      className={clsx("composer", `composer--${mode}`)}
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
