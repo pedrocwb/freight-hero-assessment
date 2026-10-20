@@ -1,9 +1,8 @@
 """Contract suite for `DocumentRepository` (`ports/documents.py`).
 
-Owner: card W3-DOC. Runs once per entry of `uow_factories.UOW_FACTORIES` (memory always,
-Postgres when `DATABASE_URL` is set) through the shared `uow_factory` fixture, each test
-on a fresh, empty store. A document's load exists, so an implementation may enforce the
-foreign key.
+Owner: card W3-DOC. Runs on the memory store through the shared `uow_factory` fixture,
+each test on a fresh, empty store. A document's load exists, so an implementation may
+enforce the foreign key.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -322,10 +321,7 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
     )
     document = pending("doc_1").model_copy(update={"blob_ref": ref, "content_type": "text/plain"})
     async with uow_factory() as uow:
-        try:
-            await uow.brokers.save(broker)
-        except NotImplementedError:  # the Postgres broker repository is card W3-BRK's
-            pytest.skip("this store cannot save a broker before card W3-BRK lands")
+        await uow.brokers.save(broker)
         await uow.obligations.save(obligation)
         await uow.timers.save(timer)
         await uow.documents.save(document)

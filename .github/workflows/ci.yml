@@ -1,7 +1,7 @@
 # The quality gates of every change: lint, types, layer rules, tests with coverage and
 # the scenario evals (core, agent and docs suites) in scripted and replay mode. Each gate
-# is a Makefile target, so `make ci` runs the same checks locally. The Postgres tests and
-# the image build are jobs of their own (`make integration`, `docker build .`).
+# is a Makefile target, so `make ci` runs the same checks locally. The image build is a
+# job of its own (`docker build .`).
 name: CI
 
 on:
@@ -27,8 +27,6 @@ jobs:
     name: Lint, types, layers, tests, evals
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      has-integration-tests: ${{ steps.integration.outputs.found }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,74 +86,8 @@ jobs:
       - name: Evals, replay mode
         run: make eval-replay
 
-      # pytest exits with 5 when the selection collects no test.
-      - name: Look for integration tests
-        id: integration
-        run: |
-          status=0
-          uv run pytest -m integration --collect-only -q > /dev/null || status=$?
-          case "$status" in
-            0) echo "found=true" >> "$GITHUB_OUTPUT" ;;
-            5) echo "found=false" >> "$GITHUB_OUTPUT" ;;
-            *) exit "$status" ;;
-          esac
-
-  # Runs once tests marked `integration` exist (they do since the Postgres adapter).
-  integration:
-    name: Integration tests (Postgres)
-    needs: checks
-    if: needs.checks.outputs.has-integration-tests == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        # pgvector ships the vector extension the SOP section embeddings need.
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: agent
-          POSTGRES_PASSWORD: agent
-          POSTGRES_DB: agent
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U agent -d agent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      # Same names and defaults as .env.example. There is no pooler here, so both match.
-      DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
-      DATABASE_URL_DIRECT: postgresql://agent:agent@localhost:5432/agent
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@v10.3.0
-        with:
-          version: ${{ env.UV_VERSION }}
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      # What `docker compose up` runs before the app: every migration from an empty
-      # database, through the CLI (0001 to 0005 once the wave 3 cards land).
-      - name: Migrations (agent db migrate)
-        run: uv run agent db migrate
-
-      # The contract suites run here too: with DATABASE_URL set, each one also runs on
-      # Postgres (the unit of work, brokers, the SOP store and index, documents: one suite
-      # per port for the memory store and Postgres). The Postgres scenario tests run every
-      # suite on both stores, and on the imported brokers and sections. `-rs` lists what
-      # was skipped and why.
-      - name: Integration and Postgres contract tests
-        run: make integration
-
   # The image `docker compose up --build` runs: it builds (web UI included), starts with
-  # no key and no database (replay, memory), answers its health check and serves the UI.
+  # no key (replay, memory), answers its health check and serves the UI.
   image:
     name: Docker image
     needs: checks

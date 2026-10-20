@@ -1,7 +1,6 @@
 """`agent sop import`: a `sops/` tree published into the SOP store, idempotently.
 
-Runs on the memory store and, with `DATABASE_URL`, on Postgres (which needs the broker
-repository of card W3-BRK to save the brokers).
+Runs on the memory store.
 """
 
 import shutil
@@ -19,7 +18,7 @@ from freight_agent.domain.broker import IntentDef, Rollout, new_broker
 from freight_agent.domain.sop import SopLayer, version_hash
 from freight_agent.ports.knowledge import Embedder
 from freight_agent.ports.repositories import UnitOfWorkFactory
-from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, UOW_FACTORIES
+from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, open_memory
 
 pytestmark = pytest.mark.contract
 
@@ -28,24 +27,10 @@ SOPS = ROOT / "sops"
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
 
 
-@pytest.fixture(params=list(UOW_FACTORIES.values()), ids=list(UOW_FACTORIES))
-async def uow_factory(request: pytest.FixtureRequest) -> AsyncIterator[UnitOfWorkFactory]:
-    factory = request.param
-    if (reason := factory.skip_reason()) is not None:
-        pytest.skip(reason)
-    async with factory.open_store(max_queue_attempts=MAX_QUEUE_ATTEMPTS) as new_uow:
-        if not await _stores_brokers(new_uow):
-            pytest.skip("this store cannot save brokers yet (card W3-BRK)")
+@pytest.fixture
+async def uow_factory() -> AsyncIterator[UnitOfWorkFactory]:
+    async with open_memory(max_queue_attempts=MAX_QUEUE_ATTEMPTS) as new_uow:
         yield new_uow
-
-
-async def _stores_brokers(uow_factory: UnitOfWorkFactory) -> bool:
-    async with uow_factory() as uow:
-        try:
-            await uow.brokers.save(new_broker("probe", "Probe"))
-        except NotImplementedError:
-            return False
-    return True  # not committed: the probe leaves nothing behind
 
 
 def importer(uow_factory: UnitOfWorkFactory, embedder: Embedder | None = None) -> SopImporter:

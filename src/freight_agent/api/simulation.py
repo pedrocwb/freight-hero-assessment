@@ -137,13 +137,13 @@ def open_session(
 ) -> Session:
     """A fresh simulation, as `bootstrap.build_simulation` builds it, keeping its store.
 
-    The contract runs the platform on an in-memory store, whatever PERSISTENCE says, so a
-    reset really starts over; attachment bytes live in memory with it. The model comes
+    The platform runs on an in-memory store, so a reset really starts over; attachment
+    bytes live in memory with it. The model comes
     from `llm_mode` (default: the setting) unless `llm` is given, which tests use to
     script the agent.
     """
     mode = llm_mode or _interactive_mode(settings)
-    effective = settings.model_copy(update={"persistence": "memory", "llm_mode": mode})
+    effective = settings.model_copy(update={"llm_mode": mode})
     persistence = build_uow_factory(effective)
     clock = VirtualClock(start.astimezone(timezone))
     gateways = RecordingGateways()

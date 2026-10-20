@@ -1,5 +1,5 @@
 """Command line entry point: `agent eval run|list|report|lint|draft`, `agent sop ...` (in
-`cli_sop.py`), `agent serve` and `agent db migrate`.
+`cli_sop.py`) and `agent serve`.
 
 `--broker-file` (a broker export, `evals/brokers/README.md`) plays a suite on one broker's
 catalog and published sections; `agent eval lint` lists the broker's intents no scenario
@@ -601,7 +601,7 @@ def _relative_to(path: Path, folder: Path) -> str:
         return str(path.resolve())
 
 
-# --- agent serve and agent db -------------------------------------------------------------
+# --- agent serve --------------------------------------------------------------------------
 
 
 @app.command("serve")
@@ -613,29 +613,3 @@ def serve(
     from freight_agent.api.__main__ import main as serve_api
 
     serve_api(["--host", host, "--port", str(port)])
-
-
-db_app = typer.Typer(no_args_is_help=True, help="Postgres schema migrations.")
-app.add_typer(db_app, name="db")
-
-
-@db_app.command("migrate")
-def db_migrate() -> None:
-    """Apply pending migrations to DATABASE_URL_DIRECT (or DATABASE_URL), from env or .env."""
-    from freight_agent.adapters.persistence.postgres.migrate import MigrationError, migrate
-
-    settings = Settings()
-    url = settings.database_url_direct or settings.database_url
-    from psycopg import OperationalError
-
-    try:
-        applied = migrate(url.get_secret_value() if url is not None else None)
-    except MigrationError as exc:
-        typer.echo(f"error: {exc}")
-        raise typer.Exit(2) from exc
-    except OperationalError as exc:  # the message names host and port, never the password
-        typer.echo(f"error: cannot reach the database: {str(exc).strip().splitlines()[0]}")
-        raise typer.Exit(2) from exc
-    typer.echo(
-        f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else "")
-    )

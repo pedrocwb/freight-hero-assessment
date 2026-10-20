@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith bakeoff sop-lint integration diagrams ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval eval-replay eval-langsmith bakeoff sop-lint diagrams ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -30,7 +30,7 @@ fmt:
 	uv run ruff format src tests
 
 test:
-	uv run pytest -m "not integration and not eval_live"
+	uv run pytest -m "not eval_live"
 
 lint:
 	uv run ruff check src tests
@@ -44,7 +44,7 @@ arch:
 
 # The coverage threshold lives in pyproject.toml ([tool.coverage.report] fail_under).
 cov:
-	uv run pytest -m "not integration and not eval_live" --cov --cov-report=term-missing
+	uv run pytest -m "not eval_live" --cov --cov-report=term-missing
 
 # Scripted mode: no network and no model.
 eval:
@@ -80,12 +80,6 @@ bakeoff:
 
 sop-lint:
 	uv run agent sop lint
-
-# The Postgres tests and every contract suite on Postgres, as CI's integration job runs
-# them. Needs a database: `docker compose up -d postgres`.
-DATABASE_URL ?= postgresql://agent:agent@localhost:5432/agent
-integration:
-	DATABASE_URL=$(DATABASE_URL) uv run pytest -m "integration or contract" -rs
 
 # Rebuilds docs/architecture.html from docs/build_diagrams.js (needs Node).
 diagrams:

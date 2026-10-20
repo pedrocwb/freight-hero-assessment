@@ -11,7 +11,6 @@ dependencies = [
     "langchain-openrouter>=0.2.9",
     "langgraph>=1.0",
     "langsmith>=0.4",
-    "psycopg[binary,pool]>=3.2",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "pypdfium2>=4.30",
@@ -49,10 +48,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
 markers = [
-    "unit: fast tests with no network and no database",
-    "contract: port contract suites, run against fakes and real adapters",
+    "unit: fast tests with no network",
+    "contract: port contract suites, run against the memory store",
     "property: hypothesis property tests",
-    "integration: needs Postgres or the API",
     "eval_replay: scenario evals replayed from recorded cassettes",
     "eval_live: scenario evals against a real model",
 ]
@@ -108,7 +106,6 @@ forbidden_modules = [
     "freight_agent.bootstrap",
     "langchain",
     "langgraph",
-    "psycopg",
     "fastapi",
     "httpx",
 ]
@@ -125,7 +122,6 @@ forbidden_modules = [
     "freight_agent.bootstrap",
     "langchain",
     "langgraph",
-    "psycopg",
     "fastapi",
 ]
 
@@ -139,7 +135,6 @@ forbidden_modules = [
     "freight_agent.evalkit",
     "freight_agent.bootstrap",
     "langchain",
-    "psycopg",
     "fastapi",
 ]
 

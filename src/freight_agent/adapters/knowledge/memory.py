@@ -17,8 +17,7 @@ description count twice); it needs no embedding, so it works offline.
 - `StoreSopIndex(uow_factory, files=root)`: the versions published in a `SopStore`
   (`agent sop import`, a broker's publish), read on every call through a short unit of
   work of its own, so a publish applies to the next run. A layer never published comes
-  from the `sops/` tree when one is given. Postgres has its own index, which also
-  searches by vector (`adapters/knowledge/postgres.py`).
+  from the `sops/` tree when one is given.
 
 The version of what a broker reads is its layers' versions joined by `+`: the standard
 layer's, then the broker's own when it has one (`compose_version`).

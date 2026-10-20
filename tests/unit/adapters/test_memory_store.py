@@ -134,7 +134,7 @@ def test_virtual_clock_advances_real_time_across_the_fall_back() -> None:
 
 
 # --- the wave 3 repositories on the same transactions (C0; their cards' contract suites
-# pin them down on memory and Postgres) ---------------------------------------------------
+# pin them down) ---------------------------------------------------------------------------
 
 
 def _sop_version(version: str) -> SopVersion:

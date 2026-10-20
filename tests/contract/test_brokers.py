@@ -1,7 +1,6 @@
 """Contract suite for `BrokerRepository` (`ports/brokers.py`), on every unit of work.
 
-Owner: card W3-BRK. It runs once per implementation of `uow_factories.UOW_FACTORIES`
-(memory always, Postgres when `DATABASE_URL` is set), each test on a fresh, empty store.
+Owner: card W3-BRK. It runs on the memory store, each test on a fresh, empty store.
 
 It pins down what the port's docstrings leave implicit: a broker comes back equal (every
 part of the catalog survives the store), `save` makes the given version current and

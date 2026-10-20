@@ -1,4 +1,4 @@
-"""Persistence ports. The memory and Postgres adapters implement the same contracts."""
+"""Persistence ports, implemented by the memory store (`adapters/persistence/memory/`)."""
 
 from collections.abc import Callable
 from datetime import datetime

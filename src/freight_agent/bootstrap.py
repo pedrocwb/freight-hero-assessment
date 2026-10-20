@@ -7,36 +7,32 @@ never import this module (the import-linter contracts forbid it).
 
 Local mode is the default and needs no secret and no network: in-memory storage,
 recording gateways (there are no real integrations), recorded model answers (`replay`)
-and no tracing. Each outside system is switched on by its setting.
+and no tracing. Each outside system is switched on by its setting. Tracing that is
+switched on without its key falls back to no tracing, with a warning that names no
+secret.
 
-The Postgres adapter is imported lazily, by name, through `LazyAdapter`, so a memory-only
-deployment never loads the database driver; choosing it while it is missing is a clear
-error. Tracing that is switched on without its key falls back to no tracing, with a
-warning that names no secret.
-
-Wave 3 adapters are found by name too, so a card plugs in without editing this file:
+Wave 3 adapters are found by name, through `LazyAdapter`, so a card plugs in without
+editing this file:
 
 | Adapter (card) | Name | Chosen when |
 |---|---|---|
-| SOP index (KNW) | `adapters.knowledge.postgres.knowledge_index` | `PERSISTENCE=postgres` |
 | Document pipeline (DOC) | `application.documents.DocumentPipeline` | always |
 | Page reader (DOC) | `adapters.documents.pdfium.PdfiumPageReader` | with the pipeline |
 | Embedder (KNW) | `adapters.knowledge.embeddings.OpenRouterEmbedder` | `LLM_MODE` live or record |
 
-Until one exists, the runtime behaves as before wave 3: it reads the `sops/` files, reads
-no document, and an embedder is a clear error in the live modes. Offline (`scripted`,
-`replay`) the embedder is `FakeEmbedder`, sized to the index's vectors: tools never run
-offline, so no real query needs a real vector.
+Until one exists, the runtime behaves as before wave 3: it reads no document, and an
+embedder is a clear error in the live modes. Offline (`scripted`, `replay`) the embedder
+is `FakeEmbedder`, sized to the index's vectors: tools never run offline, so no real
+query needs a real vector. The runs read the SOP files of `SOPS_DIR`.
 """
 
 import importlib
 import logging
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 from pydantic import SecretStr
@@ -65,14 +61,13 @@ from freight_agent.ports.knowledge import Embedder, SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
-from freight_agent.settings import LlmMode, PersistenceKind, Settings, is_set
+from freight_agent.settings import LlmMode, Settings, is_set
 
 logger = logging.getLogger(__name__)
 
 # One role's fallback chain as (model id, model) pairs, primary first: the seam where
 # tests replace OpenRouter.
 LiveChain = Callable[[ModelsConfig, ModelRole, SecretStr], Sequence[tuple[str, LanguageModel]]]
-PersistenceBuilder = Callable[[Settings], UnitOfWorkFactory]
 
 
 class BootstrapError(Exception):
@@ -84,7 +79,7 @@ class LazyAdapter:
     """An adapter found by module and attribute name, imported only when chosen.
 
     So the root can register an adapter whose card has not merged yet, and a heavy
-    dependency (a database driver, a tracing SDK) loads only for the runs that use it.
+    dependency loads only for the runs that use it.
     """
 
     module: str
@@ -106,10 +101,6 @@ class LazyAdapter:
         return getattr(module, self.attribute, None)
 
 
-# `unit_of_work_factory(conninfo: str) -> UnitOfWorkFactory`, its pool opened on first use.
-POSTGRES = LazyAdapter("freight_agent.adapters.persistence.postgres", "unit_of_work_factory")
-# `knowledge_index(settings: Settings) -> SopIndex` (card W3-KNW).
-KNOWLEDGE_POSTGRES = LazyAdapter("freight_agent.adapters.knowledge.postgres", "knowledge_index")
 # `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, timeout_s=)` and
 # `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
@@ -202,28 +193,9 @@ def _models_config(path: Path) -> ModelsConfig:
 # --- persistence ---------------------------------------------------------------
 
 
-def _memory(settings: Settings) -> UnitOfWorkFactory:
-    """One store per runtime, shared by every unit of work it opens."""
-    return MemoryStore().unit_of_work
-
-
-def _postgres(settings: Settings) -> UnitOfWorkFactory:
-    factory = POSTGRES.load()
-    if factory is None:
-        raise BootstrapError(
-            "PERSISTENCE=postgres, but the Postgres adapter is not available yet "
-            f"({POSTGRES.module}.{POSTGRES.attribute}): set PERSISTENCE=memory"
-        )
-    return factory(settings.require_database_url().get_secret_value())
-
-
-PERSISTENCE: Mapping[PersistenceKind, PersistenceBuilder] = MappingProxyType(
-    {"memory": _memory, "postgres": _postgres}
-)
-
-
 def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
-    return PERSISTENCE[settings.persistence](settings)
+    """One in-memory store per runtime, shared by every unit of work it opens."""
+    return MemoryStore().unit_of_work
 
 
 # --- tracing -------------------------------------------------------------------
@@ -270,20 +242,12 @@ def build_knowledge(
 ) -> SopIndex:
     """The SOP index the runs read.
 
-    - `PERSISTENCE=postgres`: the sections published in the database
-      (`adapters.knowledge.postgres.knowledge_index`), embedding a live `search_sop` query
-      with `build_embedder`; without that adapter, the `sops/` tree.
-    - The memory store, given its unit of work: `StoreSopIndex`, the versions published in
-      that store, with the `sops/` tree for every layer never published. A broker onboarded
-      through the API therefore reaches the runs of the same simulation.
+    - Given the memory store's unit of work: `StoreSopIndex`, the versions published in
+      that store, with the `sops/` tree for every layer never published. A broker
+      onboarded through the API therefore reaches the runs of the same simulation.
     - Otherwise the `sops/` tree (`MemorySopIndex.from_files`).
     """
-    if settings.persistence == "postgres":
-        factory = KNOWLEDGE_POSTGRES.load()
-        if factory is not None:
-            return factory(settings, embedder=build_embedder(settings))
-        logger.info("no Postgres SOP index: the runs read the SOP files in SOPS_DIR")
-    elif uow_factory is not None:
+    if uow_factory is not None:
         return StoreSopIndex(uow_factory, files=settings.sops_dir)
     return MemorySopIndex.from_files(settings.sops_dir)
 

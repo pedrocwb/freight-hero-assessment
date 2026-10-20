@@ -817,7 +817,7 @@ async def test_a_processed_document_event_reads_the_documents(
 
 
 class _NoDocuments:
-    """A document repository that must not be read (the Postgres stub before W3-DOC)."""
+    """A document repository that must not be read."""
 
     async def list_for_load(self, load_id: str) -> list[Document]:
         raise AssertionError("no attachment is in view: the documents must not be read")

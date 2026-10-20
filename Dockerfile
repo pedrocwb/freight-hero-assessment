@@ -2,7 +2,7 @@
 #
 # The whole simulation platform in one image: the API on port 8000 serves the built web UI.
 #
-#   docker compose up --build             # app, postgres and the migration job
+#   docker compose up --build             # the app, with a volume for its blobs
 #   docker build -t freight-agent .       # the image alone
 #
 # No key and no .env go into the image (.dockerignore keeps them out of the context). Every
@@ -43,20 +43,17 @@ COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-# Then the project itself. It stays an editable install on purpose: `agent db migrate`
-# finds migrations/ next to src/ (adapters/persistence/postgres/migrate.py).
+# Then the project itself, as an editable install.
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 # What the app reads at run time, at the Settings defaults (relative to /app): the SOP
-# tree (`agent sop import sops/` seeds a database from it), the scenarios, their fixtures
-# (load metadata, the Acme SOP, the POD and BOL PDFs) and cassettes, the model sets, the
-# migrations and the built UI.
+# tree, the scenarios, their fixtures (load metadata, the Acme SOP, the POD and BOL PDFs)
+# and cassettes, the model sets and the built UI.
 COPY sops ./sops
 COPY evals ./evals
 COPY config ./config
-COPY migrations ./migrations
 COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
@@ -80,6 +77,6 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
 
 # The `agent` CLI of the venv, so `docker compose run --rm app eval run --mode replay`
-# and `... app db migrate` work too.
+# works too.
 ENTRYPOINT ["agent"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]

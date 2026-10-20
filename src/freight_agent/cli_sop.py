@@ -1,8 +1,8 @@
 """`agent sop ...`: the SOP commands, registered by `cli.py` under `sop`.
 
 Owner: card W3-KNW. `agent sop lint` checks the files (moved here from `cli.py`
-unchanged); `agent sop import <dir> [--broker <id>]` publishes them into the SOP store
-of `PERSISTENCE` (`adapters/sop/importer.py`). Like `cli.py`, only typer and the
+unchanged); `agent sop import <dir> [--broker <id>]` checks that they publish into a SOP
+store (`adapters/sop/importer.py`). Like `cli.py`, only typer and the
 settings load at import time: each command imports what it needs when it runs.
 """
 
@@ -58,9 +58,9 @@ def sop_import(
     """Publish the tree's layers into the SOP store: standard/ as the standard layer,
     clients/<id>/ as broker <id>'s (created from the standard catalog when missing).
 
-    Idempotent: a layer whose text did not change keeps its version. With
-    PERSISTENCE=memory the import is only checked: the store goes away with the command.
-    Exit code 1 when a file has a problem (nothing is written then).
+    Idempotent: a layer whose text did not change keeps its version. The store is in
+    memory, so the import is only checked: it goes away with the command. Exit code 1
+    when a file has a problem (nothing is written then).
     """
     from freight_agent.adapters.sop.importer import SopImportError
     from freight_agent.settings import MissingSetting
@@ -79,8 +79,7 @@ def sop_import(
     for layer in imported:
         typer.echo(str(layer))
     changed = sum(layer.changed for layer in imported)
-    where = "the SOP store" if settings.persistence == "postgres" else "memory (checked only)"
-    typer.echo(f"{changed} of {len(imported)} layers published to {where}")
+    typer.echo(f"{changed} of {len(imported)} layers published to memory (checked only)")
 
 
 async def _import(settings: Settings, directory: Path, broker: str | None) -> "list[ImportedLayer]":
@@ -94,12 +93,5 @@ async def _import(settings: Settings, directory: Path, broker: str | None) -> "l
     # is on this branch, the same rule from `embedder_for`.
     build = getattr(bootstrap, "build_embedder", None)
     embedder = build(settings) if build is not None else embedder_for(settings)
-    if settings.persistence != "postgres":
-        importer = SopImporter(MemoryStore().unit_of_work, clock=SystemClock(), embedder=embedder)
-        return await importer.import_tree(directory, broker=broker)
-    from freight_agent.adapters.persistence.postgres import open_store
-
-    url = settings.require_database_url().get_secret_value()
-    async with open_store(url) as store:
-        importer = SopImporter(store.unit_of_work, clock=SystemClock(), embedder=embedder)
-        return await importer.import_tree(directory, broker=broker)
+    importer = SopImporter(MemoryStore().unit_of_work, clock=SystemClock(), embedder=embedder)
+    return await importer.import_tree(directory, broker=broker)

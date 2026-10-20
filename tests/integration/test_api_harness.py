@@ -67,11 +67,9 @@ def api_settings(tmp_path: Path, **overrides: Any) -> Settings:
     """The repository's SOPs, evals and models; no `.env`, no key, no tracing."""
     values: dict[str, Any] = {
         "llm_mode": "scripted",
-        "persistence": "memory",
         "langsmith_tracing": False,
         "openrouter_api_key": None,
         "langsmith_api_key": None,
-        "database_url": None,
         "sops_dir": ROOT / "sops",
         "evals_dir": ROOT / "evals",
         "models_config": ROOT / "config" / "models.yaml",

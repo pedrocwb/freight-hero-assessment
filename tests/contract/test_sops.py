@@ -1,4 +1,4 @@
-"""Contract suite for `SopStore` (`ports/knowledge.py`), on the memory store and Postgres.
+"""Contract suite for `SopStore` (`ports/knowledge.py`), on the memory store.
 
 Pins down what the port leaves implicit: the standard layer (None) and a broker's layer
 never mix, `"standard"` names the standard layer, documents list oldest first, a broker
@@ -30,7 +30,7 @@ from freight_agent.ports.repositories import UnitOfWorkFactory
 pytestmark = pytest.mark.contract
 
 T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
-DIM = 1536  # the Postgres column's width
+DIM = 1536  # the embedding width of `config/models.yaml`
 
 
 def document(document_id: str, broker_id: str | None, minute: int = 0) -> SopDocument:

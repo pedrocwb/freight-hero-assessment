@@ -6,8 +6,8 @@ into adapters. Nothing below the root reads the environment.
 
 Secrets are `SecretStr`: a repr, a JSON dump or a validation error never shows them, and
 `describe()` reports each one only as set or unset. They are optional, so the offline
-modes (scripted, replay, in-memory storage) start with none; the code that needs one asks
-for it with a `require_*` method, which names the variable when it is missing.
+modes (scripted, replay) start with none; the code that needs one asks for it with a
+`require_*` method, which names the variable when it is missing.
 
 Each field is read from the variable of the same name in capitals (`llm_mode` from
 `LLM_MODE`). The environment wins over `.env`, and an empty value counts as unset, so a
@@ -21,7 +21,6 @@ from typing import Literal, TypeGuard
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PersistenceKind = Literal["memory", "postgres"]
 LlmMode = Literal["scripted", "replay", "live", "record"]
 
 
@@ -50,8 +49,6 @@ class Settings(BaseSettings):
 
     # Secrets
     openrouter_api_key: SecretStr | None = None
-    database_url: SecretStr | None = None  # pooled endpoint: API
-    database_url_direct: SecretStr | None = None  # direct endpoint: worker, migrations
     langsmith_api_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
 
@@ -60,7 +57,6 @@ class Settings(BaseSettings):
     langsmith_project: str = "freight-agent"
 
     # Adapters
-    persistence: PersistenceKind = "memory"
     llm_mode: LlmMode = "replay"  # offline and deterministic: no key, no network
 
     # Paths
@@ -73,9 +69,6 @@ class Settings(BaseSettings):
 
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "a live model")
-
-    def require_database_url(self) -> SecretStr:
-        return _required(self.database_url, "DATABASE_URL", "Postgres persistence")
 
     def describe(self) -> dict[str, str]:
         """Every setting by its variable name, safe to print or log: a secret shows only

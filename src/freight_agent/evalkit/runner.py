@@ -11,9 +11,7 @@ gateways, SOP index, a blob store with the scenario's attachments and, for a bro
 export, the broker to seed). Two kinds of factory build it:
 
 - a `TrialFactory(deps)`: the default, `build_trial_runtime`, runs the product runtime
-  on a fresh memory store with the document pipeline when card W3-DOC provides it
-  (`partial(build_trial_runtime, uow_factory=store.unit_of_work)` runs it on another
-  store, a Postgres scratch schema);
+  on a fresh memory store with the document pipeline when card W3-DOC provides it;
 - a `RuntimeFactory(clock, model, gateways, knowledge)`, the pre-wave-3 contract, still
   accepted (a test's fake runtime, another store): it gets no blob store and cannot seed
   a broker, so a scenario that needs one is a setup error with it.
@@ -126,16 +124,13 @@ TrialFactory = Callable[[TrialDeps], RuntimeLike]
 RuntimeFactory = Callable[[Clock, LanguageModel, Gateways, SopIndex], RuntimeLike]
 
 
-def build_trial_runtime(
-    deps: TrialDeps, *, uow_factory: UnitOfWorkFactory | None = None
-) -> RuntimeLike:
-    """The product runtime on a fresh memory store (or on `uow_factory`, another store such
-    as a Postgres scratch schema), with deterministic ids and no tracing.
+def build_trial_runtime(deps: TrialDeps) -> RuntimeLike:
+    """The product runtime on a fresh memory store, with deterministic ids and no tracing.
 
     Documents are read by the product's pipeline once card W3-DOC provides it (until then
     by nothing). A broker export's broker is saved in the store before the load.
     """
-    uow_factory = uow_factory or MemoryStore().unit_of_work
+    uow_factory = MemoryStore().unit_of_work
     runtime_deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=deps.clock,

@@ -212,36 +212,14 @@ the database, idempotently.
 ### Docker
 
 ```bash
-docker compose up --build                # UI + API on http://localhost:8000, Postgres, migrations
+docker compose up --build                # UI + API on http://localhost:8000
 LLM_MODE=live docker compose up          # the live model (reads OPENROUTER_API_KEY from .env)
 docker compose run --rm app eval run --suite core --mode replay
-docker compose run --rm -e PERSISTENCE=postgres app sop import sops/   # seed the database
-docker compose down                      # add -v to drop the database and blobs volumes
+docker compose down                      # add -v to drop the blobs volume
 ```
 
 Ports are published on 127.0.0.1 only. Uploaded attachments and SOP files are kept in the
 `blobs` volume (`BLOBS_DIR=/app/blobs`); the image writes nowhere else but eval results.
-
-## Postgres
-
-The agent's state (event log, obligations ledger, timers, outbox, runs, per-load queue),
-the brokers and their versions, the SOP documents, drafts and published sections with
-their embeddings (pgvector), and the documents live behind ports with two
-implementations: in memory (tests, evals, the platform) and Postgres (production; works
-through Neon's pooler). Both pass the same contract suites.
-
-```bash
-docker compose up -d postgres
-export DATABASE_URL=postgresql://agent:agent@localhost:5432/agent
-uv run agent db migrate                  # 0001 to 0005, each once
-uv run agent sop import sops/            # with PERSISTENCE=postgres: brokers and SOP versions
-make integration                         # Postgres tests + every contract suite on Postgres
-```
-
-`PERSISTENCE=postgres` makes the runtime use it, and the runs then read the published
-sections through the Postgres SOP index (hybrid search). The integration tests also run
-every scenario of every suite on Postgres and check that the state matches the memory
-store at every step, also when the runs read the imported brokers and sections.
 
 ## Configuration
 
@@ -251,8 +229,6 @@ Copy `.env.example` to `.env`. Every value is optional for the quick start.
 |---|---|---|
 | `OPENROUTER_API_KEY` | unset | live and record modes: model calls and SOP embeddings |
 | `LLM_MODE` | `replay` | `scripted`, `replay`, `live` or `record`; offline modes embed with a deterministic fake |
-| `PERSISTENCE` | `memory` | `memory` or `postgres` (state, brokers, SOP versions, documents) |
-| `DATABASE_URL`, `DATABASE_URL_DIRECT` | unset | pooled URL for the app, direct URL for migrations |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run. `LANGSMITH_API_KEY` also enables `agent eval run --langsmith` |
 | `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `CASSETTES_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals, cassettes and the built UI live |
 | `BLOBS_DIR` | `blobs` | bytes of uploaded attachments and SOP files, created on the first upload |
@@ -271,7 +247,7 @@ src/freight_agent/
                  model, clock, tracer
   application/   run context, prefilter, triage, the agent loop and its tools, executor,
                  the LangGraph run graph, runtime, document pipeline, SOP ingestion, metrics
-  adapters/      memory and Postgres stores, OpenRouter / cassette / scripted models, the SOP
+  adapters/      the memory store, OpenRouter / cassette / scripted models, the SOP
                  index (memory, pgvector) and embedders, SOP files, lint and importer, blobs
                  and the PDF page reader, LangSmith
   evalkit/       scenario spec, runner, graders, judge, scenario drafts, suites and reports
@@ -283,7 +259,6 @@ sops/            the seed SOPs: standard, client and client + load-type sections
 evals/           scenarios (core, agent, docs, per broker), broker exports, fixtures (the
                  load, the Acme SOP, POD and BOL PDFs), cassettes, results (gitignored)
 config/          models per role, prices, the embedding model, bake-off candidate sets
-migrations/      numbered SQL (0003 brokers, 0004 knowledge, 0005 documents)
 web/             React + Vite platform UI
 tests/           unit, contract, property, integration, evalkit
 ```

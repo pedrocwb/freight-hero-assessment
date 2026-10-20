@@ -1,4 +1,4 @@
-"""In-memory persistence: the same contracts as Postgres, for unit tests, evals and the simulation.
+"""In-memory persistence, for unit tests, evals and the simulation: the only store.
 
 Transactions are serialized with a lock and rolled back by restoring a snapshot,
 so a failed run leaves no partial state, exactly like a database transaction.

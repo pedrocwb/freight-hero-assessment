@@ -584,21 +584,6 @@ async def test_a_broker_is_saved_in_the_trials_store_before_the_load() -> None:
 
 
 @pytest.mark.unit
-async def test_the_trial_runtime_may_run_on_another_store() -> None:
-    from freight_agent.adapters.persistence.memory.store import MemoryStore
-
-    store = MemoryStore()
-    broker = new_broker("acme", "Acme Freight")
-
-    runtime = build_trial_runtime(trial_deps(broker=broker), uow_factory=store.unit_of_work)
-    await runtime.register_load(fixture_load())
-
-    async with store.unit_of_work() as uow:
-        assert await uow.brokers.get("acme") == broker
-        assert await uow.loads.get(LOAD_ID) is not None
-
-
-@pytest.mark.unit
 def test_the_document_pipeline_is_used_once_its_card_provides_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

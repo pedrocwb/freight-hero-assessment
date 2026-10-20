@@ -52,7 +52,6 @@ from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Load
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
-from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.settings import MissingSetting, Settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,7 +59,6 @@ MODELS_YAML = ROOT / "config" / "models.yaml"
 SOPS = ROOT / "sops"
 KEY = "sk-or-v1-bootstrap-test-secret"
 LANGSMITH_KEY = "lsv2_pt_bootstrap-test-secret"
-DATABASE_URL = "postgresql://agent:bootstrap-test-password@db.example/agent"
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
 GATE = LlmRequest(role=ModelRole.GATE, system="classify", user="driver: ok", max_tool_rounds=0)
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
@@ -342,65 +340,6 @@ def test_what_the_caller_passes_replaces_the_default(tmp_path: Path, clock: Virt
     )
 
 
-# --- persistence ---------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_postgres_is_a_clear_error_until_its_adapter_lands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _absent(monkeypatch, bootstrap.POSTGRES)
-    settings = _settings(tmp_path, persistence="postgres", database_url=DATABASE_URL)
-
-    with pytest.raises(BootstrapError, match="PERSISTENCE=memory") as raised:
-        build_runtime_deps(settings)
-
-    assert "postgres" in str(raised.value).lower()
-    assert DATABASE_URL not in str(raised.value)
-
-
-@pytest.mark.unit
-def test_postgres_is_built_from_the_database_url_once_its_adapter_exists(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    received: list[str] = []
-    uow_factory = MemoryStore().unit_of_work
-
-    def factory(database_url: str) -> UnitOfWorkFactory:
-        received.append(database_url)
-        return uow_factory
-
-    _fake_module(monkeypatch, bootstrap.POSTGRES, factory)
-    settings = _settings(tmp_path, persistence="postgres", database_url=DATABASE_URL)
-
-    assert build_runtime_deps(settings).uow_factory is uow_factory
-    assert received == [DATABASE_URL]
-
-
-@pytest.mark.unit
-def test_postgres_uses_the_real_adapter_and_opens_no_connection_while_building(
-    tmp_path: Path,
-) -> None:
-    from freight_agent.adapters.persistence.postgres import PostgresUnitOfWorkFactory
-
-    settings = _settings(tmp_path, persistence="postgres", database_url=DATABASE_URL)
-
-    factory = build_runtime_deps(settings).uow_factory
-
-    assert isinstance(factory, PostgresUnitOfWorkFactory)
-    assert factory.pool.closed  # opens on the first unit of work, in the caller's loop
-
-
-@pytest.mark.unit
-def test_postgres_without_a_database_url_names_the_variable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _fake_module(monkeypatch, bootstrap.POSTGRES, lambda _url: MemoryStore().unit_of_work)
-
-    with pytest.raises(MissingSetting, match="DATABASE_URL"):
-        build_runtime_deps(_settings(tmp_path, persistence="postgres"))
-
-
 # --- tracer --------------------------------------------------------------------
 
 
@@ -537,39 +476,6 @@ async def test_the_local_runtime_reads_the_sop_files(tmp_path: Path) -> None:
 
     assert isinstance(knowledge, MemorySopIndex)
     assert await knowledge.version("northline") == FileSopRepository(SOPS).version()
-
-
-@pytest.mark.unit
-def test_postgres_reads_the_sop_files_until_the_knowledge_index_exists(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _absent(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES)
-
-    knowledge = bootstrap.build_knowledge(_settings(tmp_path, persistence="postgres"))
-
-    assert isinstance(knowledge, MemorySopIndex)
-
-
-@pytest.mark.unit
-def test_postgres_uses_the_knowledge_index_once_it_exists(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    index = MemorySopIndex([], version="db")
-    seen: list[Settings] = []
-
-    embedders: list[object] = []
-
-    def knowledge_index(settings: Settings, *, embedder: object = None) -> MemorySopIndex:
-        seen.append(settings)
-        embedders.append(embedder)
-        return index
-
-    _fake_module(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES, knowledge_index)
-    settings = _settings(tmp_path, persistence="postgres")
-
-    assert bootstrap.build_knowledge(settings) is index
-    assert seen == [settings]
-    assert isinstance(embedders[0], FakeEmbedder)  # replay: no live query embedding
 
 
 @pytest.mark.unit

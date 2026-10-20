@@ -1,7 +1,6 @@
 """`agent sop import`: the command line over the importer, and its exit codes.
 
-The memory store only checks the tree (it goes away with the command); the Postgres
-path is the importer's, tested in `tests/unit/adapters/test_knowledge_importer.py`.
+The memory store only checks the tree (it goes away with the command).
 """
 
 import shutil
@@ -23,7 +22,7 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """No `.env` and no shell setting of the developer: offline, in memory."""
-    for name in ("LLM_MODE", "PERSISTENCE", "DATABASE_URL", "OPENROUTER_API_KEY"):
+    for name in ("LLM_MODE", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MODELS_CONFIG", str(ROOT / "config" / "models.yaml"))
@@ -71,17 +70,6 @@ def test_a_broker_with_no_files_exits_1() -> None:
 
     assert result.exit_code == 1
     assert "there are no SOP files for acme" in result.output
-
-
-def test_postgres_without_a_database_url_says_which_variable_to_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PERSISTENCE", "postgres")
-
-    result = agent("sop", "import", str(ROOT / "sops"))
-
-    assert result.exit_code == 2
-    assert "DATABASE_URL" in result.output
 
 
 def test_lint_still_checks_the_files() -> None:
