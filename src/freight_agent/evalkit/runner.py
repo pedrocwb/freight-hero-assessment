@@ -3,13 +3,15 @@ changed. It does not grade: graders judge the observations separately, so the tw
 built and tested on their own. The timing rules are the ones in the `evalkit.spec`
 docstring.
 
-One player, two places:
+One player, three places:
 
 - a LangSmith experiment (`evalkit.experiment`) plays each example on a fresh trial
   runtime (`play_scenario`): the product runtime on a memory store, with a virtual
   clock, recording gateways, deterministic ids and the document pipeline;
 - the platform (`api.scenarios`) plays a scenario inside its simulation, after a reset,
-  step by step (`ScenarioPlayer`), so its load and runs show in the UI as they happen.
+  step by step (`ScenarioPlayer`), so its load and runs show in the UI as they happen;
+- LangGraph Studio (`freight_agent.studio`) plays a step one tick at a time
+  (`begin`, `next_tick`, `observe`), so that each run is a node of its graph.
 
 The model is always the live one. The player counts its calls through `CountingModel`
 (an agent loop counts once), and runs the judge (`evalkit.judge`) right after a step that
@@ -18,7 +20,7 @@ has a rubric, on the uncounted model, so `llm_calls` counts the agent's calls on
 
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -136,6 +138,19 @@ def read_attachments(evals_dir: Path, scenario: Scenario) -> dict[str, bytes]:
 # --- the player -------------------------------------------------------------------------
 
 
+@dataclass
+class StepProgress:
+    """How far one step has been played: what its observation counts from, and whether
+    the clock has reached the step's time (after which only its injection is left)."""
+
+    index: int
+    at: datetime
+    before: LoadSnapshot
+    llm_calls_before: int
+    arrived: bool = False
+    ticks_at_instant: int = field(default=0, repr=False)
+
+
 class ScenarioPlayer:
     """Plays one scenario on one runtime, a step at a time: moves the clock, injects,
     observes. `model` is the runtime's own model, counted; `judge` grades the steps that
@@ -169,21 +184,58 @@ class ScenarioPlayer:
         await self._runtime.register_load(self.load)
 
     async def play(self, index: int) -> StepObservation:
-        step = self.scenario.steps[index]
-        at = self.times[index]
-        load_id = self.load.load_id
-        before = await self._runtime.snapshot(load_id)
-        calls_before = self._model.calls
-        await self._advance_to(at)
-        if await self._inject(index, step, at):
-            self._clock.set(self._settle_time(index, at))
+        """Play step `index`: a tick at every instant `next_tick` stops at, then what the
+        step changed."""
+        progress = await self.begin(index)
+        while await self.next_tick(progress):
             await self._runtime.tick()
-        after = await self._runtime.snapshot(load_id)
+        return await self.observe(progress)
+
+    async def begin(self, index: int) -> StepProgress:
+        """Start step `index`: what its observation will count from."""
+        before = await self._runtime.snapshot(self.load.load_id)
+        return StepProgress(
+            index=index, at=self.times[index], before=before, llm_calls_before=self._model.calls
+        )
+
+    async def next_tick(self, progress: StepProgress) -> bool:
+        """Move the world to the next instant of the step at which the runtime must tick,
+        and say whether there is one.
+
+        First every pending timer due by the step's time, in due order (zero latency);
+        then the clock reaches the step's time and the step's message or ping, if any, is
+        ingested, its tick `run_latency_seconds` later. A step that injects nothing ends
+        when the clock reaches its time, without a tick.
+        """
+        if progress.arrived:
+            return False
+        due = await self._runtime.next_timer_due_at()
+        if due is not None and due <= progress.at:
+            if due > self._clock.now():  # an overdue timer fires at the current time
+                self._clock.set(due)
+                progress.ticks_at_instant = 0
+            progress.ticks_at_instant += 1
+            if progress.ticks_at_instant > _MAX_TICKS_AT_ONE_INSTANT:
+                raise RunnerError(f"the runtime did not fire the timer due at {due.isoformat()}")
+            return True
+        self._clock.set(progress.at)
+        progress.arrived = True
+        index = progress.index
+        if not await self._inject(index, self.scenario.steps[index], progress.at):
+            return False
+        self._clock.set(self._settle_time(index, progress.at))
+        return True
+
+    async def observe(self, progress: StepProgress) -> StepObservation:
+        """What the step changed, once `next_tick` said it is over; a step with a rubric
+        is judged here."""
+        step = self.scenario.steps[progress.index]
+        before, after = progress.before, await self._runtime.snapshot(self.load.load_id)
         outbox = _created(before.outbox, after.outbox, key=lambda item: item.outbox_id)
-        llm_calls = self._model.calls - calls_before  # before the judge, which is apart
+        llm_calls = self._model.calls - progress.llm_calls_before  # the judge is apart
         return StepObservation(
-            step_index=index,
-            at=at,
+            step_index=progress.index,
+            at=progress.at,
             outbox=outbox,
             runs=_created(before.runs, after.runs, key=lambda run: run.run_id),
             llm_calls=llm_calls,
@@ -199,19 +251,6 @@ class ScenarioPlayer:
         if result.usage is not None:
             self.judge_usage.append(result.usage)
         return result
-
-    async def _advance_to(self, at: datetime) -> None:
-        """Stop at every pending timer due by `at`, in due order, and tick there (zero latency)."""
-        ticks_at_instant = 0
-        while (due := await self._runtime.next_timer_due_at()) is not None and due <= at:
-            if due > self._clock.now():  # an overdue timer fires at the current time
-                self._clock.set(due)
-                ticks_at_instant = 0
-            ticks_at_instant += 1
-            if ticks_at_instant > _MAX_TICKS_AT_ONE_INSTANT:
-                raise RunnerError(f"the runtime did not fire the timer due at {due.isoformat()}")
-            await self._runtime.tick()
-        self._clock.set(at)
 
     async def _inject(self, index: int, step: Step, at: datetime) -> bool:
         """Ingest the step's message or ping, if any. Returns whether something was ingested."""

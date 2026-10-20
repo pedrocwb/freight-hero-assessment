@@ -539,12 +539,19 @@ class AgentRuntime:
         return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
 
     async def tick(self) -> list[RunRecord]:
-        """fire_due_timers, then the document pipeline, then process_all, then dispatch_outbox."""
-        await self.fire_due_timers()
-        await self._deps.documents.process_pending()
+        """queue_due_events, then process_all, then dispatch_outbox."""
+        await self.queue_due_events()
         runs = await self.process_all()
         await self.dispatch_outbox()
         return runs
+
+    async def queue_due_events(self) -> None:
+        """The start of a tick: fire the due timers, then read the pending documents, so
+        every event of the tick is queued before its first run. LangGraph Studio's scenario
+        graph (`freight_agent.studio`) calls the three parts of a tick one by one, so that
+        each run is a node of its own."""
+        await self.fire_due_timers()
+        await self._deps.documents.process_pending()
 
     # --- read model -------------------------------------------------------------------------
 
