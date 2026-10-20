@@ -279,3 +279,34 @@ docs 3/3, every scenario passing while it was recorded): **$1.003 in total**, ag
 cap of $3. The 45 wave 2 cassettes, no longer read by any prompt, were removed; replay
 runs on the 63 new ones and blocks CI again. The `extract` role stayed
 `google/gemini-2.5-flash` (the docs suite's extractions passed in both rounds).
+
+### End-to-end onboarding check (live, 2026-10-20)
+
+On a live platform instance (`LLM_MODE=live`): a broker `acme` created from the standard
+catalog; `evals/fixtures/sops/acme_sop.pdf` uploaded and compiled (`compile` role,
+`gpt-4.1-mini`, 3 pages); the draft reviewed and published (config version 2); then load
+481207 run as an Acme load.
+
+- **Compile.** The draft had the five topics as sections, proposed `detention_request`, the
+  POD requirement (`pod` at `at_delivery`, 120 minutes) and the obligations `eta_request`
+  (20 minutes, 3 attempts) and `pod` (30 minutes, 1 attempt). The publish lint refused it
+  until the review linked two sections: `detention` was tagged `other` instead of the
+  proposed intent, and no section named `pod_follow_up_due`. After a checklist was added at
+  the end of the compile prompt, a second compile linked the POD section to
+  `document_processed` but proposed no detention intent and again missed
+  `pod_follow_up_due`. A compile is a draft that varies between runs; the review and the
+  publish lint are the guard, and they held both times. A stronger `compile` model is the
+  next thing to try.
+- **The load ran on Acme's procedure:** at 07:00 the high-risk ping sent the ETA SMS with a
+  follow-up timer at 07:21 (Acme's 20 minutes, not the standard 30); at 07:12 the PO
+  question got "PO 55821"; at 07:18 "already at Valley DC" moved the stage to `at_delivery`,
+  closed the ETA request as satisfied and opened the `pod` obligation with its timer at
+  09:19 (120 minutes); the uploaded `pod_clean.pdf` was read as `processed` (POD,
+  confidence 0.95, receiver, PO, signature and date checks ok); the message's own run did
+  nothing with it, and the `document_processed` run moved the load to `delivered` and wrote
+  the TMS note, with the `pod` obligation satisfied. Every run recorded config version 2.
+  Model cost of the load's runs: $0.0038.
+
+OpenRouter's own meter for the key after all of this: $1.02 spent on 2026-10-20 (the
+LangSmith runs of card LSM-1, this section's rounds, the recording, the smoke run, the
+demo and the two compiles), $1.61 in total on the key since the project started.
