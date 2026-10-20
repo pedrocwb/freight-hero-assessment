@@ -22,7 +22,8 @@ Every method is one model call:
 
 Any provider error, timeout (`request.timeout_s`, for the call) or answer that does not
 fit the schema becomes `LlmError`, named after the model. Each call is a LangChain run,
-named after its role and model, so a LangSmith trace shows it under its graph node.
+named after its role and model, so a LangSmith trace shows it under its graph node, with
+the version of the prompt template it was rendered from (`prompt_version`).
 """
 
 import asyncio
@@ -122,7 +123,7 @@ class OpenRouterModel:
         return f"OpenRouterModel(model={self.model_id!r})"
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
-        answer = answer_tool(schema)
+        answer = answer_tool(schema, request.answer_description)
         name = answer["function"]["name"]
         reply, usage = await self._call(request, _messages(request), [answer], name)
         call = _answer_call(reply, name)
@@ -131,7 +132,7 @@ class OpenRouterModel:
         return LlmResponse(parsed=self._parse(request, schema, call), usage=usage)
 
     async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
-        answer = answer_tool(schema)
+        answer = answer_tool(schema, request.answer_description)
         name = answer["function"]["name"]
         if any(t.name == name for t in request.tools):
             raise ValueError(f"a tool is named {name}, the name of the answer tool")
@@ -156,10 +157,17 @@ class OpenRouterModel:
         # Names the call in a LangSmith trace ("agent · openai/gpt-oss-120b"); without an
         # active trace the config changes nothing.
         role = request.role.value
+        metadata: dict[str, Any] = {
+            "role": role,
+            "ls_provider": "openrouter",
+            "ls_model_name": self.model_id,
+        }
+        if request.prompt_version is not None:
+            metadata["prompt_version"] = request.prompt_version
         config: RunnableConfig = {
             "run_name": f"{role} · {self.model_id}",
             "tags": [f"role:{role}"],
-            "metadata": {"role": role, "ls_provider": "openrouter", "ls_model_name": self.model_id},
+            "metadata": metadata,
         }
         started = self._timer()
         try:
@@ -228,11 +236,13 @@ def models_for_role(
     )
 
 
-def answer_tool(schema: type[BaseModel]) -> dict[str, Any]:
-    """The schema as an OpenAI-style function the model calls to give its answer."""
+def answer_tool(schema: type[BaseModel], description: str | None = None) -> dict[str, Any]:
+    """The schema as an OpenAI-style function the model calls to give its answer.
+    `description` replaces the schema's docstring: the template's text for the tool."""
     tool = convert_to_openai_tool(schema)
     function = tool["function"]
-    function["description"] = f"Give your final answer. {function.get('description', '')}".strip()
+    about = function.get("description", "") if description is None else description
+    function["description"] = f"Give your final answer. {about}".strip()
     return tool
 
 

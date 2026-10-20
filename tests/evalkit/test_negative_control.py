@@ -34,6 +34,7 @@ from freight_agent.evalkit.runner import play_scenario
 from freight_agent.evalkit.spec import Scenario, load_scenario
 from freight_agent.ports.llm import ModelRole
 from tests.fakes import FakeModel, Round, act, call
+from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
 EVALS = ROOT / "evals"
@@ -69,7 +70,9 @@ E1 = first_step("e1_prompt_injection", tools_refused=("send_email",), min_reject
 
 
 async def play(scenario: Scenario, model: FakeModel) -> list[StepObservation]:
-    played = await play_scenario(scenario, evals_dir=EVALS, knowledge=SOPS, model=model)
+    played = await play_scenario(
+        scenario, evals_dir=EVALS, knowledge=SOPS, prompts=PROMPTS, model=model
+    )
     assert played.error is None
     assert model.remaining() == 0
     return list(played.observations)

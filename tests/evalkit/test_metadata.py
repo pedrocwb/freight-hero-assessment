@@ -1,38 +1,30 @@
 """Reproducibility metadata: what an experiment records so it can be explained later.
 
-A changed prompt must show as a changed hash, per broker, and collecting must never fail
-a run: git and the models file are read through seams (a fake git runner, a missing
-file), and what cannot be read is recorded as unknown.
+The prompts are each role's template version and the pin it came from, and collecting
+must never fail a run: git and the models file are read through seams (a fake git
+runner, a missing file), and what cannot be read is recorded as unknown.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.models_config import load_models_config
-from freight_agent.domain.broker import Broker, standard_broker
-from freight_agent.evalkit import metadata as metadata_module
 from freight_agent.evalkit.metadata import (
     RunMetadata,
-    brokers,
     collect_metadata,
     git_state,
-    prompt_hashes,
     run_git,
 )
+from tests.prompts import PROMPTS, PROMPTS_DIR
 
 ROOT = Path(__file__).resolve().parents[2]
-SOPS = ROOT / "sops"
 MODELS = ROOT / "config" / "models.yaml"
 CREATED = datetime(2026, 10, 20, 1, 30, tzinfo=UTC)
 
 pytestmark = pytest.mark.unit
-
-
-def named(broker_id: str, **changes: object) -> Broker:
-    return standard_broker().model_copy(update={"broker_id": broker_id, **changes})
 
 
 class FakeGit:
@@ -47,90 +39,47 @@ class FakeGit:
         return self.answers[args[0]]
 
 
-# --- prompt hashes ------------------------------------------------------------------------
+# --- prompts -----------------------------------------------------------------------------
 
 
-def test_every_prompt_is_hashed_per_broker_with_extract_for_brokers_with_documents() -> None:
-    bare = named("bare", document_types=(), documents=())
+def test_the_prompts_are_each_roles_version_and_the_reference_it_came_from() -> None:
+    found = collect(prompts=PROMPTS)
 
-    hashes = prompt_hashes([standard_broker(), bare])
-
-    assert list(hashes) == [
-        "judge",
-        "gate:standard",
-        "agent:standard",
-        "extract:standard",
-        "gate:bare",
-        "agent:bare",
-    ]
-    assert all(len(h) == 12 for h in hashes.values())
+    assert found.prompts == PROMPTS.versions()
+    assert set(found.prompts) == {"gate", "agent", "extract", "judge"}
+    assert all(v.startswith("local:") and len(v) == 18 for v in found.prompts.values())
+    assert found.prompt_refs == {
+        role: str(PROMPTS_DIR / f"{role}.yaml") for role in ("gate", "agent", "extract", "judge")
+    }
 
 
-def changed(name: str) -> dict[str, str]:
-    """Which prompt hashes of the standard broker differ from the unchanged one's."""
-    base, broker = prompt_hashes([standard_broker()]), standard_broker()
-    if name == "intent":
-        first = broker.intents[0].model_copy(update={"description": "Something else."})
-        broker = broker.model_copy(update={"intents": (first, *broker.intents[1:])})
-    elif name == "limit":
-        limits = broker.limits.model_copy(update={"max_steps": 3})
-        broker = broker.model_copy(update={"limits": limits})
-    elif name == "document":
-        first = broker.document_types[0].model_copy(update={"description": "x y z"})
-        broker = broker.model_copy(update={"document_types": (first, *broker.document_types[1:])})
-    after = prompt_hashes([broker])
-    return {key: after[key] for key in base if after[key] != base[key]}
+def test_a_hub_version_is_recorded_with_its_pin() -> None:
+    hub = replace(PROMPTS.agent, ref="freight-agent-agent:candidate", version="3f2a9c41d0be")
+    prompts = replace(PROMPTS, agent=hub)
+
+    found = collect(prompts=prompts).for_langsmith()
+
+    assert (found["prompt_agent"], found["prompt_ref_agent"]) == (
+        "3f2a9c41d0be",
+        "freight-agent-agent:candidate",
+    )
+    assert found["prompt_gate"] == PROMPTS.gate.version
 
 
-def test_the_hashes_are_stable() -> None:
-    assert prompt_hashes([standard_broker()]) == prompt_hashes([standard_broker()])
-    assert changed("nothing") == {}
-
-
-@pytest.mark.parametrize(
-    ("change", "prompts"),
-    [
-        ("intent", {"gate:standard", "agent:standard"}),  # the catalog is in both
-        ("limit", {"agent:standard"}),  # the agent's budget
-        ("document", {"extract:standard"}),
-    ],
-)
-def test_a_changed_catalog_changes_the_hash_of_each_prompt_that_shows_it(
-    change: str, prompts: set[str]
-) -> None:
-    assert set(changed(change)) == prompts
-
-
-def test_a_changed_judge_prompt_changes_its_hash(monkeypatch: pytest.MonkeyPatch) -> None:
-    before = prompt_hashes([standard_broker()])
-    monkeypatch.setattr(metadata_module, "JUDGE_SYSTEM_PROMPT", "Grade harshly.")
-
-    after = prompt_hashes([standard_broker()])
-
-    assert {k for k in before if after[k] != before[k]} == {"judge"}
-
-
-async def test_the_brokers_are_the_standard_one_and_each_client_folders(tmp_path: Path) -> None:
-    clients = tmp_path / "clients"
-    for client in ("acme", "northline"):
-        (clients / client).mkdir(parents=True)
-    (clients / "README.md").write_text("not a client")
-    acme = named("acme", name="Acme Freight")
-    knowledge = MemorySopIndex((), brokers=[acme])
-
-    found = await brokers(knowledge, tmp_path)
-
-    # northline has no catalog of its own: the index answers the standard one, kept once
-    assert [b.broker_id for b in found] == ["standard", "acme"]
-    assert found[1] is acme
-    assert [b.broker_id for b in await brokers(knowledge, tmp_path / "none")] == ["standard"]
-
-
-async def test_the_shipped_sop_tree_hashes_the_standard_and_acme_prompts() -> None:
-    found = await brokers(MemorySopIndex.from_files(SOPS), SOPS)
-
-    assert {b.broker_id for b in found} == {"standard", "acme"}
-    assert {"extract:standard", "extract:acme"} <= set(prompt_hashes(found))
+def collect(**changes: object) -> RunMetadata:
+    options: dict[str, object] = {
+        "created_at": CREATED,
+        "suite": "core",
+        "k": 1,
+        "cost_cap_usd": 0.25,
+        "sop_version": None,
+        "models_config": MODELS,
+        "prompts": PROMPTS,
+        "repo": ROOT,
+        "git": FakeGit(),
+        **changes,
+    }
+    return collect_metadata(**options)  # pyright: ignore[reportArgumentType]
 
 
 # --- git ----------------------------------------------------------------------------------
@@ -159,21 +108,19 @@ def test_run_git_is_none_when_git_cannot_run(tmp_path: Path) -> None:
 # --- collecting and flattening ------------------------------------------------------------
 
 
-async def test_collect_metadata_records_the_code_the_sops_the_models_and_the_prompts(
+def test_collect_metadata_records_the_code_the_sops_the_models_and_the_prompts(
     tmp_path: Path,
 ) -> None:
     git = FakeGit(status=" M src/freight_agent/cli.py\n")
-    knowledge = MemorySopIndex.from_files(SOPS)
 
-    found = await collect_metadata(
+    found = collect_metadata(
         created_at=CREATED,
         suite="core",
         k=3,
         cost_cap_usd=0.25,
-        knowledge=knowledge,
-        sops_dir=SOPS,
         sop_version="sop-v1",
         models_config=MODELS,
+        prompts=PROMPTS,
         repo=tmp_path,
         git=git,
     )
@@ -189,30 +136,19 @@ async def test_collect_metadata_records_the_code_the_sops_the_models_and_the_pro
     config = load_models_config(MODELS)
     assert found.models == {role.value: [c.model, *c.fallbacks] for role, c in config.roles.items()}
     assert found.models["gate"][0] == "openai/gpt-4.1-nano"
-    assert found.prompts == prompt_hashes(await brokers(knowledge, SOPS))
+    assert found.prompts == PROMPTS.versions()
     assert found.python is not None
 
 
-async def test_a_broken_models_file_is_recorded_as_unknown(tmp_path: Path) -> None:
+def test_a_broken_models_file_is_recorded_as_unknown(tmp_path: Path) -> None:
     broken = tmp_path / "models.yaml"
     broken.write_text("roles: [not, a, mapping]\n")
 
-    found = await collect_metadata(
-        created_at=CREATED,
-        suite="core",
-        k=1,
-        cost_cap_usd=0.25,
-        knowledge=MemorySopIndex(()),
-        sops_dir=tmp_path,
-        sop_version=None,
-        models_config=broken,
-        repo=tmp_path,
-        git=FakeGit(sha=None),
-    )
+    found = collect(models_config=broken, repo=tmp_path, git=FakeGit(sha=None))
 
     assert found.models == {}
     assert (found.git_sha, found.git_dirty, found.sop_version) == (None, None, None)
-    assert set(found.prompts) == {"judge", "gate:standard", "agent:standard", "extract:standard"}
+    assert found.prompts == PROMPTS.versions()
 
 
 def test_for_langsmith_flattens_the_models_and_the_prompts() -> None:
@@ -224,7 +160,8 @@ def test_for_langsmith_flattens_the_models_and_the_prompts() -> None:
         git_sha="abc1234",
         git_dirty=False,
         models={"gate": ["openai/gpt-4.1-nano"], "agent": ["openai/gpt-oss-120b", "x/y"]},
-        prompts={"judge": "111", "gate:acme": "222"},
+        prompts={"judge": "111", "gate": "222"},
+        prompt_refs={"judge": "freight-agent-judge:prod", "gate": "freight-agent-gate:prod"},
     )
 
     assert found.for_langsmith() == {
@@ -239,5 +176,7 @@ def test_for_langsmith_flattens_the_models_and_the_prompts() -> None:
         "model_gate": "openai/gpt-4.1-nano",
         "model_agent": "openai/gpt-oss-120b, x/y",
         "prompt_judge": "111",
-        "prompt_gate:acme": "222",
+        "prompt_gate": "222",
+        "prompt_ref_judge": "freight-agent-judge:prod",
+        "prompt_ref_gate": "freight-agent-gate:prod",
     }

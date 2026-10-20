@@ -57,6 +57,7 @@ from freight_agent.ports.llm import (
     SchemaT,
 )
 from tests.fakes import FakeModel, Round, act
+from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
 EVALS = ROOT / "evals"
@@ -395,6 +396,7 @@ def target_of(
         {s.id: s for s in scenarios},
         evals_dir=EVALS,
         knowledge=SOPS,
+        prompts=PROMPTS,
         model_factory=factory,
         meter=CostMeter(cap_usd=cap_usd),
     )

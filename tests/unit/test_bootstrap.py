@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -31,6 +31,8 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
+from freight_agent.adapters.prompts.hub import HubClient, LangSmithPromptRegistry, PromptHub
+from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
@@ -39,6 +41,8 @@ from freight_agent.bootstrap import (
     LazyAdapter,
     Simulation,
     build_llm,
+    build_prompt_registry,
+    build_prompts,
     build_runtime,
     build_runtime_deps,
     build_simulation,
@@ -52,14 +56,17 @@ from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Load
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.ports.prompts import PromptRole
 from freight_agent.settings import MissingSetting, Settings
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS_YAML = ROOT / "config" / "models.yaml"
 SOPS = ROOT / "sops"
+PROMPTS_DIR = ROOT / "prompts"
 KEY = "sk-or-v1-bootstrap-test-secret"
 LANGSMITH_KEY = "lsv2_pt_bootstrap-test-secret"
 TRACING_VARIABLES = ("LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT")
@@ -89,8 +96,16 @@ def clock() -> VirtualClock:
 
 
 def _settings(**values: Any) -> Settings:
-    """The shipped models and SOPs, no `.env`."""
-    paths = {"models_config": MODELS_YAML, "sops_dir": SOPS}
+    """The shipped models, SOPs and prompts, no `.env`. The prompts are the repository copy
+    unless a test asks for `prompts_source="auto"`: a fake LangSmith key must not send a
+    runtime to the Hub."""
+    paths = {
+        "models_config": MODELS_YAML,
+        "sops_dir": SOPS,
+        "prompts_dir": PROMPTS_DIR,
+        "prompts_config": ROOT / "config" / "prompts.yaml",
+        "prompts_source": "local",
+    }
     options: dict[str, Any] = {"_env_file": None, **paths, **values}
     return Settings(**options)
 
@@ -353,6 +368,75 @@ def test_build_runtime_passes_the_model_and_the_tracer_through(
     assert (runtime.deps.llm, runtime.deps.tracer) == (llm, tracer)
 
 
+# --- prompts -------------------------------------------------------------------
+
+
+def test_without_the_langsmith_key_the_prompts_are_the_repository_copy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="freight_agent.bootstrap"):
+        prompts = build_prompts(_settings(prompts_source="auto"))
+
+    assert prompts.versions() == PROMPTS.versions()
+    assert all(v.startswith("local:") for v in prompts.versions().values())
+    assert "LANGSMITH_API_KEY is not set: the prompts are the repository copy" in caplog.text
+
+
+def test_prompts_source_local_runs_the_repository_copy_even_with_the_key() -> None:
+    registry = build_prompt_registry(_settings(langsmith_api_key=LANGSMITH_KEY))
+
+    assert isinstance(registry, LocalPromptRegistry)
+
+
+def test_with_the_key_the_prompts_come_from_the_hub_at_the_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building the registry reaches no network: each pin is pulled on its first `get`."""
+    keys: list[str] = []
+
+    def hub(api_key: str, api_url: str | None) -> PromptHub:
+        keys.append(api_key)
+        return PromptHub(cast(HubClient, object()))
+
+    monkeypatch.setattr(bootstrap, "langsmith_hub", hub)
+
+    pinned = build_prompt_registry(
+        _settings(prompts_source="auto", langsmith_api_key=LANGSMITH_KEY)
+    )
+    candidate = build_prompt_registry(
+        _settings(prompts_source="auto", langsmith_api_key=LANGSMITH_KEY, prompts_tag="candidate")
+    )
+
+    assert isinstance(pinned, LangSmithPromptRegistry)
+    assert isinstance(candidate, LangSmithPromptRegistry)
+    pins = pinned._pins  # pyright: ignore[reportPrivateUsage]
+    assert pins == {role: f"freight-agent-{role.value}:prod" for role in PromptRole}
+    assert candidate._pins[PromptRole.AGENT] == "freight-agent-agent:candidate"  # pyright: ignore[reportPrivateUsage]
+    assert keys == [LANGSMITH_KEY, LANGSMITH_KEY]
+
+
+def test_a_prompt_that_cannot_be_resolved_stops_the_build(tmp_path: Path) -> None:
+    with pytest.raises(BootstrapError, match=r"gate\.yaml does not exist \(PROMPTS_DIR\)"):
+        build_prompts(_settings(prompts_dir=tmp_path))
+    with pytest.raises(BootstrapError, match="PROMPTS_CONFIG"):
+        build_prompts(
+            _settings(
+                prompts_source="auto",
+                langsmith_api_key=LANGSMITH_KEY,
+                prompts_config=tmp_path / "none.yaml",
+            )
+        )
+
+
+def test_the_runtime_renders_the_prompts_of_the_settings_or_the_callers() -> None:
+    built = build_runtime_deps(_settings(), llm=FakeModel())
+    given = build_runtime_deps(_settings(), llm=FakeModel(), prompts=PROMPTS)
+
+    assert built.prompts.versions() == PROMPTS.versions()
+    assert given.prompts is PROMPTS
+    assert build_runtime(_settings(), llm=FakeModel(), prompts=PROMPTS).prompts is PROMPTS
+
+
 # --- tracer --------------------------------------------------------------------
 
 
@@ -546,9 +630,11 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
         "blobs",
         "pages",
         "knowledge",
+        "prompt",
         "timeout_s",
     }
     assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
+    assert ports["prompt"] is deps.prompts.extract
     assert ports["knowledge"] is deps.knowledge
     assert ports["llm"] is deps.llm
     assert isinstance(ports["pages"], Pages)

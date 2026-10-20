@@ -25,6 +25,11 @@ LangGraph traces the run itself when tracing is on; the runtime gives the run's 
 an id, and after the commit the tracer turns it into the trace link the run record keeps
 (`RunRecord.trace_url`). Tracing can never break a run.
 
+The prompt templates (`RuntimeDeps.prompts`) are resolved before the runtime is built, once
+for the process. The run record keeps the version of each one the run sent to a model
+(`RunRecord.prompts`): the gate's when the triage called its model, the agent's when the
+run reached the agent loop, failed calls included.
+
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
 runs and its `document_processed` event is queued behind the message.
@@ -58,6 +63,7 @@ from freight_agent.application.graph import (
     build_graph,
     need,
 )
+from freight_agent.application.graph.build import AGENT, TRIAGE
 from freight_agent.application.prefilter import SkipReason
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
@@ -77,6 +83,7 @@ from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import DeliveryError, Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmError
+from freight_agent.ports.prompts import PromptRole, Prompts
 from freight_agent.ports.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
 
@@ -126,6 +133,7 @@ class RuntimeDeps:
     gateways: Gateways
     tracer: Tracer
     blobs: BlobStore  # attachment bytes, for the document pipeline
+    prompts: Prompts  # every role's template, resolved for the process
     documents: DocumentProcessor = field(default_factory=NullDocumentProcessor)
     config: RuntimeConfig = field(default_factory=RuntimeConfig)
 
@@ -158,12 +166,12 @@ class AgentRuntime:
     def __init__(self, deps: RuntimeDeps) -> None:
         self._deps = deps
         config = deps.config
+        self._gate = Gate(deps.llm, deps.prompts.gate, timeout_s=config.llm_timeout_s)
+        self._agent = Agent(
+            deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=config.llm_timeout_s
+        )
         self._graph = build_graph(
-            GraphDeps(
-                gate=Gate(deps.llm, timeout_s=config.llm_timeout_s),
-                agent=Agent(deps.llm, deps.knowledge, timeout_s=config.llm_timeout_s),
-                knowledge=deps.knowledge,
-            )
+            GraphDeps(gate=self._gate, agent=self._agent, knowledge=deps.knowledge)
         )
         self._executor = Executor(deps.clock, deps.ids)
 
@@ -171,6 +179,11 @@ class AgentRuntime:
     def graph(self) -> RunGraph:
         """The run graph, for the platform's drawing of it."""
         return self._graph
+
+    @property
+    def prompts(self) -> Prompts:
+        """The templates the runtime renders, for the eval judge on the same versions."""
+        return self._deps.prompts
 
     def _uow(self) -> UnitOfWork:
         return self._deps.uow_factory()
@@ -466,7 +479,20 @@ class AgentRuntime:
             sections_searched=state.sections_searched if state else (),
             rejections=state.rejections if state else 0,
             nodes=state.nodes if state else (),
+            prompts=self._prompts_used(state),
         )
+
+    def _prompts_used(self, state: RunState | None) -> dict[str, str]:
+        """The version of each template the run sent to a model. A node visit counts from
+        its start, so a model call that failed still names the prompt it was sent."""
+        if state is None:
+            return {}
+        used: dict[str, str] = {}
+        if TRIAGE in state.nodes and self._gate.calls_model(state.ctx):
+            used[PromptRole.GATE.value] = self._gate.prompt.version
+        if AGENT in state.nodes:
+            used[PromptRole.AGENT.value] = self._agent.prompt.version
+        return used
 
     async def _export(self, finished: _Finished) -> RunRecord:
         """The run's trace link, fail-open. A stored run keeps it."""

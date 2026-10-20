@@ -35,7 +35,11 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _settings(**values: Any) -> Settings:
     """The shipped models and SOPs, no `.env`, no tracing."""
-    paths = {"models_config": ROOT / "config" / "models.yaml", "sops_dir": ROOT / "sops"}
+    paths = {
+        "models_config": ROOT / "config" / "models.yaml",
+        "sops_dir": ROOT / "sops",
+        "prompts_dir": ROOT / "prompts",
+    }
     return Settings(**{"_env_file": None, **paths, **values})
 
 

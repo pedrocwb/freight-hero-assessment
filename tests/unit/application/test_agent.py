@@ -2,7 +2,8 @@
 tool calls of a round (`Agent.call_tools`, how each one is answered), the staging of one
 action call (`stage`), and the context the rules and the prompt read."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -47,7 +48,9 @@ from freight_agent.ports.llm import (
     ToolResult,
     UserTurn,
 )
+from freight_agent.ports.prompts import PromptError
 from tests.fakes import FakeModel, Round, call
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import FakeSop
 
 pytestmark = pytest.mark.unit
@@ -164,7 +167,7 @@ async def answer(
     round_cost: float = 0.0,
 ) -> Any:
     """`Agent.call_tools` over `calls`, with the visible sections of these tests."""
-    agent = Agent(FakeModel(), knowledge or FakeSop())
+    agent = Agent(FakeModel(), knowledge or FakeSop(), PROMPTS.agent)
     return await agent.call_tools(ctx, VISIBLE, calls, proposals=proposals, round_cost=round_cost)
 
 
@@ -178,7 +181,7 @@ async def test_a_round_sends_one_agent_chat_with_the_prompts_the_tools_and_the_h
     model.push(ModelRole.AGENT, AgentOutcome(rationale="driver_questions"))
     broker = with_limits(max_steps=5)
     ctx = context(load, broker=broker)
-    agent = Agent(model, FakeSop(), timeout_s=45.0)
+    agent = Agent(model, FakeSop(), PROMPTS.agent, timeout_s=45.0)
     earlier = (
         AssistantTurn(tool_calls=(ToolCall(id="c1", name="get_load"),)),
         ToolResult(call_id="c1", name="get_load", content="## Load"),
@@ -193,11 +196,13 @@ async def test_a_round_sends_one_agent_chat_with_the_prompts_the_tools_and_the_h
     request = sent.request
     assert isinstance(request, ChatRequest)
     assert (request.history, request.force_answer, request.timeout_s) == (earlier, False, 45.0)
-    assert request.system == render_agent_system_prompt(broker)
+    assert request.system == render_agent_system_prompt(PROMPTS.agent, broker)
     assert "You have at most 5 rounds of tool calls" in request.system
-    assert request.user == render_agent_prompt(ctx, QUESTION, resolved(QUESTIONS), ())
+    assert request.user == render_agent_prompt(
+        PROMPTS.agent, ctx, QUESTION, resolved(QUESTIONS), ()
+    )
     assert "Answer from the load metadata." in request.user
-    assert (request.system, request.user) == Agent.prompts(
+    assert (request.system, request.user) == agent.prompts(
         ctx, QUESTION, resolved(QUESTIONS), VISIBLE
     )
     names = [t.name for t in request.tools]
@@ -211,7 +216,7 @@ async def test_a_forced_round_asks_the_model_to_answer_now(load: Load) -> None:
     model.push(ModelRole.AGENT, AgentOutcome())
     history = (AssistantTurn(text="Thinking about it."), UserTurn(ANSWER_NOW))
 
-    await Agent(model, FakeSop()).round(
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
         context(load), QUESTION, resolved(QUESTIONS), VISIBLE, history, force_answer=True
     )
 
@@ -227,7 +232,7 @@ async def test_a_round_that_calls_tools_returns_the_calls_and_no_answer(load: Lo
     lookup = call("get_load", part="stops")
     model.push(ModelRole.AGENT, Round(calls=(lookup,), text="Let me check.", cost_usd=0.001))
 
-    reply = await Agent(model, FakeSop()).round(
+    reply = await Agent(model, FakeSop(), PROMPTS.agent).round(
         context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
     )
 
@@ -241,7 +246,7 @@ async def test_read_document_is_offered_when_an_attachment_is_in_view(load: Load
     model.push(ModelRole.AGENT, AgentOutcome())
     bol = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
 
-    await Agent(model, FakeSop()).round(
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
         context(load, attachments=(bol,)), QUESTION, resolved(QUESTIONS), VISIBLE, ()
     )
 
@@ -253,7 +258,9 @@ async def test_read_document_is_offered_when_an_attachment_is_in_view(load: Load
 def test_the_procedure_of_an_open_obligation_is_in_the_prompt(load: Load) -> None:
     ctx = context(load, obligations=(eta_request(),))
 
-    _, user = Agent.prompts(ctx, QUESTION, resolved(QUESTIONS), VISIBLE)
+    _, user = Agent(FakeModel(), FakeSop(), PROMPTS.agent).prompts(
+        ctx, QUESTION, resolved(QUESTIONS), VISIBLE
+    )
 
     assert HIGH_RISK_BODY in user
 
@@ -263,16 +270,16 @@ async def test_model_failure_propagates(load: Load) -> None:
     model.push(ModelRole.AGENT, LlmError("schema mismatch"))
 
     with pytest.raises(LlmError, match="schema mismatch"):
-        await Agent(model, FakeSop()).round(
+        await Agent(model, FakeSop(), PROMPTS.agent).round(
             context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
         )
 
 
 def test_the_agent_stages_with_the_default_rules_unless_given_its_own() -> None:
-    names = [r.name for r in Agent(FakeModel(), FakeSop()).rules]
+    names = [r.name for r in Agent(FakeModel(), FakeSop(), PROMPTS.agent).rules]
 
     assert names == [r.name for r in default_rules()]
-    assert Agent(FakeModel(), FakeSop(), rules=()).rules == ()
+    assert Agent(FakeModel(), FakeSop(), PROMPTS.agent, rules=()).rules == ()
 
 
 # --- stage: one action call ---------------------------------------------------------------
@@ -582,3 +589,40 @@ def test_procedure_in_progress_respects_the_load_stage(load: Load) -> None:
     ctx = context(load.model_copy(update={"stage": Stage.AT_PICKUP}), obligations=(eta_request(),))
 
     assert sections_in_progress(ctx, resolved(QUESTIONS), VISIBLE) == ()
+
+
+# --- the template -------------------------------------------------------------------------
+
+
+async def test_a_round_describes_finish_with_the_templates_text(load: Load) -> None:
+    model = FakeModel()
+    model.push(ModelRole.AGENT, AgentOutcome())
+
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
+        context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
+    )
+
+    request = model.calls[0].request
+    assert request.answer_description == PROMPTS.agent.tools[FINISH]
+    assert PROMPTS.agent.tools[FINISH].startswith("Call it once, at the end")
+    assert request.prompt_version == PROMPTS.agent.version
+
+
+def test_an_agent_template_without_a_finish_description_is_refused() -> None:
+    template = replace(PROMPTS.agent, tools={})
+
+    with pytest.raises(
+        PromptError, match=r"does not describe the finish tool \(its tools.finish\)"
+    ):
+        Agent(FakeModel(), FakeSop(), template)
+
+
+def test_an_agent_template_naming_an_unknown_variable_is_refused() -> None:
+    class Message:
+        variables = frozenset({"ledger", "mood"})
+
+        def format(self, variables: Mapping[str, str]) -> str:
+            return ""
+
+    with pytest.raises(PromptError, match="the user message names mood"):
+        Agent(FakeModel(), FakeSop(), replace(PROMPTS.agent, user=Message()))

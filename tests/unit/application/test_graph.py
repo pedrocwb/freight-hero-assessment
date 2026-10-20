@@ -8,6 +8,7 @@ read the last state, never the number of states.
 """
 
 import logging
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
@@ -54,6 +55,7 @@ from freight_agent.ports.llm import (
     UserTurn,
 )
 from tests.fakes import FakeModel, Round, act, call
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import (
     ASK_ETA,
     DECIDE,
@@ -115,8 +117,8 @@ def context(load: Load, event: Event, broker: Broker | None = None) -> RunContex
 
 def graph(model: FakeModel, *, agent_rules: tuple[Rule, ...] | None = None) -> RunGraph:
     knowledge = FakeSop()
-    agent = Agent(model, knowledge, rules=agent_rules)
-    return build_graph(GraphDeps(gate=Gate(model), agent=agent, knowledge=knowledge))
+    agent = Agent(model, knowledge, PROMPTS.agent, rules=agent_rules)
+    return build_graph(GraphDeps(gate=Gate(model, PROMPTS.gate), agent=agent, knowledge=knowledge))
 
 
 async def run(model: FakeModel, ctx: RunContext, **kwargs: Any) -> RunState:
@@ -596,3 +598,49 @@ async def test_a_failure_in_a_later_round_keeps_what_the_run_staged(load: Load) 
     assert last.plan == Plan(actions=(NOTE,))
     assert [u.cost_usd for u in last.agent_usage] == [0.001]
     assert last.verdict is None
+
+
+# --- the trace ----------------------------------------------------------------------------
+
+
+class _Recorded:
+    """A compiled graph that records the config of each stream and yields nothing."""
+
+    def __init__(self) -> None:
+        self.configs: list[Mapping[str, Any]] = []
+
+    async def astream(
+        self, input: RunState, config: Mapping[str, object], *, stream_mode: list[str]
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        self.configs.append(config)
+        for item in ():
+            yield item
+
+    def get_graph(self) -> Any:
+        raise NotImplementedError
+
+
+async def test_each_runs_trace_carries_the_version_of_its_prompts(load: Load) -> None:
+    compiled = _Recorded()
+    graph = RunGraph(compiled, {"gate": "5b488b4298d0", "agent": "c6aeff6531a1"})
+
+    states = [s async for s in graph.stream(context(load, message("ok")), run_id="run_1")]
+
+    (config,) = compiled.configs
+    assert config["metadata"]["prompt_gate"] == "5b488b4298d0"
+    assert config["metadata"]["prompt_agent"] == "c6aeff6531a1"
+    assert (config["metadata"]["run_id"], states) == ("run_1", [])
+
+
+def test_the_graph_names_the_prompts_of_its_gate_and_agent() -> None:
+    model, knowledge = FakeModel(), FakeSop()
+    deps = GraphDeps(
+        gate=Gate(model, PROMPTS.gate),
+        agent=Agent(model, knowledge, PROMPTS.agent),
+        knowledge=knowledge,
+    )
+
+    assert deps.prompt_versions() == {
+        "gate": PROMPTS.gate.version,
+        "agent": PROMPTS.agent.version,
+    }

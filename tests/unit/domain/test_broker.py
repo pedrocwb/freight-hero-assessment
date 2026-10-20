@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from freight_agent.application.prompts import GATE_SYSTEM_PROMPT
+from freight_agent.application.prompts import render_gate_system_prompt
 from freight_agent.domain.broker import (
     MAX_COST_USD,
     MAX_STEPS,
@@ -34,6 +34,7 @@ from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.obligations import DeferralPolicy, ObligationKind
 from freight_agent.domain.validation import ValidationConfig
+from tests.prompts import PROMPTS
 
 # What `domain.intents.MUST_ACT` and `NOOP_ELIGIBLE` held before brokers were data.
 MUST_ACT_BEFORE = {
@@ -127,8 +128,9 @@ def test_message_intents_follow_the_gate_prompt_order_and_wording() -> None:
     broker = standard_broker()
 
     assert tuple(i.intent_id for i in broker.message_intents()) == GATE_ORDER
+    gate_prompt = render_gate_system_prompt(PROMPTS.gate, broker)
     for intent in broker.message_intents():
-        assert f"- {intent.intent_id}: {intent.description}" in GATE_SYSTEM_PROMPT
+        assert f"- {intent.intent_id}: {intent.description}" in gate_prompt
 
 
 @pytest.mark.unit

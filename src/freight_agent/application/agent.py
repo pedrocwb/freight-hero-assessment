@@ -2,14 +2,15 @@
 (`Agent.round`, the `agent` node) and the tool calls of that round (`Agent.call_tools`,
 the `tools` node).
 
-A round is one `LanguageModel.chat` on the `agent` role. The model sees the prompts, the
-conversation so far and the tools, and it calls tools or answers with `finish`
-(`AgentOutcome`). The tools node answers every call of the round, in order: a read tool
-from the run's context or the knowledge index, an action tool by staging the action
-(`stage`): built from the call's arguments and checked with
-`domain.validation.check_action` against the actions accepted before it, it is answered
-"accepted as action #n" or "rejected by <rule>: <why>". Nothing executes here: the
-runtime executes the accepted actions after the run, in its commit.
+A round is one `LanguageModel.chat` on the `agent` role. The model sees the prompts (the
+agent's template, `prompts/agent.yaml`, rendered with the run: `prompts.agent_*_variables`),
+the conversation so far and the tools, and it calls tools or answers with `finish`
+(`AgentOutcome`, described by the template's `finish` text). The tools node answers every
+call of the round, in order: a read tool from the run's context or the knowledge index,
+an action tool by staging the action (`stage`): built from the call's arguments and
+checked with `domain.validation.check_action` against the actions accepted before it, it
+is answered "accepted as action #n" or "rejected by <rule>: <why>". Nothing executes
+here: the runtime executes the accepted actions after the run, in its commit.
 
 The plan the run records and validates is every action the agent proposed, in call
 order, refused ones included (`Proposal`). `validate` over that plan approves exactly
@@ -41,7 +42,13 @@ from freight_agent.application.agent_tools import (
 )
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import follow_up_intent
-from freight_agent.application.prompts import render_agent_prompt, render_agent_system_prompt
+from freight_agent.application.prompts import (
+    AGENT_SYSTEM_VARIABLES,
+    AGENT_USER_VARIABLES,
+    check_variables,
+    render_agent_prompt,
+    render_agent_system_prompt,
+)
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.intents import GateDecision
@@ -59,6 +66,7 @@ from freight_agent.ports.llm import (
     ToolResult,
     Turn,
 )
+from freight_agent.ports.prompts import ChatPrompt, PromptError
 
 logger = logging.getLogger(__name__)
 
@@ -131,25 +139,41 @@ class ToolRound:
     sections: tuple[str, ...] = ()  # sections search_sop returned or read_sop_section read
 
 
+def check_agent_prompt(prompt: ChatPrompt) -> ChatPrompt:
+    """`prompt`, or `PromptError` when it names a variable the agent does not compute or
+    does not describe the answer tool (`tools.finish`)."""
+    check_variables(prompt, system=AGENT_SYSTEM_VARIABLES, user=AGENT_USER_VARIABLES)
+    if not prompt.tools.get(FINISH, "").strip():
+        raise PromptError(
+            f"the agent prompt {prompt.describe()} does not describe the {FINISH} tool "
+            f"(its tools.{FINISH})"
+        )
+    return prompt
+
+
 class Agent:
     def __init__(
         self,
         llm: LanguageModel,
         knowledge: SopIndex,
+        prompt: ChatPrompt,
         *,
         rules: Sequence[Rule] | None = None,
         timeout_s: float = 60.0,
     ) -> None:
+        """`PromptError` when the template does not fit the agent (`check_agent_prompt`)."""
         self._llm = llm
         self._knowledge = knowledge
+        self.prompt = check_agent_prompt(prompt)
+        self._finish = prompt.tools[FINISH].strip()
         self.rules: tuple[Rule, ...] = tuple(rules) if rules is not None else default_rules()
         self._timeout_s = timeout_s
 
     def tools(self, ctx: RunContext, visible_sections: Sequence[ResolvedSection]) -> Toolbox:
         return agent_tools(ctx, visible_sections, self._knowledge)
 
-    @staticmethod
     def prompts(
+        self,
         ctx: RunContext,
         gate: GateDecision,
         sop: ResolvedSop,
@@ -159,8 +183,8 @@ class Agent:
         same for every round of a run."""
         in_progress = sections_in_progress(ctx, sop, visible_sections)
         return (
-            render_agent_system_prompt(ctx.broker),
-            render_agent_prompt(ctx, gate, sop, in_progress),
+            render_agent_system_prompt(self.prompt, ctx.broker),
+            render_agent_prompt(self.prompt, ctx, gate, sop, in_progress),
         )
 
     async def round(
@@ -185,6 +209,8 @@ class Agent:
             tools=self.tools(ctx, visible_sections).specs,
             force_answer=force_answer,
             timeout_s=self._timeout_s,
+            prompt_version=self.prompt.version,
+            answer_description=self._finish,
         )
         return await self._llm.chat(request, AgentOutcome)
 

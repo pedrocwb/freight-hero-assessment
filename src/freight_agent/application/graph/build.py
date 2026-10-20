@@ -27,6 +27,10 @@ a model thinks. The graph itself never touches storage.
 
 `compile_graph` builds the graph from its services alone (`GraphDeps`), so another entry
 point (LangGraph Studio) can serve the same graph.
+
+A run's root span carries, next to its ids, the version of the gate's and the agent's
+prompt templates (`prompt_gate`, `prompt_agent`); LangChain hands that metadata down to
+every node and model call of the trace.
 """
 
 from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
@@ -53,6 +57,7 @@ from freight_agent.application.graph.state import RunState
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import Rule
 from freight_agent.ports.knowledge import SopIndex
+from freight_agent.ports.prompts import PromptRole
 
 PREFILTER = "prefilter"
 # The triage step keeps the node id it had as the gate: LangSmith traces name each node
@@ -114,6 +119,13 @@ class GraphDeps:
     knowledge: SopIndex
     rules: Sequence[Rule] = field(default_factory=default_rules)
 
+    def prompt_versions(self) -> dict[str, str]:
+        """Role -> the version of the prompt template the graph's model calls render."""
+        return {
+            PromptRole.GATE.value: self.gate.prompt.version,
+            PromptRole.AGENT.value: self.agent.prompt.version,
+        }
+
 
 class RunGraph:
     """The compiled graph, streamed so that a caller always has the latest state.
@@ -125,8 +137,10 @@ class RunGraph:
     node that failed is the last one.
     """
 
-    def __init__(self, compiled: _Compiled) -> None:
+    def __init__(self, compiled: _Compiled, prompts: Mapping[str, str] | None = None) -> None:
+        """`prompts`: role -> prompt template version, for each run's trace metadata."""
         self._compiled = compiled
+        self._prompts = dict(prompts or {})
 
     async def stream(
         self, ctx: RunContext, *, run_id: str, trace_id: UUID | None = None
@@ -147,6 +161,7 @@ class RunGraph:
                 "event_type": ctx.event.type.value,
                 "load_id": load.load_id,
                 "broker_id": load.broker_id,
+                **{f"prompt_{role}": version for role, version in self._prompts.items()},
             },
             "tags": [f"load:{load.load_id}", f"broker:{load.broker_id}"],
         }
@@ -195,7 +210,7 @@ def compile_graph(deps: GraphDeps) -> _Compiled:
 
 
 def build_graph(deps: GraphDeps) -> RunGraph:
-    return RunGraph(compile_graph(deps))
+    return RunGraph(compile_graph(deps), deps.prompt_versions())
 
 
 def _unless_decided(node: str, next_node: str) -> Callable[[RunState], str]:

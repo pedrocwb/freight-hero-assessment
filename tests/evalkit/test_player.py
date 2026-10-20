@@ -62,6 +62,7 @@ from freight_agent.evalkit.runner import (
 from freight_agent.evalkit.spec import Scenario, load_scenario
 from freight_agent.ports.llm import ChatRequest, LlmError, LlmRequest, ModelRole
 from tests.fakes import FakeModel, Round, act, call
+from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
 EVALS = ROOT / "evals"
@@ -243,7 +244,7 @@ class Rig:
             model=self.model,
             blobs=self.blobs,
             files=read_attachments(EVALS, self.scenario),
-            judge=Judge(self.fake) if self.judged else None,
+            judge=Judge(self.fake, PROMPTS.judge) if self.judged else None,
         )
 
     async def play(self) -> list[StepObservation]:
@@ -550,7 +551,9 @@ async def play(
     played: Scenario, model: FakeModel | None = None, *, evals: Path = EVALS
 ) -> tuple[Played, FakeModel]:
     model = model or FakeModel()
-    return await play_scenario(played, evals_dir=evals, knowledge=SOPS, model=model), model
+    return await play_scenario(
+        played, evals_dir=evals, knowledge=SOPS, prompts=PROMPTS, model=model
+    ), model
 
 
 async def test_a_missing_fixture_is_an_error_result(tmp_path: Path) -> None:
@@ -651,6 +654,7 @@ async def test_scenario_a_played_with_the_right_rounds_passes_every_check() -> N
         a,
         evals_dir=EVALS,
         knowledge=SOPS,
+        prompts=PROMPTS,
         model=scenario_a_agent(),
         on_step=lambda o: seen.append(o.step_index),
     )
@@ -763,7 +767,9 @@ async def test_an_error_in_a_step_callback_ends_the_play_like_a_runtime_error() 
     def broken(observation: StepObservation) -> None:
         raise ValueError("ui gone")
 
-    played = await play_scenario(b1, evals_dir=EVALS, knowledge=SOPS, model=model, on_step=broken)
+    played = await play_scenario(
+        b1, evals_dir=EVALS, knowledge=SOPS, prompts=PROMPTS, model=model, on_step=broken
+    )
 
     assert played.error == "step 0: ValueError: ui gone"
     assert len(played.observations) == 1
@@ -802,7 +808,7 @@ def test_the_trial_runtime_is_the_product_runtime_on_the_counted_model() -> None
     start = la("06:55")
     model = FakeModel()
 
-    trial = build_trial_runtime(model, SOPS, start)
+    trial = build_trial_runtime(model, SOPS, start, PROMPTS)
 
     assert isinstance(trial.runtime, AgentRuntime)
     assert isinstance(trial.model, CountingModel)

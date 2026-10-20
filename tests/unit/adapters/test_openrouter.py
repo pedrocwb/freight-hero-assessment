@@ -657,6 +657,29 @@ async def test_each_call_is_a_langchain_run_named_after_its_role_and_model() -> 
     assert (agent.get("run_name"), agent.get("tags")) == ("agent · acme/small", ["role:agent"])
 
 
+async def test_a_call_rendered_from_a_template_carries_its_version_in_the_trace() -> None:
+    model, chat = make_model(answers("GateDecision", ACK))
+
+    await model.generate(replace(GATE, prompt_version="5b488b4298d0"), GateDecision)
+
+    metadata = chat.sent[0].config.get("metadata") or {}
+    assert metadata["prompt_version"] == "5b488b4298d0"
+
+
+async def test_the_template_describes_the_answer_tool_when_it_sets_its_text() -> None:
+    """The agent's `finish` is described by its template, not by `AgentOutcome`'s docstring."""
+    finish = "Call it once, at the end, after you staged every action with its action tool."
+    model, chat = make_model(answers(FINISH, DONE), answers("GateDecision", ACK))
+
+    await model.chat(round_request(force_answer=True, answer_description=finish), AgentOutcome)
+    await model.generate(replace(GATE, answer_description="Classify it."), GateDecision)
+
+    agent, gate = (s.tools[-1]["function"]["description"] for s in chat.sent)
+    assert agent == f"Give your final answer. {finish}"
+    assert gate == "Give your final answer. Classify it."
+    assert answer_tool(AgentOutcome, finish)["function"]["description"] == agent
+
+
 # --- errors ------------------------------------------------------------------------------
 
 

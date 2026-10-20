@@ -34,6 +34,7 @@ from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import OutboundRecord, validate
 from freight_agent.ports.llm import ToolCall
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.property
 
@@ -152,7 +153,7 @@ def rounds(draw: st.DrawFn) -> list[list[ToolCall]]:
 
 def call_tools(ctx: RunContext, grouped: list[list[ToolCall]]) -> list[ToolRound]:
     """What the graph's tools node does, round after round, each after the earlier ones."""
-    agent = Agent(FakeModel(), MemorySopIndex(()))
+    agent = Agent(FakeModel(), MemorySopIndex(()), PROMPTS.agent)
     done: list[ToolRound] = []
     proposals: list[Proposal] = []
 

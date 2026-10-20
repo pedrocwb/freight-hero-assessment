@@ -5,9 +5,10 @@ so no `.env` or shell variable of the developer leaks in; the paths point back a
 repository's evals, SOPs and models through the same variables a deployment would set.
 
 `agent eval run` is live by design (a LangSmith experiment on OpenRouter), so here it
-never reaches either: `run_experiment`, the LangSmith client, the model and the native
-tracing switch are replaced, and the test checks what the command hands them and how it
-reports what comes back.
+never reaches either: `run_experiment`, the LangSmith client, the model, the prompt
+templates (the repository copy, in place of the Hub's) and the native tracing switch are
+replaced, and the test checks what the command hands them and how it reports what comes
+back.
 """
 
 import subprocess
@@ -32,6 +33,7 @@ from freight_agent.evalkit.results import Failure
 from freight_agent.evalkit.suite import discover
 from freight_agent.settings import Settings
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = {s.id: s for s in discover(ROOT / "evals", "core")}
@@ -48,6 +50,8 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("EVALS_DIR", str(ROOT / "evals"))
     monkeypatch.setenv("SOPS_DIR", str(ROOT / "sops"))
     monkeypatch.setenv("MODELS_CONFIG", str(ROOT / "config" / "models.yaml"))
+    monkeypatch.setenv("PROMPTS_CONFIG", str(ROOT / "config" / "prompts.yaml"))
+    monkeypatch.setenv("PROMPTS_DIR", str(ROOT / "prompts"))
     return tmp_path
 
 
@@ -57,17 +61,24 @@ def agent(*args: str) -> Result:
 
 class Offline:
     """Stands in for everything `agent eval run` would reach: the LangSmith client, the
-    model, the tracing switch and `run_experiment`, which records its arguments and
-    returns `run` (or raises it)."""
+    model, the Hub's prompts (`prompt_settings` keeps what they were asked with), the
+    tracing switch and `run_experiment`, which records its arguments and returns `run`
+    (or raises it)."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.run: ExperimentRun | Exception | None = None
         self.calls: list[dict[str, Any]] = []
         self.clients: list[dict[str, Any]] = []
+        self.prompt_settings: list[Settings] = []
         monkeypatch.setattr(langsmith, "Client", self._client)
         monkeypatch.setattr(bootstrap, "build_llm", lambda settings, **kwargs: FakeModel())
+        monkeypatch.setattr(bootstrap, "build_prompts", self._prompts)
         monkeypatch.setattr(bootstrap, "enable_native_tracing", lambda settings: None)
         monkeypatch.setattr(experiment, "run_experiment", self._run_experiment)
+
+    def _prompts(self, settings: Settings) -> Any:
+        self.prompt_settings.append(settings)
+        return PROMPTS
 
     def _client(self, **kwargs: Any) -> object:
         self.clients.append(kwargs)
@@ -264,8 +275,43 @@ def test_eval_run_hands_the_experiment_the_suite_the_choice_and_the_limits(
     metadata: RunMetadata = call["metadata"]
     assert (metadata.suite, metadata.k, metadata.cost_cap_usd) == ("core", 2, 0.5)
     assert metadata.git_sha is None  # the temporary folder is not a checkout
-    assert "agent:standard" in metadata.prompts and metadata.models
+    assert metadata.models
+    assert (metadata.prompts, metadata.prompt_refs) == (PROMPTS.versions(), PROMPTS.refs())
+    assert target._prompts is PROMPTS  # pyright: ignore[reportPrivateUsage]
+    (asked,) = offline.prompt_settings
+    assert asked.prompts_tag is None  # each role at its pin
+    prompts = ", ".join(p.describe() for p in PROMPTS.all())
+    assert f"prompts: {prompts}" in result.output
     assert offline.clients == [{"api_key": "lsv2-test", "api_url": None}]
+
+
+@pytest.mark.usefixtures("keys")
+def test_eval_run_on_a_prompt_tag_resolves_every_role_at_it(offline: Offline) -> None:
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
+
+    result = agent(
+        "eval", "run", "--scenario", "b_ack_with_nothing_open", "--prompt-tag", "candidate"
+    )
+
+    assert result.exit_code == 0, result.output
+    (asked,) = offline.prompt_settings
+    assert asked.prompts_tag == "candidate"
+
+
+@pytest.mark.usefixtures("keys")
+def test_prompts_the_hub_cannot_serve_exit_2_before_anything_runs(
+    offline: Offline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(settings: Settings) -> Any:
+        raise bootstrap.BootstrapError("the agent prompt freight-agent-agent:prod is not there")
+
+    monkeypatch.setattr(bootstrap, "build_prompts", missing)
+
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
+
+    assert result.exit_code == cli.HARNESS_ERROR
+    assert "freight-agent-agent:prod is not there" in result.stderr
+    assert offline.calls == []
 
 
 @pytest.mark.usefixtures("keys")

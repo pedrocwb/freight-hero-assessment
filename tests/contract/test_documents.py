@@ -35,6 +35,7 @@ from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.llm import LlmError, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.contract
 
@@ -284,6 +285,7 @@ async def test_the_pipeline_announces_a_document_once_on_this_store(
         blobs=blobs,
         pages=FakePageReader(),
         knowledge=MemorySopIndex([]),
+        prompt=PROMPTS.extract,
     )
 
     first, second = await pipeline.process_pending()
@@ -354,6 +356,7 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
         blobs=blobs,
         pages=FakePageReader(),
         knowledge=MemorySopIndex([], brokers=[broker]),
+        prompt=PROMPTS.extract,
     )
 
     (event,) = await pipeline.process_pending()

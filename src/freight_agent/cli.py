@@ -84,6 +84,14 @@ def eval_run(
         typer.Option(min=0, help="Stop playing examples once the experiment spent this."),
     ] = 0.25,
     concurrency: Annotated[int, typer.Option(min=1, help="Examples played at the same time.")] = 4,
+    prompt_tag: Annotated[
+        str | None,
+        typer.Option(
+            help="Run every prompt at this Hub tag (a candidate) instead of its pin in "
+            "config/prompts.yaml.",
+            show_default="the pins",
+        ),
+    ] = None,
 ) -> None:
     """Run a suite live, as a LangSmith experiment, and print its pass^k table.
 
@@ -95,9 +103,12 @@ def eval_run(
 
     Exit code 3: the cost cap stopped the run before every example played.
     """
+    settings = Settings()
+    if prompt_tag:
+        settings = settings.model_copy(update={"prompts_tag": prompt_tag})
     try:
         code = _run(
-            Settings(),
+            settings,
             suite=suite,
             ids=_split(scenario),
             k=k,
@@ -125,7 +136,12 @@ def _run(
 
     from freight_agent.adapters.clock import SystemClock
     from freight_agent.adapters.knowledge.memory import MemorySopIndex
-    from freight_agent.bootstrap import build_llm, enable_native_tracing
+    from freight_agent.bootstrap import (
+        BootstrapError,
+        build_llm,
+        build_prompts,
+        enable_native_tracing,
+    )
     from freight_agent.evalkit.experiment import (
         CostMeter,
         LangSmithUnavailable,
@@ -145,27 +161,29 @@ def _run(
         chosen = select(suite_scenarios, ids=ids)
     except SuiteError as exc:
         raise UsageProblem(str(exc)) from exc
+    try:
+        prompts = build_prompts(settings)  # each pin pulled once, before anything plays
+    except BootstrapError as exc:
+        raise UsageProblem(str(exc)) from exc
     # The examples' traces carry each graph node and model round: LangChain traces them
     # into the experiment through LangSmith's context.
     enable_native_tracing(settings)
     knowledge = MemorySopIndex.from_files(settings.sops_dir)
-    metadata = asyncio.run(
-        collect_metadata(
-            created_at=datetime.now(UTC),
-            suite=suite,
-            k=k,
-            cost_cap_usd=cost_cap_usd,
-            knowledge=knowledge,
-            sops_dir=settings.sops_dir,
-            sop_version=knowledge.content_version,
-            models_config=settings.models_config,
-            repo=Path.cwd(),
-        )
+    metadata = collect_metadata(
+        created_at=datetime.now(UTC),
+        suite=suite,
+        k=k,
+        cost_cap_usd=cost_cap_usd,
+        sop_version=knowledge.content_version,
+        models_config=settings.models_config,
+        prompts=prompts,
+        repo=Path.cwd(),
     )
     target = ScenarioTarget(
         {s.id: s for s in suite_scenarios},
         evals_dir=settings.evals_dir,
         knowledge=knowledge,
+        prompts=prompts,
         model_factory=lambda: build_llm(settings, clock=SystemClock()),
         meter=CostMeter(cap_usd=cost_cap_usd),
     )
@@ -176,6 +194,7 @@ def _run(
     typer.echo(
         f"{suite}: {len(chosen)} scenarios, k={k}, live on OpenRouter, cost cap ${cost_cap_usd:.2f}"
     )
+    typer.echo("prompts: " + ", ".join(p.describe() for p in prompts.all()))
     try:
         run = asyncio.run(
             run_experiment(
