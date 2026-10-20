@@ -827,10 +827,9 @@ def test_gate_prompt_lists_attachments_and_says_none_when_nothing_is_open(load: 
         "no_procedure: true only when no SOP section covers the event",
     ],
 )
-@pytest.mark.parametrize("max_steps", [8, 0], ids=["tools", "plan"])
-def test_agent_system_prompt_states_the_rules(fragment: str, max_steps: int) -> None:
-    """Both modes keep every hard-won rule of the decide prompt (evals/RESULTS.md)."""
-    assert fragment in render_agent_system_prompt(_with_steps(max_steps))
+def test_agent_system_prompt_states_the_rules(fragment: str) -> None:
+    """The prompt keeps every hard-won rule of the decide prompt (evals/RESULTS.md)."""
+    assert fragment in render_agent_system_prompt(standard_broker())
 
 
 def _with_steps(max_steps: int) -> Broker:
@@ -840,18 +839,15 @@ def _with_steps(max_steps: int) -> Broker:
 
 
 @pytest.mark.unit
-def test_the_tool_mode_stages_actions_and_the_plan_mode_returns_them() -> None:
-    tools = render_agent_system_prompt(_with_steps(8))
-    plan = render_agent_system_prompt(_with_steps(0))
+def test_the_agent_stages_actions_with_its_tools_within_the_brokers_budget() -> None:
+    """The answer has no actions: the prompt never asks for a plan in `finish`."""
+    prompt = render_agent_system_prompt(_with_steps(5))
 
-    assert 'answers "accepted as action #n" or "rejected by <rule>: <why>"' in tools
-    assert "Staging nothing is the right answer" in tools
-    assert "You have at most 8 rounds of tool calls. More than 3 rejected actions" in tools
-    assert "- actions: leave it empty." in tools
-    assert "You return a plan" in plan
-    assert "An empty plan (no actions) is the right answer" in plan
-    assert "rounds of tool calls" not in plan
-    assert "- actions: the plan, possibly empty." in plan
+    assert 'answers "accepted as action #n" or "rejected by <rule>: <why>"' in prompt
+    assert "Staging nothing is the right answer" in prompt
+    assert "You have at most 5 rounds of tool calls. More than 3 rejected actions" in prompt
+    assert "- actions:" not in prompt
+    assert "You return a plan" not in prompt
 
 
 @pytest.mark.unit
@@ -1006,11 +1002,6 @@ def test_the_standard_gate_prompt_is_the_tuned_one_word_for_word() -> None:
 @pytest.mark.unit
 def test_the_standard_agent_prompt_snapshot() -> None:
     _matches_snapshot("agent_system_standard.txt", render_agent_system_prompt(standard_broker()))
-
-
-@pytest.mark.unit
-def test_the_standard_agent_prompt_without_action_tools_snapshot() -> None:
-    _matches_snapshot("agent_system_plan_only.txt", render_agent_system_prompt(_with_steps(0)))
 
 
 @pytest.mark.unit

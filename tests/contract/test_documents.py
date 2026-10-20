@@ -14,7 +14,6 @@ from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.documents import DocumentPipeline
 from freight_agent.domain.broker import (
     CatalogOverrides,
@@ -35,6 +34,7 @@ from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.llm import LlmError, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
+from tests.fakes import FakeModel
 
 pytestmark = pytest.mark.contract
 
@@ -274,7 +274,7 @@ async def test_the_pipeline_announces_a_document_once_on_this_store(
     ref = await blobs.put(b"PROOF OF DELIVERY\nPO 55821\nValley DC", "text/plain")
     document = pending("doc_1").model_copy(update={"blob_ref": ref, "content_type": "text/plain"})
     await save(uow_factory, document, pending("doc_2", load_id=B, minute=1))
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.EXTRACT, CLEAN_POD, LlmError("down"))
     pipeline = DocumentPipeline(
         uow_factory=uow_factory,
@@ -331,7 +331,7 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
         await uow.timers.save(timer)
         await uow.documents.save(document)
         await uow.commit()
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(
         ModelRole.EXTRACT,
         Extraction(

@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from freight_agent.ports.llm import (
+    ChatReply,
+    ChatRequest,
     LanguageModel,
     LlmError,
     LlmRequest,
@@ -50,3 +52,6 @@ class RoleRouter:
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
         return await self.model_for(request.role).generate(request, schema)
+
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        return await self.model_for(request.role).chat(request, schema)

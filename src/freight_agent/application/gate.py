@@ -62,7 +62,6 @@ class Gate:
             role=ModelRole.GATE,
             system=render_gate_system_prompt(ctx.broker),
             user=render_gate_prompt(ctx),
-            max_tool_rounds=0,
             timeout_s=self._timeout_s,
         )
         response = await self._llm.generate(request, GateDecision)

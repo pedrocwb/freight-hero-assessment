@@ -3,7 +3,7 @@
 Owner: card W3-DOC (C0 wrote the tests of the null processor and of the pending
 document; DOC adds the pipeline's). The pipeline runs on the memory store with
 `FakePageReader` (text files are text, anything else goes down the vision path) and a
-`ScriptedModel` that answers the `extract` role.
+`FakeModel` (tests/fakes.py) that gives the `extract` role its forced answers.
 """
 
 import asyncio
@@ -19,7 +19,6 @@ from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
 from freight_agent.domain.broker import (
@@ -41,7 +40,8 @@ from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.llm import ImageInput, LlmError, ModelRole
+from freight_agent.ports.llm import ChatRequest, ImageInput, LlmError, ModelRole
+from tests.fakes import FakeModel
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +70,7 @@ class World:
         self.store = MemoryStore()
         self.clock = VirtualClock(AT)
         self.blobs = MemoryBlobStore()
-        self.model = ScriptedModel()
+        self.model = FakeModel()
         self.pages: Any = FakePageReader()
         self.attachments = 0
 
@@ -266,7 +266,8 @@ async def test_the_extract_call_carries_the_types_and_the_text_but_no_value_of_t
     (call,) = world.model.calls
     request = call.request
     assert (call.role, call.schema, request.images) == (EXTRACT, "Extraction", ())
-    assert (request.max_tool_rounds, request.timeout_s) == (0, 12.0)
+    assert not isinstance(request, ChatRequest)  # a forced answer, no tool loop
+    assert request.timeout_s == 12.0
     assert "`pod` (Proof of delivery)" in request.system
     assert "`receiver` (text): The receiving facility (consignee)" in request.system
     assert "`rate_confirmation`" in request.system

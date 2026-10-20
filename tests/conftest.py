@@ -1,6 +1,8 @@
 """Shared fixtures. Fronts add their own fixtures in their subdirectory's conftest.py."""
 
 import json
+import os
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,19 @@ from freight_agent.domain.load import Load
 
 ROOT = Path(__file__).resolve().parents[1]
 LA = ZoneInfo("America/Los_Angeles")
+_TRACING_PREFIXES = ("LANGSMITH_", "LANGCHAIN_")
+
+
+@pytest.fixture(autouse=True)
+def _no_tracing_to_langsmith(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """No test traces to LangSmith: LangGraph and LangChain read their switch from the
+    process environment, so every LangSmith variable is cleared for the test, and one the
+    code under test sets (`bootstrap.enable_native_tracing`) is gone after it."""
+    for name in [n for n in os.environ if n.startswith(_TRACING_PREFIXES)]:
+        monkeypatch.delenv(name)
+    yield
+    for name in [n for n in os.environ if n.startswith(_TRACING_PREFIXES)]:
+        del os.environ[name]
 
 
 @pytest.fixture

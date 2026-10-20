@@ -1,24 +1,38 @@
 """The per-run LangGraph graph: the thinking part of a run.
 
-    prefilter -> triage -> knowledge -> agent -> validate
-        |          |                                |
-       END        END                              END
+    prefilter -> gate -> knowledge -> agent <-> tools
+        |         |                    |  ^       |
+       END       END                   |  '-------'
+                                       v          v
+                                    validate <----'  -> END
 
-Each arrow to END after the prefilter and the triage is a conditional exit, taken when
-the node wrote a verdict: `skipped` or `escalated` (unknown sender) after the prefilter,
-`noop` after the triage. The knowledge step never ends the run (an event no section
-covers is the agent's `no_procedure`). `validate` always ends the run: `acted`, `noop`,
-or `escalated` (a high-severity violation, the rejection budget, no procedure).
+- `prefilter` and `gate` (the triage step) end the run when they write a verdict:
+  `skipped` or `escalated` (unknown sender) after the prefilter, `noop` after the gate.
+- `knowledge` never ends the run: an event no section covers is the agent's
+  `no_procedure`.
+- `agent` is one model round. It goes to `tools` when the round called tools (an
+  answer given next to tool calls waits for them), to `validate` when it answered
+  (`finish`), and back to itself when the model replied in prose (the next round must
+  answer). It forces the answer itself once `max_steps` rounds or `max_cost_usd` are
+  spent.
+- `tools` answers the round's calls, then goes back to `agent`, or to `validate` when
+  the round also answered or the refused calls went over `max_rejections`.
+- `validate` always ends the run: `acted`, `noop`, or `escalated` (a high-severity
+  violation, the rejection budget, no procedure).
 
-`load_context` and `commit_execute` from the pipeline in docs/decisions.md run
-in the runtime, around this graph, because they are the run's two transactions:
-no unit of work may stay open while a model thinks. The graph itself never
-touches storage.
+The run deadline is the runtime's, around the whole stream. `load_context` and
+`commit_execute` from the pipeline in docs/decisions.md run in the runtime, around this
+graph, because they are the run's two transactions: no unit of work may stay open while
+a model thinks. The graph itself never touches storage.
+
+`compile_graph` builds the graph from its services alone (`GraphDeps`), so another entry
+point (LangGraph Studio) can serve the same graph.
 """
 
 from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
+from uuid import UUID
 
 # langgraph is a namespace package, so pyright does not see its py.typed marker.
 from langgraph.graph import END, START, StateGraph  # pyright: ignore[reportMissingTypeStubs]
@@ -31,6 +45,7 @@ from freight_agent.application.graph.nodes import (
     agent_node,
     knowledge_node,
     prefilter_node,
+    tools_node,
     triage_node,
     validate_node,
 )
@@ -41,20 +56,33 @@ from freight_agent.ports.knowledge import SopIndex
 
 PREFILTER = "prefilter"
 # The triage step keeps the node id it had as the gate: LangSmith traces name each node
-# run by it (step -> agent_run -> gate -> the gate model call), and traces recorded
-# before wave 3 stay comparable.
+# run by it (agent_run -> gate -> the gate model call), and older traces stay comparable.
 TRIAGE = "gate"
 KNOWLEDGE = "knowledge"
 AGENT = "agent"
+TOOLS = "tools"
 VALIDATE = "validate"
+NODES = (PREFILTER, TRIAGE, KNOWLEDGE, AGENT, TOOLS, VALIDATE)
+
+
+class _Drawable(Protocol):
+    """The part of LangGraph's drawable graph the platform shows."""
+
+    @property
+    def nodes(self) -> Mapping[str, object]: ...
+
+    def draw_mermaid(self) -> str: ...
 
 
 class _Compiled(Protocol):
-    """The part of LangGraph's compiled graph the runtime uses."""
+    """The part of LangGraph's compiled graph the runtime uses. With two stream modes,
+    `astream` yields (mode, chunk) pairs."""
 
     def astream(
-        self, input: RunState, config: Mapping[str, object], *, stream_mode: str
-    ) -> AsyncIterator[dict[str, Any]]: ...
+        self, input: RunState, config: Mapping[str, object], *, stream_mode: list[str]
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]: ...
+
+    def get_graph(self) -> _Drawable: ...
 
 
 class _Builder(Protocol):
@@ -91,42 +119,83 @@ class RunGraph:
     """The compiled graph, streamed so that a caller always has the latest state.
 
     When a node raises (a model failure) or the caller cancels the stream (the
-    run deadline), the states already yielded still say what the run had decided
-    and which model calls it paid for.
+    run deadline), the states already yielded still say what the run had decided,
+    which model calls it paid for and which nodes it went through: `RunState.nodes`
+    comes from LangGraph's task events, a visit counted when its node starts, so the
+    node that failed is the last one.
     """
 
     def __init__(self, compiled: _Compiled) -> None:
         self._compiled = compiled
 
-    async def stream(self, ctx: RunContext, *, run_id: str) -> AsyncIterator[RunState]:
-        """Yield the state after every step, the first one being the input."""
+    async def stream(
+        self, ctx: RunContext, *, run_id: str, trace_id: UUID | None = None
+    ) -> AsyncIterator[RunState]:
+        """Yield the state after every step and as every node starts, the first one
+        being the input.
+
+        `trace_id` becomes the id of the run's root span when LangSmith traces it, so
+        the run's trace link is known before the trace is sent.
+        """
+        load = ctx.load
         config: dict[str, object] = {
             "run_name": "agent_run",
             "configurable": {"thread_id": run_id},
             "metadata": {
                 "run_id": run_id,
                 "event_id": ctx.event.event_id,
-                "load_id": ctx.load.load_id,
+                "event_type": ctx.event.type.value,
+                "load_id": load.load_id,
+                "broker_id": load.broker_id,
             },
+            "tags": [f"load:{load.load_id}", f"broker:{load.broker_id}"],
         }
-        async for values in self._compiled.astream(RunState(ctx=ctx), config, stream_mode="values"):
-            yield RunState(**values)
+        if trace_id is not None:
+            config["run_id"] = trace_id
+        state = RunState(ctx=ctx)
+        nodes: list[str] = []
+        modes = ["values", "tasks"]
+        async for mode, chunk in self._compiled.astream(state, config, stream_mode=modes):
+            if mode == "values":
+                state = replace(RunState(**chunk), nodes=tuple(nodes))
+            elif "input" in chunk:  # a task starts; its end event carries `result`
+                nodes.append(str(chunk["name"]))
+                state = replace(state, nodes=tuple(nodes))
+            else:
+                continue
+            yield state
+
+    def mermaid(self) -> str:
+        """The graph as LangGraph draws it, in Mermaid."""
+        return self._compiled.get_graph().draw_mermaid()
+
+    def nodes(self) -> tuple[str, ...]:
+        """The node ids, without LangGraph's start and end markers."""
+        return tuple(n for n in self._compiled.get_graph().nodes if n not in (START, END))
 
 
-def build_graph(deps: GraphDeps) -> RunGraph:
+def compile_graph(deps: GraphDeps) -> _Compiled:
     builder = cast(_Builder, StateGraph(RunState))
     builder.add_node(PREFILTER, prefilter_node())
     builder.add_node(TRIAGE, triage_node(deps.gate))
     builder.add_node(KNOWLEDGE, knowledge_node(deps.knowledge))
     builder.add_node(AGENT, agent_node(deps.agent))
+    builder.add_node(TOOLS, tools_node(deps.agent))
     builder.add_node(VALIDATE, validate_node(deps.rules))
     builder.add_edge(START, PREFILTER)
     for node, after in ((PREFILTER, TRIAGE), (TRIAGE, KNOWLEDGE)):
         builder.add_conditional_edges(node, _unless_decided(after), {after: after, END: END})
     builder.add_edge(KNOWLEDGE, AGENT)
-    builder.add_edge(AGENT, VALIDATE)
+    builder.add_conditional_edges(
+        AGENT, _after_agent, {TOOLS: TOOLS, VALIDATE: VALIDATE, AGENT: AGENT}
+    )
+    builder.add_conditional_edges(TOOLS, _after_tools, {AGENT: AGENT, VALIDATE: VALIDATE})
     builder.add_edge(VALIDATE, END)
-    return RunGraph(builder.compile())
+    return builder.compile()
+
+
+def build_graph(deps: GraphDeps) -> RunGraph:
+    return RunGraph(compile_graph(deps))
 
 
 def _unless_decided(next_node: str) -> Callable[[RunState], str]:
@@ -136,3 +205,16 @@ def _unless_decided(next_node: str) -> Callable[[RunState], str]:
         return END if state.verdict is not None else next_node
 
     return route
+
+
+def _after_agent(state: RunState) -> str:
+    if state.pending_calls:
+        return TOOLS
+    if state.outcome is not None:
+        return VALIDATE
+    return AGENT  # prose: the next round must answer
+
+
+def _after_tools(state: RunState) -> str:
+    over_budget = state.rejections > state.ctx.broker.limits.max_rejections
+    return VALIDATE if state.outcome is not None or over_budget else AGENT

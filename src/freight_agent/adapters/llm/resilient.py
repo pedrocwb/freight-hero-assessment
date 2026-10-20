@@ -9,17 +9,28 @@ whose outcome closes it or opens it again. When every model fails or is open,
 one `LlmError` names each model's reason, and the runtime escalates it to a Hero
 like any model failure.
 
-Only `LlmError` counts as a provider failure. Anything else (a bug, a missing
-cassette) propagates at once: falling back would hide it.
+Each call walks the chain on its own, so the rounds of one agent loop may be served by
+different models when the primary fails halfway: the conversation is in the request.
+
+Only `LlmError` counts as a provider failure. Anything else (a bug) propagates at once:
+falling back would hide it.
 """
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
 from freight_agent.ports.clock import Clock
-from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, LlmResponse, SchemaT
+from freight_agent.ports.llm import (
+    ChatReply,
+    ChatRequest,
+    LanguageModel,
+    LlmError,
+    LlmRequest,
+    LlmResponse,
+    SchemaT,
+)
 
 
 class BreakerState(StrEnum):
@@ -150,6 +161,14 @@ class ResilientModel:
         }
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+        return await self._first(lambda model: model.generate(request, schema))
+
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        return await self._first(lambda model: model.chat(request, schema))
+
+    async def _first[R](self, call: Callable[[LanguageModel], Awaitable[R]]) -> R:
+        """The first model of the chain whose breaker lets it through and whose call
+        succeeds."""
         failures: list[tuple[str, str]] = []
         for name, model in self._chain:
             breaker = self._breakers[name]
@@ -158,7 +177,7 @@ class ResilientModel:
                 failures.append((name, breaker.unavailable_reason()))
                 continue
             try:
-                response = await model.generate(request, schema)
+                response = await call(model)
             except LlmError as exc:
                 reason = f"{type(exc).__name__}: {exc}"
                 breaker.record_failure(permit, reason)

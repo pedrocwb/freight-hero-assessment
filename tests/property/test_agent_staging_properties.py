@@ -1,11 +1,14 @@
-"""The staged plan is a pure fold over the transcript (wave 3 spec, F1).
+"""Staging is `validate` one call at a time (wave 3 spec, F1).
 
-A live model's action tools stage through a `Staging` and answer the model; scripted and
-replayed models never run tools. For any sequence of tool calls, in any grouping into
-rounds, folding the transcript the live run leaves (`stage_from_transcript`) must give
-the plan, the answers and the rejection count the live tools gave, with or without the
-tool results in the transcript, and `validate` over the proposed plan must approve
-exactly the staged actions.
+The tools node stages each action call against the actions accepted before it
+(`application.agent.stage`), so the model learns at the call whether an action was
+accepted. For any sequence of tool calls, split into rounds in any way:
+
+- staging the action calls in order is `validate` of the same sequence: the same
+  accepted actions and the same violations, at the same plan positions, so the validate
+  node over the run's plan is the check that nothing drifted;
+- `Agent.call_tools` answers the same whatever the split into rounds, given the earlier
+  rounds' proposals, and counts as refused exactly the action calls it did not accept.
 """
 
 import asyncio
@@ -19,21 +22,18 @@ import pytest
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
-from freight_agent.application.agent import (
-    Staging,
-    merge_plan,
-    stage_from_transcript,
-    validation_context,
-)
-from freight_agent.application.agent_tools import agent_tools
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
+from freight_agent.application.agent import Agent, Proposal, ToolRound, stage, validation_context
+from freight_agent.application.agent_tools import ACTION_TOOLS
 from freight_agent.application.context import RunContext
-from freight_agent.domain.actions import AgentOutcome
+from freight_agent.domain.actions import FINISH, Plan
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import OutboundRecord, validate
-from tests.unit.application.test_runtime_harness import FakeSop
+from freight_agent.ports.llm import ToolCall
+from tests.fakes import FakeModel
 
 pytestmark = pytest.mark.property
 
@@ -42,7 +42,6 @@ LOAD = Load.from_metadata(json.loads((ROOT / "evals/fixtures/load_481207.json").
 LA = ZoneInfo("America/Los_Angeles")
 NOW = datetime(2026, 10, 13, 7, 31, tzinfo=LA)
 DRIVER, DISPATCHER, BROKER = "drv_20931", "dsp_4410", "brk_0087"
-MAX_REJECTIONS = 2
 
 contacts = st.sampled_from([DRIVER, DISPATCHER, BROKER, "x@y.com"])
 texts = st.sampled_from(["ETA?", "PO 55821", "Call 555-123-4567", "", "mail x@y.com"])
@@ -54,7 +53,7 @@ def _args(**fields: st.SearchStrategy[Any]) -> st.SearchStrategy[dict[str, Any]]
     return st.fixed_dictionaries({}, optional=fields)
 
 
-CALLS: dict[str, st.SearchStrategy[dict[str, Any]]] = {
+ACTION_CALLS: dict[str, st.SearchStrategy[dict[str, Any]]] = {
     "send_sms": _args(
         contact_id=contacts,
         text=texts,
@@ -78,12 +77,21 @@ CALLS: dict[str, st.SearchStrategy[dict[str, Any]]] = {
     "defer_obligation": _args(kind=kinds, minutes=st.sampled_from([5, 20])),
     "close_obligation": _args(kind=kinds, status=st.sampled_from(["satisfied", "cancelled", "x"])),
     "open_obligation": _args(kind=kinds),
+}
+OTHER_CALLS: dict[str, st.SearchStrategy[dict[str, Any]]] = {
     "get_ledger": _args(kind=kinds),
     "read_sop_section": _args(section_id=st.sampled_from(["escalation", "nope"])),
-    "send_fax": _args(to=contacts),  # not a tool: "unknown tool" live, nothing staged
+    "send_fax": _args(to=contacts),  # not a tool: "unknown tool", nothing staged
+    FINISH: _args(rationale=st.just("done")),  # the answer: left to the graph
 }
+assert set(ACTION_CALLS) == set(ACTION_TOOLS)
 
-tool_calls = st.one_of(*(st.tuples(st.just(name), args) for name, args in CALLS.items()))
+action_calls = st.one_of(*(st.tuples(st.just(n), a) for n, a in ACTION_CALLS.items()))
+any_calls = st.one_of(action_calls, *(st.tuples(st.just(n), a) for n, a in OTHER_CALLS.items()))
+not_json = st.builds(
+    lambda name: ToolCall(id="", name=name, error="Expecting value"),
+    st.sampled_from([*ACTION_TOOLS[:2], "get_load", FINISH]),
+)
 
 
 @st.composite
@@ -129,10 +137,12 @@ def contexts(draw: st.DrawFn) -> RunContext:
 
 
 @st.composite
-def rounds(draw: st.DrawFn) -> list[list[tuple[str, dict[str, Any]]]]:
+def rounds(draw: st.DrawFn) -> list[list[ToolCall]]:
     """Tool calls grouped into model rounds, as a live conversation makes them."""
-    calls = draw(st.lists(tool_calls, max_size=12))
-    grouped: list[list[tuple[str, dict[str, Any]]]] = []
+    drawn = draw(st.lists(any_calls | not_json, max_size=12))
+    calls = [c if isinstance(c, ToolCall) else ToolCall(id="", name=c[0], args=c[1]) for c in drawn]
+    calls = [ToolCall(f"c{i}", c.name, c.args, c.error) for i, c in enumerate(calls)]
+    grouped: list[list[ToolCall]] = []
     while calls:
         size = draw(st.integers(1, 3))
         grouped.append(calls[:size])
@@ -140,111 +150,81 @@ def rounds(draw: st.DrawFn) -> list[list[tuple[str, dict[str, Any]]]]:
     return grouped
 
 
-def live_run(
-    ctx: RunContext, grouped: list[list[tuple[str, dict[str, Any]]]]
-) -> tuple[Staging, list[str], tuple[dict[str, Any], ...], frozenset[str]]:
-    """What a live adapter does: run each call through the offered tools, in order, and
-    keep the transcript. Returns the live staging, its answers to the action calls, the
-    transcript and the offered tool names."""
-    staging = Staging(validation_context(ctx), default_rules(), MAX_REJECTIONS)
-    specs = {t.name: t for t in agent_tools(ctx, (), FakeSop(), stage=staging.answer)}
-    transcript: list[dict[str, Any]] = [{"role": "system", "content": "s"}]
-    answers: list[str] = []
-    ids = iter(range(1, 1000))
+def call_tools(ctx: RunContext, grouped: list[list[ToolCall]]) -> list[ToolRound]:
+    """What the graph's tools node does, round after round, each after the earlier ones."""
+    agent = Agent(FakeModel(), MemorySopIndex(()))
+    done: list[ToolRound] = []
+    proposals: list[Proposal] = []
 
     async def play() -> None:
         for calls in grouped:
-            entry_calls = [{"id": f"c{next(ids)}", "name": n, "args": a} for n, a in calls]
-            transcript.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": entry_calls,
-                    "usage": {"cost_usd": 0.001},
-                }
-            )
-            for call in entry_calls:
-                spec = specs.get(call["name"])
-                result = "Unknown tool." if spec is None else await spec.run(call["args"])
-                if spec is not None and call["name"] not in ("get_ledger", "read_sop_section"):
-                    answers.append(result)
-                transcript.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "name": call["name"],
-                        "content": result,
-                    }
-                )
+            answered = await agent.call_tools(ctx, (), calls, proposals=tuple(proposals))
+            proposals.extend(answered.proposals)
+            done.append(answered)
 
     asyncio.run(play())
-    return staging, answers, tuple(transcript), frozenset(specs)
+    return done
 
 
 @settings(max_examples=300, deadline=None)
-@given(ctx=contexts(), grouped=rounds())
-def test_the_fold_of_the_live_transcript_is_the_live_staging(
-    ctx: RunContext, grouped: list[list[tuple[str, dict[str, Any]]]]
+@given(ctx=contexts(), calls=st.lists(action_calls, max_size=12))
+def test_staging_a_sequence_of_calls_is_validate_of_the_same_sequence(
+    ctx: RunContext, calls: list[tuple[str, dict[str, Any]]]
 ) -> None:
-    live, answers, transcript, offered = live_run(ctx, grouped)
+    checks, rules = validation_context(ctx), default_rules()
+    proposals: list[Proposal] = []
+    answers: list[str] = []
+    for tool, args in calls:
+        text, proposal = stage(tool, args, checks=checks, rules=rules, proposals=proposals)
+        answers.append(text)
+        if proposal is not None:
+            proposals.append(proposal)
 
-    staged = stage_from_transcript(
-        transcript,
-        checks=validation_context(ctx),
-        rules=default_rules(),
-        max_rejections=MAX_REJECTIONS,
-        offered=offered,
-    )
+    outcome = validate(Plan(actions=tuple(p.action for p in proposals)), checks, rules)
 
-    event(f"accepted: {min(len(staged.accepted), 3)}")
-    event(f"over the budget: {staged.rejections > MAX_REJECTIONS}")
-    assert staged.proposals == tuple(live.proposals)
-    assert staged.accepted == live.accepted
-    assert staged.rejections == live.rejections
-    action_steps = [s for s in staged.trajectory if s.accepted is not None]
-    assert [s.result for s in action_steps] == answers
-    assert len(staged.trajectory) == sum(len(r) for r in grouped)
+    accepted = tuple(p.action for p in proposals if p.accepted)
+    event(f"accepted: {min(len(accepted), 3)}")
+    assert outcome.approved == accepted
+    assert outcome.violations == tuple(v for p in proposals for v in p.violations)
+    for index, proposal in enumerate(proposals):
+        assert proposal.accepted == (not proposal.violations)
+        assert all(v.action_index == index for v in proposal.violations)
+    numbered = [a for a in answers if a.startswith("accepted as action #")]
+    assert numbered == [f"accepted as action #{n}" for n in range(1, len(accepted) + 1)]
 
 
 @settings(max_examples=200, deadline=None)
 @given(ctx=contexts(), grouped=rounds())
-def test_a_scripted_transcript_without_results_folds_to_the_same_plan(
-    ctx: RunContext, grouped: list[list[tuple[str, dict[str, Any]]]]
+def test_the_answers_do_not_depend_on_how_the_calls_are_split_into_rounds(
+    ctx: RunContext, grouped: list[list[ToolCall]]
 ) -> None:
-    """Scripted mode: the tool calls only, no tool entries."""
-    live, _, transcript, offered = live_run(ctx, grouped)
-    bare = tuple(e for e in transcript if e["role"] != "tool")
+    by_round = call_tools(ctx, grouped)
+    (at_once,) = call_tools(ctx, [[c for calls in grouped for c in calls]])
 
-    staged = stage_from_transcript(
-        bare,
-        checks=validation_context(ctx),
-        rules=default_rules(),
-        max_rejections=MAX_REJECTIONS,
-        offered=offered,
-    )
-
-    assert staged.proposals == tuple(live.proposals)
-    assert staged.rejections == live.rejections
+    steps = tuple(s for r in by_round for s in r.steps)
+    event(f"rounds: {min(len(grouped), 3)}")
+    assert steps == at_once.steps
+    assert tuple(r for d in by_round for r in d.results) == at_once.results
+    assert tuple(p for d in by_round for p in d.proposals) == at_once.proposals
+    assert sum(d.rejections for d in by_round) == at_once.rejections
 
 
 @settings(max_examples=200, deadline=None)
 @given(ctx=contexts(), grouped=rounds())
-def test_validating_the_proposed_plan_approves_exactly_the_staged_actions(
-    ctx: RunContext, grouped: list[list[tuple[str, dict[str, Any]]]]
+def test_every_call_but_the_answer_is_a_step_and_only_refused_action_calls_count(
+    ctx: RunContext, grouped: list[list[ToolCall]]
 ) -> None:
-    """The validate node is the merge point: over the staged calls it agrees with the fold,
-    and the violations it reports are the refused calls, at their plan positions."""
-    _, _, transcript, offered = live_run(ctx, grouped)
-    staged = stage_from_transcript(
-        transcript,
-        checks=validation_context(ctx),
-        rules=default_rules(),
-        max_rejections=MAX_REJECTIONS,
-        offered=offered,
-    )
+    """The validate node over the proposals approves exactly what the steps accepted."""
+    (done,) = call_tools(ctx, [[c for calls in grouped for c in calls]])
+    calls = [c for r in grouped for c in r if c.name != FINISH or c.error is not None]
 
-    outcome = validate(merge_plan(staged, AgentOutcome()), validation_context(ctx), default_rules())
-
-    assert outcome.approved == staged.accepted
-    refused = {i for i, p in enumerate(staged.proposals) if not p.accepted}
-    assert {v.action_index for v in outcome.violations} == refused
+    assert [s.tool for s in done.steps] == [c.name for c in calls]
+    assert [r.call_id for r in done.results] == [c.id for c in calls]
+    for step, sent in zip(done.steps, calls, strict=True):
+        assert (step.accepted is None) == (sent.name not in ACTION_TOOLS)
+    assert done.rejections == sum(s.accepted is False for s in done.steps)
+    accepted = [s for s in done.steps if s.accepted]
+    assert len(accepted) == sum(p.accepted for p in done.proposals)
+    plan = Plan(actions=tuple(p.action for p in done.proposals))
+    outcome = validate(plan, validation_context(ctx), default_rules())
+    assert outcome.approved == tuple(p.action for p in done.proposals if p.accepted)

@@ -8,6 +8,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from freight_agent.domain.actions import (
+    FINISH,
     Action,
     AgentOutcome,
     OpenObligation,
@@ -65,17 +66,19 @@ def test_open_obligation_is_an_action() -> None:
 
 
 @pytest.mark.unit
-def test_the_agent_outcome_is_a_plan_with_the_agent_s_reading() -> None:
-    plan = Plan(rationale="r", actions=(OpenObligation(kind="pod"),))
+def test_the_agent_outcome_is_the_agents_reading_without_actions() -> None:
+    """The agent acts only through its action tools, so its answer carries no actions:
+    an answer that lists some is refused, not silently dropped."""
+    outcome = AgentOutcome(rationale="r")
 
-    outcome = AgentOutcome.model_validate(plan.model_dump())
-
-    assert (outcome.rationale, outcome.actions) == (plan.rationale, plan.actions)
-    assert (outcome.intent, outcome.no_procedure) == (None, False)
-    assert isinstance(outcome, Plan)
+    assert (outcome.rationale, outcome.intent, outcome.no_procedure) == ("r", None, False)
+    assert not isinstance(outcome, Plan)
     labelled = AgentOutcome(intent="detention_request", no_procedure=True)
-    assert (labelled.intent, labelled.no_procedure, labelled.actions) == (
-        "detention_request",
-        True,
-        (),
-    )
+    assert (labelled.intent, labelled.no_procedure) == ("detention_request", True)
+    with pytest.raises(ValidationError, match="actions"):
+        AgentOutcome.model_validate({"rationale": "r", "actions": []})
+
+
+@pytest.mark.unit
+def test_the_agent_outcome_is_the_finish_tool() -> None:
+    assert AgentOutcome.model_json_schema()["title"] == FINISH

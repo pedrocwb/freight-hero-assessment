@@ -9,10 +9,10 @@ ledger, never defer on a timer event, an acknowledgement never acts, short SMS w
 internal words, never share rates, untrusted text.
 
 Rendering is a pure function of its inputs: stable ordering, fixed formats and
-no clock but `ctx.now`. Cassette replay hashes the prompt, so the same context
-must give byte-identical text. Times are local clock times of the current stop,
-with how long ago or how soon they are, so a small model never does timezone or
-date arithmetic.
+no clock but `ctx.now`, so the same context gives byte-identical text (the eval
+experiments record a hash of each rendered system prompt). Times are local clock
+times of the current stop, with how long ago or how soon they are, so a small model
+never does timezone or date arithmetic.
 
 The agent prompt puts the stable parts first (load, contacts, SOP) and the
 event last, next to the task: the prefix stays cacheable across the runs of a
@@ -130,12 +130,6 @@ tool checks the action against the load and the rules at once and answers "accep
 the SOP still needs that step, stage a corrected action. Nothing happens until you call \
 finish; then code executes the accepted actions, in order."""
 
-_HOW_PLAN = """\
-# How you work
-1. You propose; code validates and executes. You return a plan: a list of actions, in the \
-actions of finish. Nothing happens until code checks each action against the load and the \
-rules. Code drops an action that breaks a rule; it never fixes it."""
-
 _HOW_REST = """\
 2. The SOP is the client's procedure. Follow the SOP sections in the prompt exactly: how many \
 messages, how long to wait, who to contact and who never to contact. Do not add steps the SOP \
@@ -242,8 +236,6 @@ _FINISH_TOOLS = """\
 Call finish once, at the end:
 - rationale: one or two sentences that name the SOP section and the step you followed, and \
 what you staged (or why nothing).
-- actions: leave it empty. Stage actions with the action tools, so you see whether each one \
-is accepted; an action listed here is checked only after you finish.
 - intent: only when the event means something else than the gate said: an intent id of the \
 list above.
 - no_procedure: true only when no SOP section covers the event, neither shown nor found with \
@@ -257,48 +249,22 @@ Before you finish, check:
 the SOP forbids, a short SMS, no invented facts, no prices.
 5. If nothing is needed, stage nothing."""
 
-_FINISH_PLAN = """\
-# Finish
-Call finish once with the plan:
-- rationale: one or two sentences that name the SOP section and the step you followed.
-- actions: the plan, possibly empty.
-- intent: only when the event means something else than the gate said: an intent id of the \
-list above.
-- no_procedure: true only when no SOP section covers the event, neither shown nor found with \
-search_sop. Then return no actions: a person takes the event.
-
-Before you answer, check:
-1. What is the event? The gate intent is a hint; the event itself is the fact.
-2. Which SOP section and which step apply, given the ledger and the transcript?
-3. What is already done or scheduled? Do not repeat it.
-4. Does each action follow the SOP? The right contact id, a channel that contact has, nobody \
-the SOP forbids, a short SMS, no invented facts, no prices.
-5. If nothing is needed, return an empty plan."""
-
 
 def render_agent_system_prompt(broker: Broker) -> str:
-    """The agent prompt for the broker's catalog. With `limits.max_steps` 0 the agent has no
-    action tools and answers with the whole plan (the pre-wave-3 behaviour)."""
-    tools = broker.limits.max_steps > 0
-    nothing = "Staging nothing" if tools else "An empty plan (no actions)"
+    """The agent prompt for the broker's catalog, its limits included."""
     blocks = [
         _AGENT_INTRO,
-        (_HOW_TOOLS if tools else _HOW_PLAN) + "\n" + _HOW_REST.format(nothing=nothing),
+        _HOW_TOOLS + "\n" + _HOW_REST.format(nothing="Staging nothing"),
         _intents_block(broker),
         "# Actions\n"
-        + (
-            "Each action tool stages one action. Stage them in the order they should happen.\n"
-            if tools
-            else 'Each action is an object with a "type". List them in the order they should '
-            "happen.\n"
-        )
+        "Each action tool stages one action. Stage them in the order they should happen.\n"
         + _ACTIONS,
         _obligations_block(broker),
         _documents_block(broker),
         _LEDGER,
         _MESSAGES,
-        _tools_block(broker, tools),
-        _FINISH_TOOLS if tools else _FINISH_PLAN,
+        _tools_block(broker),
+        _FINISH_TOOLS,
     ]
     return "\n\n".join(blocks) + "\n"
 
@@ -360,22 +326,20 @@ def _documents_block(broker: Broker) -> str:
     return "\n".join(lines)
 
 
-def _tools_block(broker: Broker, tools: bool) -> str:
+def _tools_block(broker: Broker) -> str:
     limits = broker.limits
     read = _READ_TOOLS + (_REQUIREMENTS_TOOL if broker.documents else "")
-    if tools:
-        budget = (
-            f"You have at most {limits.max_steps} rounds of tool calls. More than "
-            f"{limits.max_rejections} rejected actions send the event to a person, so read each "
-            "rejection and correct the action instead of sending it again."
-        )
-        return (
-            "# Tools\nRead tools change nothing:\n"
-            + read
-            + "\nMost events need no read tool: the prompt already holds the sections, the "
-            "ledger and the transcript. " + budget
-        )
-    return "# Tools\n" + read + "\nMost events need no tool."
+    budget = (
+        f"You have at most {limits.max_steps} rounds of tool calls. More than "
+        f"{limits.max_rejections} rejected actions send the event to a person, so read each "
+        "rejection and correct the action instead of sending it again."
+    )
+    return (
+        "# Tools\nRead tools change nothing:\n"
+        + read
+        + "\nMost events need no read tool: the prompt already holds the sections, the "
+        "ledger and the transcript. " + budget
+    )
 
 
 # --- the triage user prompt ---------------------------------------------------------------
@@ -422,13 +386,6 @@ _TASK_TOOLS = (
     "should be done now."
 )
 
-_TASK_PLAN = (
-    "## Your task\n"
-    "Decide the plan for the event above. Follow the SOP sections for this event, and use the "
-    "ledger, the timers and the transcript to see what is already done. Call finish with the "
-    "plan; return an empty plan if nothing should be done now."
-)
-
 
 def render_agent_prompt(
     ctx: RunContext,
@@ -451,7 +408,7 @@ def render_agent_prompt(
         f"## Now\n{view.now_line()}",
         _event_block(view),
         f"## Gate\nintent: {gate.intent}\nreason: {_quote(gate.reason)}",
-        _TASK_TOOLS if ctx.broker.limits.max_steps > 0 else _TASK_PLAN,
+        _TASK_TOOLS,
     ]
     return "\n\n".join(blocks) + "\n"
 

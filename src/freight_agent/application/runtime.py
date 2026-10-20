@@ -9,10 +9,10 @@ a database would hold the claimed rows):
 
 1. claim: one unit of work claims the next event, reads its context
    (`load_run_context`) and commits the claim;
-2. think: the run graph (prefilter, triage, knowledge, agent, validate) runs
-   outside any transaction, under the run deadline; it reads the SOP through the
-   knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of work, and
-   the agent's read tools answer from the context read in phase 1;
+2. think: the run graph (prefilter, gate, knowledge, the agent and tools loop,
+   validate) runs outside any transaction, under the run deadline; it reads the SOP
+   through the knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of
+   work, and the agent's read tools answer from the context read in phase 1;
 3. commit: one unit of work checks again that no other run finished the event,
    executes the verdict's actions, saves the run record and completes the event.
 
@@ -21,7 +21,9 @@ while releasing) leaves its event in flight. The claim lease takes it back: ever
 `process_all` first releases the claims older than `claim_lease_s`, each counted as a
 failed attempt (the watchdog of the plan).
 
-The tracer exports the run after the commit, and can never break it.
+LangGraph traces the run itself when tracing is on; the runtime gives the run's root span
+an id, and after the commit the tracer turns it into the trace link the run record keeps
+(`RunRecord.trace_url`). Tracing can never break a run.
 
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
@@ -34,6 +36,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
+from uuid import UUID, uuid4
 
 from freight_agent.application import escalation
 from freight_agent.application.agent import Agent
@@ -47,7 +50,14 @@ from freight_agent.application.contracts import (
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.executor import ExecutionResult, Executor
 from freight_agent.application.gate import Gate
-from freight_agent.application.graph import GraphDeps, RunState, Verdict, build_graph, need
+from freight_agent.application.graph import (
+    GraphDeps,
+    RunGraph,
+    RunState,
+    Verdict,
+    build_graph,
+    need,
+)
 from freight_agent.application.prefilter import SkipReason
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
@@ -62,7 +72,6 @@ from freight_agent.domain.ping_filter import (
 )
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.domain.validation import ValidationConfig
 from freight_agent.ports.clock import Clock, IdGenerator
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import DeliveryError, Gateways
@@ -80,9 +89,6 @@ class RuntimeConfig:
     rounds, cost and rejection budgets) is its broker's (`Broker.limits`), not here."""
 
     ping_filter: PingFilterConfig = field(default_factory=PingFilterConfig)
-    # Not read by the runs since wave 3: each run validates with its broker's
-    # `BrokerLimits.validation`. Kept because the eval metadata still hashes it.
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
     recent_events_limit: int = 30  # the transcript in the agent's prompt
     history_events_limit: int = 200  # what the agent's get_history tool can read
     run_deadline_s: float = 240.0
@@ -90,13 +96,13 @@ class RuntimeConfig:
     # None: `run_deadline_s` plus a minute, so a run that is still thinking keeps it.
     claim_lease_s: float | None = None
     max_delivery_attempts: int = 5
-    llm_timeout_s: float = 60.0  # per model call (the whole tool loop); the adapter enforces it
+    llm_timeout_s: float = 60.0  # per model call (one round); the adapter enforces it
     outbox_batch_size: int = 100  # items one `dispatch_outbox` call sends at most
     recent_pings_per_load: int = 64  # ping ids the risk tracker keeps to drop redeliveries
     # Production keeps the worker going: an unexpected error becomes a failed attempt
     # and the event is released for a retry. The eval harness sets this so that a
-    # harness error (a missing cassette) ends the trial with its own message; the
-    # event is still released first. Domain errors are failed attempts either way.
+    # harness error (a bug) ends the trial with its own message; the event is still
+    # released first. Domain errors are failed attempts either way.
     reraise_unexpected: bool = False
 
     @property
@@ -138,12 +144,14 @@ class _Attempt:
     started_at: datetime
     state: RunState | None = None
     error: Exception | None = None
+    trace_id: UUID = field(default_factory=uuid4)  # the root span of the run's trace
 
 
 @dataclass(frozen=True)
 class _Finished:
     record: RunRecord
     stored: bool  # a failed attempt is stored only when it dead-letters the event
+    trace_id: UUID | None = None  # None: the graph never ran, so there is no trace
 
 
 class AgentRuntime:
@@ -158,6 +166,11 @@ class AgentRuntime:
             )
         )
         self._executor = Executor(deps.clock, deps.ids)
+
+    @property
+    def graph(self) -> RunGraph:
+        """The run graph, for the platform's drawing of it."""
+        return self._graph
 
     def _uow(self) -> UnitOfWork:
         return self._deps.uow_factory()
@@ -379,7 +392,8 @@ class AgentRuntime:
         deadline = asyncio.timeout(deadline_s)
         try:
             async with deadline:
-                async for state in self._graph.stream(ctx, run_id=attempt.run_id):
+                stream = self._graph.stream(ctx, run_id=attempt.run_id, trace_id=attempt.trace_id)
+                async for state in stream:
                     attempt.state = state
         except LlmError as exc:
             return Verdict.escalated(escalation.model_failure(ctx, exc))
@@ -406,7 +420,7 @@ class AgentRuntime:
             await uow.runs.save(record)
             await uow.queue.complete(event_id)
             await uow.commit()
-        return _Finished(record, stored=True)
+        return _Finished(record, stored=True, trace_id=attempt.trace_id)
 
     async def _fail(self, attempt: _Attempt, exc: Exception) -> _Finished:
         error = f"{type(exc).__name__}: {exc}"
@@ -425,7 +439,8 @@ class AgentRuntime:
             if dead:
                 await uow.runs.save(record)
             await uow.commit()
-        return _Finished(record, stored=dead)
+        traced = attempt.state is not None and attempt.error is None
+        return _Finished(record, stored=dead, trace_id=attempt.trace_id if traced else None)
 
     def _record(self, attempt: _Attempt, verdict: Verdict) -> RunRecord:
         state = attempt.state
@@ -450,13 +465,16 @@ class AgentRuntime:
             trajectory=state.trajectory if state else (),
             sections_searched=state.sections_searched if state else (),
             rejections=state.rejections if state else 0,
+            nodes=state.nodes if state else (),
         )
 
     async def _export(self, finished: _Finished) -> RunRecord:
-        """Trace the run, fail-open. A stored run keeps its trace URL."""
+        """The run's trace link, fail-open. A stored run keeps it."""
         record = finished.record
+        if finished.trace_id is None:
+            return record
         try:
-            url = await self._deps.tracer.record_run(record)
+            url = await self._deps.tracer.trace_url(finished.trace_id)
             if url is not None:
                 record = record.model_copy(update={"trace_url": url})
                 if finished.stored:
@@ -464,7 +482,7 @@ class AgentRuntime:
                         await uow.runs.save(record)
                         await uow.commit()
         except Exception:
-            logger.warning("tracing run %s failed", record.run_id, exc_info=True)
+            logger.warning("the trace link of run %s failed", record.run_id, exc_info=True)
         return record
 
     # --- delivery ---------------------------------------------------------------------------

@@ -34,7 +34,7 @@ class TrajectoryStep(DomainModel):
     `accepted` is set for action tools (staged, or refused by a rule or for bad
     arguments) and None for read tools. `cost_usd` is the cost of the model round that
     made the call (every call of one round shows the same round). The final answer
-    (`finish`) is not a step: it is the run's plan and intent.
+    (`finish`) is not a step: it is the run's rationale and intent.
     """
 
     tool: str
@@ -54,8 +54,8 @@ class RunRecord(DomainModel):
     gate: GateDecision | None = None
     sop_section_ids: tuple[str, ...] = ()
     sop_version: str | None = None  # content hash of the SOP files the run read
-    # Every action the agent proposed: the action tool calls, then the answer's own
-    # actions. Always a plain `Plan`, so a record read back from storage compares equal.
+    # Every action the agent proposed with its action tools, in call order, refused ones
+    # included. Always a plain `Plan`, so a record read back from storage compares equal.
     plan: Plan | None = None
     violations: tuple[Violation, ...] = ()
     usage: tuple[Usage, ...] = ()
@@ -69,6 +69,8 @@ class RunRecord(DomainModel):
     trajectory: tuple[TrajectoryStep, ...] = ()  # the agent's tool calls, in order
     sections_searched: tuple[str, ...] = ()  # sections search_sop returned or the agent read
     rejections: int = 0  # action tool calls a rule refused
+    # The run graph's nodes the run went through, in order, one entry per visit.
+    nodes: tuple[str, ...] = ()
 
     @property
     def cost_usd(self) -> float:

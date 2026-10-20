@@ -188,24 +188,21 @@ class Plan(DomainModel):
 FINISH = "finish"
 
 
-class AgentOutcome(Plan):
-    """The agent's final answer: a plan, plus how it read the event.
+class AgentOutcome(DomainModel):
+    """Call it once, at the end, after you staged every action with its action tool."""
 
-    The model gives it by calling `finish` (the schema's title names the answer tool).
-    `actions` given here are validated like a plan's (the 22 core scenarios answer this
-    way, and with no action tools it is the whole plan); actions the agent staged through
-    its tools are recomputed from the transcript by the agent node. `intent` labels the
-    event with a catalog id when the agent read it differently from the gate.
-    `no_procedure` says no SOP section covers the event.
-    """
+    # The agent's final answer, `finish` (the schema's title names the answer tool), and
+    # the docstring above is what the model reads about it. The actions are not in it:
+    # the agent staged each one with its action tool, where the rules judged it at the
+    # call. `intent` labels the event with a catalog id when the agent read it differently
+    # from the gate; `no_procedure` says no SOP section covers the event.
 
     model_config = ConfigDict(frozen=True, extra="forbid", title=FINISH)
 
-    actions: tuple[Action, ...] = Field(
-        default=(),
+    rationale: str = Field(
+        default="",
         description=(
-            "Every action of the plan that you did not stage with an action tool, in order. "
-            "With no action tools, every action the rationale names. Empty only when none."
+            "The SOP section and the step you followed, and what you staged (or why nothing)."
         ),
     )
     intent: str | None = Field(

@@ -1,4 +1,5 @@
-"""The agent's tools: what each read tool answers, and the action tools' schemas."""
+"""The agent's tools: which are offered, what each read tool answers, and the action
+tools' schemas (specs only: the run graph's tools node stages their calls)."""
 
 import json
 from collections.abc import Sequence
@@ -8,8 +9,15 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
-from freight_agent.application.agent_tools import ACTION_TOOLS, agent_tools, build_action
+from freight_agent.application.agent_tools import (
+    ACTION_TOOLS,
+    Toolbox,
+    agent_tools,
+    build_action,
+    invalid_arguments,
+)
 from freight_agent.application.context import RunContext
 from freight_agent.domain.actions import Purpose, SendEmail, SendSms
 from freight_agent.domain.broker import DocumentRequirement, standard_broker
@@ -100,30 +108,30 @@ SECTIONS = (
 )
 
 
-def tools(ctx: RunContext, *, stage: Any = None, knowledge: Any = None) -> dict[str, ToolSpec]:
-    specs = agent_tools(ctx, SECTIONS, knowledge or FakeSop(), stage=stage)
-    return {t.name: t for t in specs}
+def toolbox(ctx: RunContext, *, knowledge: Any = None) -> Toolbox:
+    return agent_tools(ctx, SECTIONS, knowledge or FakeSop())
+
+
+def tools(ctx: RunContext, *, knowledge: Any = None) -> dict[str, ToolSpec]:
+    return {t.name: t for t in toolbox(ctx, knowledge=knowledge).specs}
 
 
 async def call(ctx: RunContext, name: str, **args: Any) -> str:
-    return await tools(ctx)[name].run(args)
+    return await toolbox(ctx).readers[name](args)
 
 
 # --- which tools are offered --------------------------------------------------------------
 
 
-def test_the_read_tools_are_offered_and_the_action_tools_only_with_a_staging(load: Load) -> None:
+def test_the_read_tools_come_first_then_every_action_tool(load: Load) -> None:
     quiet = context(load, event=sms_event("m1", at(9, 0), "ok"), recent_events=())
 
-    assert list(tools(quiet)) == [
-        "search_sop",
-        "read_sop_section",
-        "get_history",
-        "get_ledger",
-        "get_load",
-    ]
-    staged = tools(quiet, stage=lambda name, args: ("accepted as action #1", True))
-    assert list(staged)[5:] == list(ACTION_TOOLS)
+    box = toolbox(quiet)
+
+    reads = ["search_sop", "read_sop_section", "get_history", "get_ledger", "get_load"]
+    assert list(box.names) == [*reads, *ACTION_TOOLS]
+    assert list(box.readers) == reads  # an action tool is a spec only: the graph stages it
+    assert "finish" not in box.names
 
 
 def test_read_document_needs_a_document_or_an_attachment_in_view(load: Load) -> None:
@@ -144,9 +152,7 @@ def test_every_tool_schema_is_an_object_with_properties(load: Load) -> None:
     """Gemini refuses an object schema with no properties, so even the tools that need no
     argument take an optional filter."""
     requiring = standard_broker().model_copy(update={"documents": (POD_AT_DELIVERY,)})
-    every = tools(
-        context(load, broker=requiring), stage=lambda name, args: ("accepted as action #1", True)
-    )
+    every = tools(context(load, broker=requiring))
 
     for spec in every.values():
         assert spec.parameters["type"] == "object"
@@ -179,7 +185,9 @@ async def test_search_sop_lists_the_hits_of_the_loads_broker_best_first(load: Lo
     )
     reefer = load.model_copy(update={"load_types": ("reefer",)})
 
-    answer = await tools(context(reefer), knowledge=index)["search_sop"].run({"query": " lumper "})
+    search = toolbox(context(reefer), knowledge=index).readers["search_sop"]
+
+    answer = await search({"query": " lumper "})
 
     assert index.queries == [("northline", ("reefer",), "lumper", 5)]
     assert answer == (
@@ -191,10 +199,10 @@ async def test_search_sop_lists_the_hits_of_the_loads_broker_best_first(load: Lo
 
 async def test_search_sop_says_when_nothing_matches_or_the_query_is_missing(load: Load) -> None:
     index = RecordingIndex(())
-    search = tools(context(load), knowledge=index)["search_sop"]
+    search = toolbox(context(load), knowledge=index).readers["search_sop"]
 
-    assert (await search.run({"query": "x"})).startswith('No SOP section matches "x".')
-    assert (await search.run({})).startswith("Missing query")
+    assert (await search({"query": "x"})).startswith('No SOP section matches "x".')
+    assert (await search({})).startswith("Missing query")
     assert len(index.queries) == 1
 
 
@@ -221,13 +229,9 @@ async def test_read_sop_section_returns_the_body_or_the_valid_ids(load: Load) ->
 
 
 async def test_read_sop_section_without_sections_says_so(load: Load) -> None:
-    (spec,) = [
-        t
-        for t in agent_tools(context(load), (), FakeSop(), stage=None)
-        if t.name == "read_sop_section"
-    ]
+    read = agent_tools(context(load), (), FakeSop()).readers["read_sop_section"]
 
-    assert await spec.run({"section_id": "x"}) == "No SOP sections are available for this load."
+    assert await read({"section_id": "x"}) == "No SOP sections are available for this load."
 
 
 async def test_get_history_reads_the_longer_window_in_the_transcripts_format(load: Load) -> None:
@@ -419,21 +423,8 @@ async def test_list_document_requirements_shows_where_the_load_stands(load: Load
 # --- action tools -------------------------------------------------------------------------
 
 
-async def test_an_action_tool_hands_its_call_to_the_staging(load: Load) -> None:
-    seen: list[tuple[str, dict[str, Any]]] = []
-
-    def stage(name: str, args: Any) -> tuple[str, bool]:
-        seen.append((name, dict(args)))
-        return "accepted as action #1", True
-
-    answer = await tools(context(load), stage=stage)["write_tms_note"].run({"text": "note"})
-
-    assert answer == "accepted as action #1"
-    assert seen == [("write_tms_note", {"text": "note"})]
-
-
 def test_action_schemas_are_flat_portable_and_offer_the_loads_contacts(load: Load) -> None:
-    every = tools(context(load), stage=lambda name, args: ("", True))
+    every = tools(context(load))
 
     sms = every["send_sms"].parameters
     assert sms == {
@@ -498,3 +489,23 @@ def test_build_action_reads_the_arguments_of_one_action_type() -> None:
     assert build_action(
         "send_email", {"to_contact_ids": ["dsp_4410"], "body": "b", "purpose": "eta_request"}
     ) == SendEmail(to_contact_ids=("dsp_4410",), body="b", purpose=Purpose.ETA_REQUEST)
+
+
+def test_invalid_arguments_name_each_bad_field_or_the_whole_call() -> None:
+    """A model-level refusal has no field to name: the answer points at the arguments."""
+    with pytest.raises(ValidationError) as missing:
+        build_action("send_sms", {"text": ""})
+    with pytest.raises(ValidationError) as mixed:
+        build_action(
+            "send_sms",
+            {"contact_id": DRIVER, "text": "ETA?", "purpose": "eta_request", "requests": "pod"},
+        )
+
+    assert invalid_arguments("send_sms", missing.value) == (
+        "rejected: invalid arguments for send_sms: contact_id: Field required; text: String "
+        "should have at least 1 character. Fix them and call it again."
+    )
+    assert invalid_arguments("send_sms", mixed.value).startswith(
+        "rejected: invalid arguments for send_sms: (arguments): Value error, purpose "
+        "eta_request asks for eta_request, not pod."
+    )

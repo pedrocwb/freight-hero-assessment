@@ -1,13 +1,15 @@
 """The runtime's exits other than acting: escalations, failures, retries and tracing."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
+from uuid import UUID
 
 import pytest
 
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.persistence.memory.store import MemoryEventQueue
+from freight_agent.application.context import RunContext
+from freight_agent.application.graph import RunState
 from freight_agent.application.runtime import RuntimeConfig
 from freight_agent.domain.actions import AgentOutcome, Purpose, SendEmail, SendSms
 from freight_agent.domain.events import Event, EventType
@@ -17,7 +19,16 @@ from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.sop import MergeMode, ResolvedSop
 from freight_agent.domain.validation import Severity
-from freight_agent.ports.llm import LlmError, LlmRequest, LlmResponse, ModelRole, SchemaT
+from freight_agent.ports.llm import (
+    ChatReply,
+    ChatRequest,
+    LlmError,
+    LlmRequest,
+    LlmResponse,
+    ModelRole,
+    SchemaT,
+)
+from tests.fakes import FakeModel, Round, act
 from tests.unit.application.test_runtime_harness import (
     ASK_ETA,
     DECIDE,
@@ -67,6 +78,7 @@ async def test_an_unknown_sender_goes_to_a_hero_without_a_model_call(
 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert world.model.calls == []
+    assert runs[0].nodes == ("prefilter",)
     assert runs[0].error is not None and runs[0].error.startswith("unknown_sender: ")
     [task] = world.sent("hero_task")
     assert task.payload["title"] == "Message from an unknown sender"
@@ -89,7 +101,8 @@ async def test_an_event_no_sop_covers_escalates_and_records_the_gap(load: Load) 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert runs[0].error == "sop_gap: status_update/to_pickup"
     assert runs[0].sop_section_ids == ("communication_rules", "escalation")  # general only
-    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)
+    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)  # the answer is the one round
+    assert runs[0].nodes == ("prefilter", "gate", "knowledge", "agent", "validate")
     [task] = world.sent("hero_task")
     assert task.payload["title"] == "No SOP for this situation"
     assert "status_update" in task.payload["description"]
@@ -98,6 +111,24 @@ async def test_an_event_no_sop_covers_escalates_and_records_the_gap(load: Load) 
 
 
 # --- model failures and the deadline --------------------------------------------------------
+
+
+class Delegating:
+    """A model in front of a `FakeModel`: `before` runs ahead of every request."""
+
+    def __init__(self) -> None:
+        self.inner = FakeModel()
+
+    async def before(self, request: LlmRequest) -> None:
+        return None
+
+    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+        await self.before(request)
+        return await self.inner.generate(request, schema)
+
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        await self.before(request)
+        return await self.inner.chat(request, schema)
 
 
 async def test_a_decide_failure_escalates_once_and_completes_the_event(load: Load) -> None:
@@ -111,6 +142,7 @@ async def test_a_decide_failure_escalates_once_and_completes_the_event(load: Loa
     assert runs[0].error == "llm_error: provider returned 503"
     assert runs[0].gate is not None and runs[0].gate.intent == Intent.DELAY_RISK_HIGH
     assert "delay_risk_high" in runs[0].sop_section_ids
+    assert runs[0].nodes == ("prefilter", "gate", "knowledge", "agent")  # the failing node last
     [task] = world.sent("hero_task")
     assert task.payload["urgent"] is True
     assert task.payload["title"] == "Agent failed on an event: handle it by hand"
@@ -121,32 +153,69 @@ async def test_a_decide_failure_escalates_once_and_completes_the_event(load: Loa
     assert await world.tick(at(7, 2)) == []  # never retried into a duplicate
 
 
+PO_REPLY = SendSms(contact_id=DRIVER, text="The PO number is 55821.", purpose=Purpose.REPLY)
+
+
+async def test_a_model_failure_after_staging_runs_nothing_staged_and_loses_no_event(
+    load: Load,
+) -> None:
+    """The first round staged an SMS and the second round failed: the staged SMS never
+    leaves (only the Hero task does), the record keeps what was staged and paid for, and
+    the message queued behind the event still runs."""
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO?")
+    await world.message(at(7, 12, 30), "ok", message_id="msg:ack")
+    world.model.push(GATE, decision(Intent.QUESTION), decision(Intent.ACKNOWLEDGEMENT, act=False))
+    world.model.push(DECIDE, Round(calls=(act(PO_REPLY),)), LlmError("provider returned 503"))
+
+    runs = await world.tick(at(7, 13))
+
+    assert [(r.event_id, r.status) for r in runs] == [
+        ("msg:0712", RunStatus.ESCALATED),
+        ("msg:ack", RunStatus.NOOP),
+    ]
+    failed = runs[0]
+    assert failed.error == "llm_error: provider returned 503"
+    assert failed.nodes == ("prefilter", "gate", "knowledge", "agent", "tools", "agent")
+    assert failed.plan is not None and failed.plan.actions == (PO_REPLY,)
+    assert [(s.tool, s.accepted) for s in failed.trajectory] == [("send_sms", True)]
+    assert [u.role for u in failed.usage] == ["gate", "agent"]  # the failed round paid nothing
+    assert world.sent("sms") == []
+    assert [o.kind for o in (await world.snapshot()).outbox] == [OutboxKind.HERO_TASK]
+    assert await queue_size(world) == 0
+
+
 async def test_a_gate_failure_keeps_no_usage_and_escalates(load: Load) -> None:
     world = await World(load).start()
     await world.message(at(7, 12), "Where do I park?")
 
-    runs = await world.tick(at(7, 13))  # nothing scripted: ScriptExhausted is an LlmError
+    runs = await world.tick(at(7, 13))  # nothing queued: ScriptExhausted is an LlmError
 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert runs[0].gate is None and runs[0].usage == ()
+    assert runs[0].nodes == ("prefilter", "gate")
     assert runs[0].error is not None and runs[0].error.startswith("llm_error: ")
     assert [d.payload["urgent"] for d in world.sent("hero_task")] == [True]
 
 
-class SlowModel:
-    """Answers the gate at once and never finishes a plan."""
+class SlowModel(Delegating):
+    """Answers at once, except the agent rounds numbered in `slow` (from 1), which take
+    ten seconds."""
 
-    def __init__(self) -> None:
-        self.inner = ScriptedModel()
+    def __init__(self, *slow: int) -> None:
+        super().__init__()
+        self.slow = set(slow)
+        self.agent_rounds = 0
 
-    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+    async def before(self, request: LlmRequest) -> None:
         if request.role is ModelRole.AGENT:
-            await asyncio.sleep(10)
-        return await self.inner.generate(request, schema)
+            self.agent_rounds += 1
+            if self.agent_rounds in self.slow:
+                await asyncio.sleep(10)
 
 
 async def test_a_run_over_its_deadline_escalates_with_what_it_had(load: Load) -> None:
-    model = SlowModel()
+    model = SlowModel(1)
     world = await World(load, llm=model, config=RuntimeConfig(run_deadline_s=0.05)).start()
     await world.message(at(7, 12), "What's the PO?")
     model.inner.push(GATE, decision(Intent.QUESTION))
@@ -157,9 +226,40 @@ async def test_a_run_over_its_deadline_escalates_with_what_it_had(load: Load) ->
     assert runs[0].error == "deadline: the run took more than 0.05 s"
     assert runs[0].gate is not None and runs[0].gate.intent == Intent.QUESTION
     assert [u.role for u in runs[0].usage] == ["gate"]
+    assert runs[0].nodes == ("prefilter", "gate", "knowledge", "agent")
     [task] = world.sent("hero_task")
     assert task.payload["urgent"] is True
     assert task.payload["title"] == "Agent run timed out: handle the event by hand"
+    assert await queue_size(world) == 0
+
+
+async def test_a_deadline_after_staging_runs_nothing_staged_and_loses_no_event(
+    load: Load,
+) -> None:
+    """The deadline passes in the answering round, after an SMS was staged: the SMS never
+    leaves, and the message queued behind still runs."""
+    model = SlowModel(2)
+    # Long enough for the steps before the slow round on a slow machine.
+    world = await World(load, llm=model, config=RuntimeConfig(run_deadline_s=0.25)).start()
+    await world.message(at(7, 12), "What's the PO?")
+    await world.message(at(7, 12, 30), "ok", message_id="msg:ack")
+    model.inner.push(GATE, decision(Intent.QUESTION), decision(Intent.ACKNOWLEDGEMENT, act=False))
+    model.inner.push(DECIDE, plan(PO_REPLY))
+
+    runs = await world.tick(at(7, 13))
+
+    assert [(r.event_id, r.status) for r in runs] == [
+        ("msg:0712", RunStatus.ESCALATED),
+        ("msg:ack", RunStatus.NOOP),
+    ]
+    late = runs[0]
+    assert late.error == "deadline: the run took more than 0.25 s"
+    assert late.nodes == ("prefilter", "gate", "knowledge", "agent", "tools", "agent")
+    assert late.plan is not None and late.plan.actions == (PO_REPLY,)
+    assert world.sent("sms") == []
+    assert [d.payload["title"] for d in world.sent("hero_task")] == [
+        "Agent run timed out: handle the event by hand"
+    ]
     assert await queue_size(world) == 0
 
 
@@ -170,15 +270,28 @@ class RaisingModel:
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
         raise self.error
 
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        raise self.error
 
-async def test_a_timeout_that_is_not_the_deadline_is_an_unexpected_failure(load: Load) -> None:
+
+@pytest.mark.parametrize("from_the_agent", [False, True], ids=["gate", "agent"])
+async def test_a_timeout_that_is_not_the_deadline_is_an_unexpected_failure(
+    load: Load, from_the_agent: bool
+) -> None:
+    """A `TimeoutError` the run deadline did not raise (a socket's) fails the attempt:
+    from the gate's call on a message, or the agent's round on a risk event."""
     world = await World(load, llm=RaisingModel(TimeoutError("socket"))).start()
-    await world.message(at(7, 12), "What's the PO?")
+    if from_the_agent:
+        await world.ping(at(7, 12), DelayRisk.HIGH, "p1")
+    else:
+        await world.message(at(7, 12), "What's the PO?")
 
     runs = await world.tick(at(7, 13))
 
     assert [r.status for r in runs] == [RunStatus.FAILED] * 3
-    assert await dead_letters(world) == ["msg:0712"]
+    assert runs[0].error == "TimeoutError: socket"
+    assert runs[0].nodes[-1] == ("agent" if from_the_agent else "gate")
+    assert await dead_letters(world) == ["risk:p1" if from_the_agent else "msg:0712"]
     assert world.sent("hero_task") == []
 
 
@@ -246,7 +359,6 @@ async def already_in_the_outbox(world: World, key: str) -> None:
         await uow.commit()
 
 
-PO_REPLY = SendSms(contact_id=DRIVER, text="The PO number is 55821.", purpose=Purpose.REPLY)
 SKIPPED_FIRST = "executor skipped action 0 (send_sms): already applied: msg:0712:0 is in the outbox"
 
 
@@ -363,8 +475,8 @@ async def test_reraise_unexpected_keeps_domain_errors_as_failed_runs(load: Load)
     assert runs[0].error is not None and runs[0].error.startswith("DomainError: ")
 
 
-async def test_an_event_whose_context_cannot_load_fails_and_is_released(load: Load) -> None:
-    world = await World(load).start()
+async def queue_stray_event(world: World) -> None:
+    """A queued message of a load the store does not have: its context cannot load."""
     stray = Event(
         event_id="m-stray",
         load_id="999999",
@@ -379,6 +491,11 @@ async def test_an_event_whose_context_cannot_load_fails_and_is_released(load: Lo
         await uow.queue.enqueue(stray)
         await uow.commit()
 
+
+async def test_an_event_whose_context_cannot_load_fails_and_is_released(load: Load) -> None:
+    world = await World(load).start()
+    await queue_stray_event(world)
+
     runs = await world.tick(at(7, 1))
 
     assert [(r.status, r.load_id) for r in runs] == [(RunStatus.FAILED, "999999")] * 3
@@ -387,14 +504,14 @@ async def test_an_event_whose_context_cannot_load_fails_and_is_released(load: Lo
     assert await dead_letters(world) == ["m-stray"]
 
 
-class OtherWorkerModel:
+class OtherWorkerModel(Delegating):
     """While this run thinks, another worker finishes the same event."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.world: World | None = None
-        self.inner = ScriptedModel()
 
-    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+    async def before(self, request: LlmRequest) -> None:
         assert self.world is not None
         async with self.world.store.unit_of_work() as uow:
             await uow.runs.save(
@@ -407,7 +524,6 @@ class OtherWorkerModel:
                 )
             )
             await uow.commit()
-        return await self.inner.generate(request, schema)
 
 
 async def test_a_run_finished_elsewhere_meanwhile_is_not_executed_twice(load: Load) -> None:
@@ -421,7 +537,7 @@ async def test_a_run_finished_elsewhere_meanwhile_is_not_executed_twice(load: Lo
 
     assert [(r.status, r.skip_reason) for r in runs] == [(RunStatus.SKIPPED, "already_processed")]
     assert runs[0].plan is not None  # what it thought is kept, with the cost of thinking
-    assert len(runs[0].usage) == 1
+    assert [u.role for u in runs[0].usage] == ["agent", "agent"]
     assert world.sent("sms") == []
     assert await queue_size(world) == 0
 
@@ -429,22 +545,21 @@ async def test_a_run_finished_elsewhere_meanwhile_is_not_executed_twice(load: Lo
 # --- the claim lease (the watchdog) ---------------------------------------------------------
 
 
-class HangingModel:
-    """Hangs on its first `times` decide calls until the run is cancelled (a shutdown, a
-    client that went away), then answers from the script. A cancelled run is neither
+class HangingModel(Delegating):
+    """Hangs on its first `times` agent rounds until the run is cancelled (a shutdown, a
+    client that went away), then answers from its queue. A cancelled run is neither
     completed nor released: only the claim lease can give its event back."""
 
     def __init__(self, times: int) -> None:
+        super().__init__()
         self.times = times
-        self.inner = ScriptedModel()
         self.entered = asyncio.Event()
 
-    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+    async def before(self, request: LlmRequest) -> None:
         if request.role is ModelRole.AGENT and self.times > 0:
             self.times -= 1
             self.entered.set()
             await asyncio.Event().wait()  # until cancelled
-        return await self.inner.generate(request, schema)
 
 
 async def cancel_tick(world: World, model: HangingModel, when: datetime) -> None:
@@ -526,17 +641,19 @@ async def test_an_event_whose_runs_keep_dying_becomes_a_dead_letter(load: Load) 
 
 
 class BrokenTracer:
-    async def record_run(self, run: RunRecord) -> str | None:
+    async def trace_url(self, trace_id: UUID) -> str | None:
         raise ConnectionError("tracing backend down")
 
 
 class UrlTracer:
-    def __init__(self) -> None:
-        self.runs: list[RunRecord] = []
+    """Links every trace it is asked about, and records the trace ids, in order."""
 
-    async def record_run(self, run: RunRecord) -> str | None:
-        self.runs.append(run)
-        return f"https://traces.example/{run.run_id}"
+    def __init__(self) -> None:
+        self.ids: list[UUID] = []
+
+    async def trace_url(self, trace_id: UUID) -> str | None:
+        self.ids.append(trace_id)
+        return f"https://traces.example/{trace_id}"
 
 
 async def test_a_failing_tracer_never_breaks_a_run(load: Load) -> None:
@@ -547,7 +664,18 @@ async def test_a_failing_tracer_never_breaks_a_run(load: Load) -> None:
     assert [r.status for r in runs] == [RunStatus.ACTED]
     assert runs[0].trace_url is None
     assert len(world.sent("sms")) == 1
-    assert [r.status for r in (await world.snapshot()).runs] == [RunStatus.ACTED]
+    assert [(r.status, r.trace_url) for r in (await world.snapshot()).runs] == [
+        (RunStatus.ACTED, None)
+    ]
+
+
+async def test_without_tracing_a_run_has_no_trace_link(load: Load) -> None:
+    world = await World(load).start()  # the NullTracer links nothing
+
+    (run,) = await world.high_risk_at_seven()
+
+    assert run.trace_url is None
+    assert [r.trace_url for r in (await world.snapshot()).runs] == [None]
 
 
 async def test_the_trace_url_is_saved_with_a_stored_run(load: Load) -> None:
@@ -556,9 +684,40 @@ async def test_the_trace_url_is_saved_with_a_stored_run(load: Load) -> None:
 
     runs = await world.high_risk_at_seven()
 
-    assert runs[0].trace_url == "https://traces.example/run_1"
-    assert [r.trace_url for r in (await world.snapshot()).runs] == ["https://traces.example/run_1"]
-    assert [r.run_id for r in tracer.runs] == ["run_1"]
+    (trace_id,) = tracer.ids
+    assert runs[0].trace_url == f"https://traces.example/{trace_id}"
+    assert [r.trace_url for r in (await world.snapshot()).runs] == [runs[0].trace_url]
+
+
+async def test_the_tracer_links_the_trace_id_the_graph_ran_under(
+    load: Load, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime gives each run a fresh trace id, streams the graph under it (the root
+    span's id), and asks the tracer for the link of that same id."""
+    tracer = UrlTracer()
+    world = await World(load, tracer=tracer).start()
+    graph = world.runtime.graph
+    stream = graph.stream
+    given: list[UUID | None] = []
+
+    def spy(
+        ctx: RunContext, *, run_id: str, trace_id: UUID | None = None
+    ) -> AsyncIterator[RunState]:
+        given.append(trace_id)
+        return stream(ctx, run_id=run_id, trace_id=trace_id)
+
+    monkeypatch.setattr(graph, "stream", spy)
+    await world.high_risk_at_seven()
+    await world.message(at(7, 5), "ok")
+    world.model.push(GATE, decision(Intent.ACKNOWLEDGEMENT, act=False))
+    await world.tick(at(7, 6))
+
+    assert len(given) == 2 and None not in given
+    assert tracer.ids == given
+    assert len(set(given)) == 2  # one trace per run
+    assert [r.trace_url for r in (await world.snapshot()).runs] == [
+        f"https://traces.example/{trace_id}" for trace_id in given
+    ]
 
 
 async def test_a_failed_attempt_is_traced_but_not_stored(load: Load) -> None:
@@ -569,8 +728,21 @@ async def test_a_failed_attempt_is_traced_but_not_stored(load: Load) -> None:
 
     runs = await world.tick(at(7, 1))
 
-    assert [r.trace_url for r in runs] == [
-        "https://traces.example/run_1",
-        "https://traces.example/run_2",
+    assert [r.status for r in runs] == [RunStatus.FAILED, RunStatus.ACTED]
+    assert [r.trace_url for r in runs] == [f"https://traces.example/{i}" for i in tracer.ids]
+    assert len(set(tracer.ids)) == 2
+    assert [(r.run_id, r.trace_url) for r in (await world.snapshot()).runs] == [
+        ("run_2", runs[1].trace_url)
     ]
-    assert [r.run_id for r in (await world.snapshot()).runs] == ["run_2"]
+
+
+async def test_a_run_whose_context_never_loaded_asks_for_no_trace_link(load: Load) -> None:
+    """The graph never ran, so there is no trace to link."""
+    tracer = UrlTracer()
+    world = await World(load, tracer=tracer).start()
+    await queue_stray_event(world)
+
+    runs = await world.tick(at(7, 1))
+
+    assert [(r.status, r.trace_url, r.nodes) for r in runs] == [(RunStatus.FAILED, None, ())] * 3
+    assert tracer.ids == []

@@ -145,10 +145,12 @@ class DocumentRequirement(DomainModel):
 
 
 class BrokerLimits(DomainModel):
-    """The validator's limits and the agent loop's budget for this broker's runs.
-
-    `max_steps` is the number of tool rounds; 0 means one plan in the answer and no
-    action tools (the pre-wave-3 behaviour, a per-broker safety switch).
+    """The validator's limits and the agent loop's budget for this broker's runs, which
+    the run graph checks after every round: `max_steps` rounds of tool calls (then one
+    last round must answer), `max_cost_usd` for the agent's rounds (once spent, the next
+    round must answer), `max_rejections` refused action calls (over it the run stops and
+    a Hero takes the event). The catalog checks bound each (`catalog_problems`); at
+    least one round, since the agent acts only through its tools.
     """
 
     validation: ValidationConfig = ValidationConfig()
@@ -339,6 +341,14 @@ def _between(name: str, value: float, low: float, high: float) -> list[str]:
     return [f"{name} must be between {low:g} and {high:g}"]
 
 
+def _positive(name: str, value: float, high: float) -> list[str]:
+    """Above 0: a budget of nothing would force the agent's first round to answer, so it
+    could never act."""
+    if math.isfinite(value) and 0 < value <= high:
+        return []
+    return [f"{name} must be above 0 and at most {high:g}"]
+
+
 def _identity_problems(broker: Broker) -> list[str]:
     """The id and the name."""
     problems: list[str] = []
@@ -514,8 +524,8 @@ def _requirement_problems(broker: Broker) -> list[str]:
 
 def _limit_problems(limits: BrokerLimits) -> list[str]:
     problems = [
-        *_between("limits.max_steps", limits.max_steps, 0, MAX_STEPS),
-        *_between("limits.max_cost_usd", limits.max_cost_usd, 0, MAX_COST_USD),
+        *_between("limits.max_steps", limits.max_steps, 1, MAX_STEPS),
+        *_positive("limits.max_cost_usd", limits.max_cost_usd, MAX_COST_USD),
         *_between("limits.max_rejections", limits.max_rejections, 0, MAX_REJECTIONS),
     ]
     validation = limits.validation

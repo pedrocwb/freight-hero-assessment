@@ -9,19 +9,20 @@ values so a small model can recover in its next round.
 
 Action tools (`send_sms`, `send_email`, `post_broker_slack`, `write_tms_note`,
 `create_hero_task`, `post_internal_slack`, `update_stage`, `schedule_timer`,
-`defer_obligation`, `close_obligation`, `open_obligation`) build the `Action` from their
-arguments and hand it to the run's staging (`application.agent.Staging`), which checks it
-with `domain.validation.check_action` against the actions staged so far and answers
-`accepted as action #n` or `rejected by <rule>: <why>`. A tool never executes anything
-(`ports.llm.ToolSpec`): code executes the plan after the run, and the plan is recomputed
-from the transcript (`application.agent.stage_from_transcript`), not taken from here.
+`defer_obligation`, `close_obligation`, `open_obligation`) are specs only: the run
+graph's `tools` node builds the `Action` from a call's arguments (`build_action`) and
+stages it (`application.agent.stage`), which checks it with
+`domain.validation.check_action` against the actions accepted so far and answers
+`accepted as action #n` or `rejected by <rule>: <why>`. A tool never executes anything:
+code executes the staged plan after the run.
 
-`finish` is the answer tool: the adapter's forced structured output on `AgentOutcome`,
-whose schema title is `finish`.
+`finish` is the answer tool: `AgentOutcome`, whose schema title is `finish`, offered by
+the adapter next to these tools (`ports.llm.LanguageModel.chat`).
 """
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -74,6 +75,8 @@ __all__ = [
     "READ_SOP_SECTION",
     "READ_TOOLS",
     "SEARCH_SOP",
+    "ReadTool",
+    "Toolbox",
     "agent_tools",
     "build_action",
     "invalid_arguments",
@@ -100,25 +103,40 @@ ACTION_TOOLS = tuple(_ACTION_MODELS)
 
 _ACTION = TypeAdapter[Action](Action)
 
-# Stages one action and answers the model: the text and whether it was accepted.
-StageAction = Callable[[str, Mapping[str, Any]], tuple[str, bool]]
+# A read tool: its arguments in, its answer to the model out.
+ReadTool = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class _Reader:
+    spec: ToolSpec
+    run: ReadTool
+
+
+@dataclass(frozen=True)
+class Toolbox:
+    """The tools of one agent round: what the model is offered (`specs`, the answer tool
+    aside, read tools first) and how each read tool answers (`readers`, by name)."""
+
+    specs: tuple[ToolSpec, ...]
+    readers: Mapping[str, ReadTool]
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(spec.name for spec in self.specs)
 
 
 def agent_tools(
-    ctx: RunContext,
-    visible_sections: Sequence[ResolvedSection],
-    knowledge: SopIndex,
-    *,
-    stage: StageAction | None,
-) -> tuple[ToolSpec, ...]:
-    """The tools of one agent call. `stage` is the run's staging; None offers no action
-    tool (`BrokerLimits.max_steps` 0: the plan comes in the answer).
+    ctx: RunContext, visible_sections: Sequence[ResolvedSection], knowledge: SopIndex
+) -> Toolbox:
+    """The tools of one run. A pure function of the run's context, so the graph builds the
+    same toolbox for the model's round and for the tools node that answers it.
 
     `read_document` is offered only when an attachment or a document is in view, and
     `list_document_requirements` only when the broker requires a document, so a small
     model is not tempted by a tool that cannot help.
     """
-    tools = [
+    readers = [
         _search_sop_tool(ctx, knowledge),
         _read_sop_section_tool(visible_sections),
         _get_history_tool(ctx),
@@ -127,18 +145,20 @@ def agent_tools(
     ]
     readable = _readable_ids(ctx)
     if readable:
-        tools.append(_read_document_tool(ctx, readable))
+        readers.append(_read_document_tool(ctx, readable))
     if ctx.broker.documents:
-        tools.append(_requirements_tool(ctx))
-    if stage is not None:
-        tools.extend(_action_tool(name, ctx, stage) for name in ACTION_TOOLS)
-    return tuple(tools)
+        readers.append(_requirements_tool(ctx))
+    actions = tuple(_action_tool(name, ctx) for name in ACTION_TOOLS)
+    return Toolbox(
+        specs=(*(r.spec for r in readers), *actions),
+        readers={r.spec.name: r.run for r in readers},
+    )
 
 
 # --- read tools ---------------------------------------------------------------------------
 
 
-def _search_sop_tool(ctx: RunContext, knowledge: SopIndex) -> ToolSpec:
+def _search_sop_tool(ctx: RunContext, knowledge: SopIndex) -> _Reader:
     load = ctx.load
 
     async def run(args: dict[str, Any]) -> str:
@@ -157,17 +177,17 @@ def _search_sop_tool(ctx: RunContext, knowledge: SopIndex) -> ToolSpec:
             f"{READ_SOP_SECTION}):\n" + "\n".join(lines)
         )
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=SEARCH_SOP,
         description=READ_DESCRIPTIONS[SEARCH_SOP],
         parameters=_object(
             {"query": {"type": "string", "description": "The words to look for."}}, ["query"]
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
-def _read_sop_section_tool(sections: Sequence[ResolvedSection]) -> ToolSpec:
+def _read_sop_section_tool(sections: Sequence[ResolvedSection]) -> _Reader:
     by_id = {s.section_id: s for s in sections}
 
     async def run(args: dict[str, Any]) -> str:
@@ -178,18 +198,18 @@ def _read_sop_section_tool(sections: Sequence[ResolvedSection]) -> ToolSpec:
             return _unknown("section_id", args, by_id)
         return f"# {section.section_id}: {section.title}\n\n{section.body.strip()}"
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=READ_SOP_SECTION,
         description=READ_DESCRIPTIONS[READ_SOP_SECTION],
         parameters=_object(
             {"section_id": _id_property("The id of the section, as listed.", by_id)},
             ["section_id"],
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
-def _get_history_tool(ctx: RunContext) -> ToolSpec:
+def _get_history_tool(ctx: RunContext) -> _Reader:
     available = len(ctx.long_history)
 
     async def run(args: dict[str, Any]) -> str:
@@ -198,7 +218,7 @@ def _get_history_tool(ctx: RunContext) -> ToolSpec:
             limit = HISTORY_DEFAULT
         return render_history(ctx, limit)
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=GET_HISTORY,
         description=f"{READ_DESCRIPTIONS[GET_HISTORY]} {available} events are available.",
         parameters=_object(
@@ -210,18 +230,18 @@ def _get_history_tool(ctx: RunContext) -> ToolSpec:
             },
             [],
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
-def _get_ledger_tool(ctx: RunContext) -> ToolSpec:
+def _get_ledger_tool(ctx: RunContext) -> _Reader:
     kinds = sorted({o.kind for o in ctx.obligations})
 
     async def run(args: dict[str, Any]) -> str:
         kind = _text_arg(args, "kind")
         return render_ledger(ctx, kind or None)
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=GET_LEDGER,
         description=READ_DESCRIPTIONS[GET_LEDGER],
         parameters=_object(
@@ -234,15 +254,15 @@ def _get_ledger_tool(ctx: RunContext) -> ToolSpec:
             },
             [],
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
-def _get_load_tool(ctx: RunContext) -> ToolSpec:
+def _get_load_tool(ctx: RunContext) -> _Reader:
     async def run(args: dict[str, Any]) -> str:
         return render_load(ctx, _text_arg(args, "part") or "all")
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=GET_LOAD,
         description=READ_DESCRIPTIONS[GET_LOAD],
         parameters=_object(
@@ -255,8 +275,8 @@ def _get_load_tool(ctx: RunContext) -> ToolSpec:
             },
             [],
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
 def _readable_ids(ctx: RunContext) -> dict[str, Attachment | None]:
@@ -272,7 +292,7 @@ def _readable_ids(ctx: RunContext) -> dict[str, Attachment | None]:
     return ids
 
 
-def _read_document_tool(ctx: RunContext, readable: Mapping[str, Attachment | None]) -> ToolSpec:
+def _read_document_tool(ctx: RunContext, readable: Mapping[str, Attachment | None]) -> _Reader:
     async def run(args: dict[str, Any]) -> str:
         # `id` is the parameter; a model that names it after the id it holds is understood.
         wanted = next(
@@ -296,23 +316,23 @@ def _read_document_tool(ctx: RunContext, readable: Mapping[str, Attachment | Non
             "the attachment id and the filename."
         )
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=READ_DOCUMENT,
         description=READ_DESCRIPTIONS[READ_DOCUMENT],
         parameters=_object(
             {"id": _id_property("The document id or the attachment id.", readable)}, ["id"]
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
-def _requirements_tool(ctx: RunContext) -> ToolSpec:
+def _requirements_tool(ctx: RunContext) -> _Reader:
     types = sorted({r.type_id for r in ctx.broker.documents})
 
     async def run(args: dict[str, Any]) -> str:
         return render_requirements(ctx, _text_arg(args, "type_id") or None)
 
-    return ToolSpec(
+    spec = ToolSpec(
         name=LIST_DOCUMENT_REQUIREMENTS,
         description=READ_DESCRIPTIONS[LIST_DOCUMENT_REQUIREMENTS],
         parameters=_object(
@@ -325,8 +345,8 @@ def _requirements_tool(ctx: RunContext) -> ToolSpec:
             },
             [],
         ),
-        run=run,
     )
+    return _Reader(spec, run)
 
 
 # --- action tools -------------------------------------------------------------------------
@@ -353,16 +373,11 @@ def invalid_arguments(tool: str, error: ValidationError) -> str:
     return f"rejected: invalid arguments for {tool}: {problems}. Fix them and call it again."
 
 
-def _action_tool(name: str, ctx: RunContext, stage: StageAction) -> ToolSpec:
-    async def run(args: dict[str, Any]) -> str:
-        text, _ = stage(name, args)
-        return text
-
+def _action_tool(name: str, ctx: RunContext) -> ToolSpec:
     return ToolSpec(
         name=name,
         description=f"{ACTION_DESCRIPTIONS[name]} {ACTION_CHECKED}",
         parameters=_action_parameters(_ACTION_MODELS[name], _enums(ctx)),
-        run=run,
     )
 
 

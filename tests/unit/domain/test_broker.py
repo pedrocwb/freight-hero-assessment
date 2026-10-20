@@ -282,7 +282,7 @@ def test_a_standard_id_replaces_its_entry_in_place_and_a_new_one_comes_after() -
 
 @pytest.mark.unit
 def test_triage_and_limits_replace_the_standard_ones_when_given() -> None:
-    limits = BrokerLimits(max_steps=0)
+    limits = BrokerLimits(max_steps=2)
 
     broker = client_broker("acme", CatalogOverrides(triage=False, limits=limits))
 
@@ -343,7 +343,7 @@ def test_every_problem_is_reported_at_once() -> None:
 
     message = str(caught.value)
     assert "broker standard has no name" in message
-    assert "limits.max_steps must be between 0 and 20" in message
+    assert "limits.max_steps must be between 1 and 20" in message
 
 
 @pytest.mark.unit
@@ -627,12 +627,14 @@ def test_a_document_is_required_once_per_stage() -> None:
 @pytest.mark.parametrize(
     ("limits", "expected"),
     [
-        (BrokerLimits(max_steps=-1), f"limits.max_steps must be between 0 and {MAX_STEPS}"),
-        (BrokerLimits(max_steps=MAX_STEPS + 1), "limits.max_steps must be between 0"),
-        (BrokerLimits(max_cost_usd=-0.01), "limits.max_cost_usd must be between 0 and"),
-        (BrokerLimits(max_cost_usd=MAX_COST_USD * 2), "limits.max_cost_usd must be between 0"),
-        (BrokerLimits(max_cost_usd=math.inf), "limits.max_cost_usd must be between 0"),
-        (BrokerLimits(max_cost_usd=math.nan), "limits.max_cost_usd must be between 0"),
+        (BrokerLimits(max_steps=0), f"limits.max_steps must be between 1 and {MAX_STEPS}"),
+        (BrokerLimits(max_steps=-1), f"limits.max_steps must be between 1 and {MAX_STEPS}"),
+        (BrokerLimits(max_steps=MAX_STEPS + 1), "limits.max_steps must be between 1"),
+        (BrokerLimits(max_cost_usd=-0.01), "limits.max_cost_usd must be above 0 and"),
+        (BrokerLimits(max_cost_usd=0.0), "limits.max_cost_usd must be above 0 and"),
+        (BrokerLimits(max_cost_usd=MAX_COST_USD * 2), "limits.max_cost_usd must be above 0"),
+        (BrokerLimits(max_cost_usd=math.inf), "limits.max_cost_usd must be above 0"),
+        (BrokerLimits(max_cost_usd=math.nan), "limits.max_cost_usd must be above 0"),
         (BrokerLimits(max_rejections=-1), "limits.max_rejections must be between 0 and 20"),
         (
             BrokerLimits(validation=ValidationConfig(sms_max_per_window=0)),
@@ -660,8 +662,9 @@ def test_limits_are_sane(limits: BrokerLimits, expected: str) -> None:
 
 @pytest.mark.unit
 def test_the_strictest_limits_are_allowed() -> None:
-    """`max_steps=0` is the per-broker switch back to one plan with no action tools."""
-    strict = BrokerLimits(max_steps=0, max_cost_usd=0.0, max_rejections=0)
+    """One round is the least, since the agent acts only through its tools, and some spend
+    (none would force the first round to answer); no refused call is accepted."""
+    strict = BrokerLimits(max_steps=1, max_cost_usd=0.0001, max_rejections=0)
 
     assert _problems(limits=strict) == ()
 

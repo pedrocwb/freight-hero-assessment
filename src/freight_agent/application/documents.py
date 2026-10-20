@@ -193,7 +193,6 @@ class DocumentPipeline:
                 pages=pages,
                 image_pages=[p.number for p in imaged],
             ),
-            max_tool_rounds=0,
             timeout_s=self._timeout_s,
             images=tuple(
                 ImageInput(data=p.image_png, media_type="image/png")

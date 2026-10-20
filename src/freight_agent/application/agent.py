@@ -1,35 +1,32 @@
-"""The agent: one `agent` model call with tools, inside the broker's budgets.
+"""The agent loop's two steps, which the run graph alternates: one model round
+(`Agent.round`, the `agent` node) and the tool calls of that round (`Agent.call_tools`,
+the `tools` node).
 
-The call (`Agent.run`) is one `LanguageModel.generate` on the `agent` role: the adapter
-runs the tool rounds (`max_tool_rounds = BrokerLimits.max_steps`) and stops spending
-once `max_cost_usd` is reached, so a run makes one counted model call however many
-rounds it takes. The model reads with the read tools, stages actions with the action
-tools and answers with `finish` (`AgentOutcome`).
+A round is one `LanguageModel.chat` on the `agent` role. The model sees the prompts, the
+conversation so far and the tools, and it calls tools or answers with `finish`
+(`AgentOutcome`). The tools node answers every call of the round, in order: a read tool
+from the run's context or the knowledge index, an action tool by staging the action
+(`stage`): built from the call's arguments and checked with
+`domain.validation.check_action` against the actions accepted before it, it is answered
+"accepted as action #n" or "rejected by <rule>: <why>". Nothing executes here: the
+runtime executes the accepted actions after the run, in its commit.
 
-**The staged plan is a pure fold over the transcript** (`stage_from_transcript`). Scripted
-and replayed models never run tools, so the actions a live model staged would vanish if
-the plan lived in the tools. Instead each action tool call of `LlmResponse.transcript` is
-replayed, in order, through a fresh `Staging`: the same rules against the same context
-give the same answers, in every mode (live, replay, scripted). The live tools hold their
-own `Staging` only to answer the model; the fold is the authority, and the trajectory of
-the run (`TrajectoryStep`) is the transcript.
+The plan the run records and validates is every action the agent proposed, in call
+order, refused ones included (`Proposal`). `validate` over that plan approves exactly
+what the staging accepted (`check_action` is `validate` one action at a time), so the
+validate node is the check that nothing drifted.
 
-The plan the run records and validates is every action the agent proposed: the action
-tool calls that built an action (accepted or refused, in call order), then the answer's
-own actions that do not repeat one of them. `validate` over that plan approves exactly
-what the fold accepted (`domain.validation.check_action` is `validate` one action at a
-time), so the validate node is the merge point and a check that nothing drifted.
-
-Budgets (`Broker.limits`): `max_steps` tool rounds (0: no action tools, read tools for
-`READ_ONLY_ROUNDS` rounds, the plan in the answer: the pre-wave-3 behaviour);
-`max_cost_usd` per call; `max_rejections` refused action calls (over it the run
-escalates, `escalation.blocked_actions`, and the accepted actions still run).
+The budgets (`Broker.limits`) are the graph's, checked after every round
+(`application/graph/build.py`): `max_steps` rounds of tool calls and `max_cost_usd`
+for the agent's rounds (once either is spent, the next round must answer), and
+`max_rejections` refused action calls (over it the run stops and escalates,
+`escalation.blocked_actions`, and the accepted actions still run).
 """
 
 import logging
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -37,6 +34,7 @@ from freight_agent.application.agent_tools import (
     ACTION_TOOLS,
     READ_SOP_SECTION,
     SEARCH_SOP,
+    Toolbox,
     agent_tools,
     build_action,
     invalid_arguments,
@@ -44,21 +42,28 @@ from freight_agent.application.agent_tools import (
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import follow_up_intent
 from freight_agent.application.prompts import render_agent_prompt, render_agent_system_prompt
-from freight_agent.domain.actions import FINISH, Action, AgentOutcome, Plan
+from freight_agent.domain.actions import FINISH, Action, AgentOutcome
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.rules import default_rules
-from freight_agent.domain.runs import TrajectoryStep, Usage
+from freight_agent.domain.runs import TrajectoryStep
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import Rule, ValidationContext, Violation, check_action
 from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, LlmRequest, ModelRole
+from freight_agent.ports.llm import (
+    ChatReply,
+    ChatRequest,
+    LanguageModel,
+    ModelRole,
+    ToolCall,
+    ToolResult,
+    Turn,
+)
 
 logger = logging.getLogger(__name__)
 
-READ_ONLY_ROUNDS = 2  # tool rounds with `max_steps` 0: read tools only, as before wave 3
-
-Transcript = Sequence[Mapping[str, Any]]
+# What code says to a model that replied in prose: the next round must answer.
+ANSWER_NOW = f"Now call {FINISH} with your final answer."
 
 
 def validation_context(ctx: RunContext) -> ValidationContext:
@@ -88,197 +93,42 @@ class Proposal:
     violations: tuple[Violation, ...] = ()
 
 
-class Staging:
-    """The plan of one agent call, staged one action tool call at a time.
-
-    `answer` is what an action tool tells the model. An action is judged against the
-    actions accepted before it, at its position among the proposed ones, so the staging
-    of a sequence of calls is `validate` of the same sequence. Calls with bad arguments
-    build no action: they are refused, counted as rejections, and leave the plan alone.
-    """
-
-    def __init__(self, checks: ValidationContext, rules: Sequence[Rule], max_rejections: int):
-        self._checks = checks
-        self._rules = tuple(rules)
-        self._max_rejections = max_rejections
-        self.proposals: list[Proposal] = []
-        self.rejections = 0
-
-    @property
-    def accepted(self) -> tuple[Action, ...]:
-        return tuple(p.action for p in self.proposals if p.accepted)
-
-    def answer(self, tool: str, args: Mapping[str, Any]) -> tuple[str, bool]:
-        """Stage one action tool call. Returns the answer and whether it was accepted."""
-        try:
-            action = build_action(tool, args)
-        except ValidationError as exc:
-            self.rejections += 1
-            return self._over_budget(invalid_arguments(tool, exc)), False
-        accepted = self.accepted
-        violations = check_action(
-            action, self._checks, accepted, self._rules, index=len(self.proposals)
-        )
-        self.proposals.append(Proposal(action, not violations, violations))
-        if not violations:
-            return f"accepted as action #{len(accepted) + 1}", True
-        self.rejections += 1
-        reasons = "; ".join(f"{v.rule}: {v.message}" for v in violations)
-        return self._over_budget(f"rejected by {reasons}"), False
-
-    def _over_budget(self, text: str) -> str:
-        if self.rejections <= self._max_rejections:
-            return text
-        return (
-            f"{text.rstrip('.')}. More than {self._max_rejections} actions were rejected: call "
-            f"{FINISH} now; a person will take over the event."
-        )
-
-
-@dataclass(frozen=True)
-class Staged:
-    """What the agent's transcript staged (`stage_from_transcript`)."""
-
-    proposals: tuple[Proposal, ...] = ()
-    rejections: int = 0
-    trajectory: tuple[TrajectoryStep, ...] = ()
-    sections_searched: tuple[str, ...] = ()
-
-    @property
-    def proposed(self) -> tuple[Action, ...]:
-        return tuple(p.action for p in self.proposals)
-
-    @property
-    def accepted(self) -> tuple[Action, ...]:
-        return tuple(p.action for p in self.proposals if p.accepted)
-
-
-def stage_from_transcript(
-    transcript: Transcript,
+def stage(
+    tool: str,
+    args: Mapping[str, Any],
     *,
     checks: ValidationContext,
     rules: Sequence[Rule],
-    max_rejections: int,
-    offered: Collection[str],
-) -> Staged:
-    """Replay the transcript's tool calls, in order, through a fresh `Staging`.
+    proposals: Sequence[Proposal],
+) -> tuple[str, Proposal | None]:
+    """Stage one action tool call after `proposals`: the answer to the model, and the
+    proposal (None when the arguments build no action, a refused call all the same).
 
-    Pure: the same transcript and context give the same plan. Only the action tools in
-    `offered` stage (a call to a tool that was not offered got "unknown tool" live and
-    staged nothing). Read tool calls and unknown tools are trajectory steps with
-    `accepted` None and the result the transcript holds (none in scripted mode, where
-    tools never run); the answer (`finish`) is not a step. An action tool's recorded
-    answer is recomputed and the recomputed one is recorded; one that differs from the
-    recorded text is logged at info (a cassette recorded under other rules; scripted
-    results are free text, so they often differ).
+    The action is judged against the actions accepted before it, at its position among
+    the proposed ones, so staging a sequence of calls is `validate` of the same sequence.
     """
-    staging = Staging(checks, rules, max_rejections)
-    results = _tool_results(transcript)
-    steps: list[TrajectoryStep] = []
-    sections: list[str] = []
-    for entry in transcript:
-        if entry.get("role") != "assistant":
-            continue
-        cost = _round_cost(entry)
-        for call in _calls(entry):
-            name, args, call_id = call
-            if name == FINISH:
-                continue
-            recorded = results.get(call_id) if call_id is not None else None
-            if name in ACTION_TOOLS and name in offered:
-                text, accepted = staging.answer(name, args)
-                if recorded is not None and recorded != text:
-                    logger.info(
-                        "the %s call %s was answered %r, the rules now answer %r",
-                        name,
-                        call_id,
-                        recorded,
-                        text,
-                    )
-                steps.append(_step(name, args, text, accepted, cost))
-                continue
-            steps.append(_step(name, args, recorded or "", None, cost))
-            sections.extend(_sections_of(name, args, recorded or ""))
-    return Staged(
-        proposals=tuple(staging.proposals),
-        rejections=staging.rejections,
-        trajectory=tuple(steps),
-        sections_searched=tuple(dict.fromkeys(sections)),
-    )
-
-
-def _step(
-    name: str, args: dict[str, Any], result: str, accepted: bool | None, cost: float
-) -> TrajectoryStep:
-    return TrajectoryStep(tool=name, args=args, result=result, accepted=accepted, cost_usd=cost)
-
-
-def _calls(entry: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], str | None]]:
-    """(name, args, id) of each tool call of an assistant entry; malformed calls skipped."""
-    raw = entry.get("tool_calls")
-    if not isinstance(raw, list):
-        return []
-    calls: list[tuple[str, dict[str, Any], str | None]] = []
-    for item in cast("list[Any]", raw):
-        if not isinstance(item, Mapping):
-            continue
-        call = cast("Mapping[str, Any]", item)
-        name = call.get("name")
-        if not isinstance(name, str):
-            continue
-        args = call.get("args")
-        call_id = call.get("id")
-        calls.append(
-            (
-                name,
-                dict(cast("Mapping[str, Any]", args)) if isinstance(args, Mapping) else {},
-                call_id if isinstance(call_id, str) else None,
-            )
-        )
-    return calls
-
-
-def _tool_results(transcript: Transcript) -> dict[str, str]:
-    """The content of each tool entry, by the id of the call it answers."""
-    results: dict[str, str] = {}
-    for entry in transcript:
-        call_id, content = entry.get("tool_call_id"), entry.get("content")
-        if entry.get("role") == "tool" and isinstance(call_id, str) and isinstance(content, str):
-            results.setdefault(call_id, content)
-    return results
-
-
-def _round_cost(entry: Mapping[str, Any]) -> float:
-    """The cost of the model round that wrote this assistant entry (`usage`, per round)."""
-    usage = entry.get("usage")
-    if not isinstance(usage, Mapping):
-        return 0.0
-    cost = cast("Mapping[str, Any]", usage).get("cost_usd")
-    return float(cost) if isinstance(cost, int | float) and not isinstance(cost, bool) else 0.0
-
-
-def _sections_of(tool: str, args: Mapping[str, Any], result: str) -> list[str]:
-    """The sections a read tool call looked at: the one `read_sop_section` read, or those
-    `search_sop` returned (its result lines start `- <section_id>:`)."""
-    if tool == READ_SOP_SECTION:
-        section_id = args.get("section_id")
-        return [section_id.strip()] if isinstance(section_id, str) and section_id.strip() else []
-    if tool == SEARCH_SOP:
-        return [
-            line[2:].split(":", 1)[0]
-            for line in result.splitlines()
-            if line.startswith("- ") and ":" in line
-        ]
-    return []
+    try:
+        action = build_action(tool, args)
+    except ValidationError as exc:
+        return invalid_arguments(tool, exc), None
+    accepted = tuple(p.action for p in proposals if p.accepted)
+    violations = check_action(action, checks, accepted, rules, index=len(proposals))
+    proposal = Proposal(action, not violations, violations)
+    if not violations:
+        return f"accepted as action #{len(accepted) + 1}", proposal
+    reasons = "; ".join(f"{v.rule}: {v.message}" for v in violations)
+    return f"rejected by {reasons}", proposal
 
 
 @dataclass(frozen=True)
-class AgentResult:
-    plan: Plan  # every proposed action: the staged calls, then the answer's own actions
-    staged: Staged
-    usage: tuple[Usage, ...]
-    intent: str | None = None  # the agent's label for the event, when it is in the catalog
-    no_procedure: bool = False
+class ToolRound:
+    """What answering one round's tool calls adds to the run."""
+
+    results: tuple[ToolResult, ...] = ()  # one per call, in order, for the next round
+    steps: tuple[TrajectoryStep, ...] = ()
+    proposals: tuple[Proposal, ...] = ()  # the action calls that built an action
+    rejections: int = 0  # refused action calls, bad arguments included
+    sections: tuple[str, ...] = ()  # sections search_sop returned or read_sop_section read
 
 
 class Agent:
@@ -295,61 +145,132 @@ class Agent:
         self.rules: tuple[Rule, ...] = tuple(rules) if rules is not None else default_rules()
         self._timeout_s = timeout_s
 
-    async def run(
+    def tools(self, ctx: RunContext, visible_sections: Sequence[ResolvedSection]) -> Toolbox:
+        return agent_tools(ctx, visible_sections, self._knowledge)
+
+    @staticmethod
+    def prompts(
+        ctx: RunContext,
+        gate: GateDecision,
+        sop: ResolvedSop,
+        visible_sections: Sequence[ResolvedSection],
+    ) -> tuple[str, str]:
+        """The agent's system and user prompts: the one place the loop renders them, the
+        same for every round of a run."""
+        in_progress = sections_in_progress(ctx, sop, visible_sections)
+        return (
+            render_agent_system_prompt(ctx.broker),
+            render_agent_prompt(ctx, gate, sop, in_progress),
+        )
+
+    async def round(
         self,
         ctx: RunContext,
         gate: GateDecision,
         sop: ResolvedSop,
         visible_sections: Sequence[ResolvedSection],
-    ) -> AgentResult:
-        """`sop` holds the sections for this intent and stage; `visible_sections` back the
-        `read_sop_section` tool (every section this broker and load can see).
-
-        One model call. `LlmError` propagates: the runtime escalates a model failure.
-        """
-        broker = ctx.broker
-        limits = broker.limits
-        checks = validation_context(ctx)
-        live = Staging(checks, self.rules, limits.max_rejections)
-        stage = live.answer if limits.max_steps > 0 else None
-        tools = agent_tools(ctx, visible_sections, self._knowledge, stage=stage)
-        request = LlmRequest(
+        history: Sequence[Turn],
+        *,
+        force_answer: bool = False,
+    ) -> ChatReply[AgentOutcome]:
+        """One model round. `sop` holds the sections for this intent and stage;
+        `visible_sections` back the `read_sop_section` tool (every section this broker and
+        load can see). `LlmError` propagates: the runtime escalates a model failure."""
+        system, user = self.prompts(ctx, gate, sop, visible_sections)
+        request = ChatRequest(
             role=ModelRole.AGENT,
-            system=render_agent_system_prompt(broker),
-            user=render_agent_prompt(
-                ctx, gate, sop, sections_in_progress(ctx, sop, visible_sections)
-            ),
-            tools=tools,
-            max_tool_rounds=limits.max_steps if limits.max_steps > 0 else READ_ONLY_ROUNDS,
+            system=system,
+            user=user,
+            history=tuple(history),
+            tools=self.tools(ctx, visible_sections).specs,
+            force_answer=force_answer,
             timeout_s=self._timeout_s,
-            max_cost_usd=limits.max_cost_usd,
         )
-        response = await self._llm.generate(request, AgentOutcome)
-        staged = stage_from_transcript(
-            response.transcript,
-            checks=checks,
-            rules=self.rules,
-            max_rejections=limits.max_rejections,
-            offered={t.name for t in tools},
-        )
-        outcome = response.parsed
-        return AgentResult(
-            plan=merge_plan(staged, outcome),
-            staged=staged,
-            usage=(response.usage,),
-            intent=catalog_intent(broker, outcome.intent),
-            no_procedure=outcome.no_procedure,
+        return await self._llm.chat(request, AgentOutcome)
+
+    async def call_tools(
+        self,
+        ctx: RunContext,
+        visible_sections: Sequence[ResolvedSection],
+        calls: Sequence[ToolCall],
+        *,
+        proposals: Sequence[Proposal] = (),
+        round_cost: float = 0.0,
+    ) -> ToolRound:
+        """Answer every call of a round but the answer's, in order, after the actions
+        staged in earlier rounds (`proposals`). A bad call is an answer the model can
+        recover from in its next round, never an exception; a read tool that raises is
+        reported the same way (a tool has no side effect outside the run)."""
+        toolbox = self.tools(ctx, visible_sections)
+        checks = validation_context(ctx)
+        staged = list(proposals)
+        results: list[ToolResult] = []
+        steps: list[TrajectoryStep] = []
+        sections: list[str] = []
+        rejections = 0
+        for call in calls:
+            if call.name == FINISH and call.error is None:
+                continue
+            accepted: bool | None = None
+            if call.error is not None:
+                text = (
+                    f"The arguments for {call.name} are not valid JSON ({call.error}). "
+                    "Call it again with a JSON object."
+                )
+                if call.name in ACTION_TOOLS:
+                    accepted = False
+            elif call.name in ACTION_TOOLS:
+                text, proposal = stage(
+                    call.name, call.args, checks=checks, rules=self.rules, proposals=staged
+                )
+                accepted = proposal is not None and proposal.accepted
+                if proposal is not None:
+                    staged.append(proposal)
+            elif (reader := toolbox.readers.get(call.name)) is not None:
+                try:
+                    text = await reader(call.args)
+                except Exception as exc:
+                    text = f"The tool {call.name} failed ({type(exc).__name__}: {exc}). "
+                    text += "Continue without it."
+                sections.extend(_sections_of(call.name, call.args, text))
+            else:
+                text = f"Unknown tool {call.name!r}. Available tools: {', '.join(toolbox.names)}."
+            rejections += accepted is False
+            results.append(ToolResult(call_id=call.id, name=call.name, content=text))
+            steps.append(
+                TrajectoryStep(
+                    tool=call.name,
+                    args=dict(call.args),
+                    result=text,
+                    accepted=accepted,
+                    cost_usd=round_cost,
+                )
+            )
+        return ToolRound(
+            results=tuple(results),
+            steps=tuple(steps),
+            proposals=tuple(staged[len(proposals) :]),
+            rejections=rejections,
+            sections=tuple(sections),
         )
 
 
-def merge_plan(staged: Staged, outcome: AgentOutcome) -> Plan:
-    """The staged calls, then the answer's actions that do not repeat one of them (a model
-    that staged an SMS and lists it again in `finish` means one SMS). A plain `Plan`: the
-    run record stores it, and a subclass would not compare equal to the same plan read
-    back from the database."""
-    proposed = staged.proposed
-    extras = tuple(a for a in outcome.actions if a not in proposed)
-    return Plan(rationale=outcome.rationale, actions=(*proposed, *extras))
+def _sections_of(tool: str, args: Mapping[str, Any], result: str) -> list[str]:
+    """The sections a read tool call looked at: the one `read_sop_section` read (its result
+    starts `# <section_id>:`; an unknown id read nothing), or those `search_sop` returned
+    (its result lines start `- <section_id>:`)."""
+    if tool == READ_SOP_SECTION:
+        section_id = args.get("section_id")
+        if not isinstance(section_id, str) or not result.startswith(f"# {section_id.strip()}:"):
+            return []
+        return [section_id.strip()]
+    if tool == SEARCH_SOP:
+        return [
+            line[2:].split(":", 1)[0]
+            for line in result.splitlines()
+            if line.startswith("- ") and ":" in line
+        ]
+    return []
 
 
 def catalog_intent(broker: Broker, intent: str | None) -> str | None:

@@ -1,3 +1,9 @@
+"""The fallback chain and its circuit breakers, over fake models on a virtual clock.
+
+Both methods of the port walk the chain the same way: a forced answer (`generate`) and
+an agent round (`chat`) share each model's breaker.
+"""
+
 import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
@@ -14,26 +20,35 @@ from freight_agent.adapters.llm.resilient import (
     BreakerStatus,
     ResilientModel,
 )
-from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import Usage
 from freight_agent.ports.llm import (
+    AssistantTurn,
+    ChatReply,
+    ChatRequest,
     LanguageModel,
     LlmError,
     LlmRequest,
     LlmResponse,
     ModelRole,
     SchemaT,
+    ToolResult,
 )
+from tests.fakes import FakeModel, Round, call
+
+pytestmark = pytest.mark.unit
 
 LA = ZoneInfo("America/Los_Angeles")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
 GATE = LlmRequest(role=ModelRole.GATE, system="s", user="u")
+ROUND = ChatRequest(role=ModelRole.AGENT, system="s", user="u")
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
+DONE = AgentOutcome(rationale="nothing to do")
 
 
-def _models(*names: str) -> list[ScriptedModel]:
-    return [ScriptedModel(model_name=name) for name in names]
+def _models(*names: str) -> list[FakeModel]:
+    return [FakeModel(name=name) for name in names]
 
 
 def _resilient(
@@ -57,7 +72,6 @@ def clock() -> VirtualClock:
 # --- fallback ----------------------------------------------------------------
 
 
-@pytest.mark.unit
 async def test_the_first_healthy_model_answers(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, ACK)
@@ -70,7 +84,6 @@ async def test_the_first_healthy_model_answers(clock: VirtualClock) -> None:
     assert backup.calls == []
 
 
-@pytest.mark.unit
 async def test_falls_back_in_chain_order_on_model_failures(clock: VirtualClock) -> None:
     primary, backup, third = _models("primary", "backup", "third")
     primary.push(ModelRole.GATE, LlmError("rate limited"))
@@ -84,7 +97,6 @@ async def test_falls_back_in_chain_order_on_model_failures(clock: VirtualClock) 
     assert [len(m.calls) for m in (primary, backup, third)] == [1, 1, 1]
 
 
-@pytest.mark.unit
 async def test_every_model_failing_raises_one_llm_error_naming_each(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, LlmError("rate limited"))
@@ -104,9 +116,8 @@ async def test_every_model_failing_raises_one_llm_error_naming_each(clock: Virtu
     assert "backup: LlmError: timeout" in message
 
 
-@pytest.mark.unit
 async def test_unexpected_errors_propagate_without_fallback(clock: VirtualClock) -> None:
-    """A bug or a missing cassette is not a provider failure: no fallback, no breaker change."""
+    """A bug is not a provider failure: no fallback, no breaker change."""
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, RuntimeError("bug"))
     backup.push(ModelRole.GATE, ACK)
@@ -120,10 +131,95 @@ async def test_unexpected_errors_propagate_without_fallback(clock: VirtualClock)
     assert _state(model, "primary").consecutive_failures == 0
 
 
+# --- agent rounds ------------------------------------------------------------
+
+
+async def test_an_agent_round_falls_back_in_chain_order(clock: VirtualClock) -> None:
+    primary, backup = _models("primary", "backup")
+    primary.push(ModelRole.AGENT, LlmError("rate limited"))
+    backup.push(ModelRole.AGENT, Round(calls=(call("search_sop", query="running late"),)))
+    model = _resilient([primary, backup], clock)
+
+    reply = await model.chat(ROUND, AgentOutcome)
+
+    assert reply.usage.model == "backup"
+    assert [c.name for c in reply.turn.tool_calls] == ["search_sop"]
+    assert reply.answer is None
+    assert [len(m.rounds_of(ModelRole.AGENT)) for m in (primary, backup)] == [1, 1]
+    assert _state(model, "primary").consecutive_failures == 1
+
+
+async def test_every_model_failing_a_round_raises_one_llm_error_naming_each(
+    clock: VirtualClock,
+) -> None:
+    primary, backup = _models("primary", "backup")
+    primary.push(ModelRole.AGENT, LlmError("down"))
+    backup.push(ModelRole.AGENT, LlmError("timeout"))
+    model = _resilient([primary, backup], clock)
+
+    with pytest.raises(AllModelsFailed) as caught:
+        await model.chat(ROUND, AgentOutcome)
+
+    assert caught.value.failures == (
+        ("primary", "LlmError: down"),
+        ("backup", "LlmError: timeout"),
+    )
+
+
+async def test_an_unexpected_error_in_a_round_propagates_without_fallback(
+    clock: VirtualClock,
+) -> None:
+    primary, backup = _models("primary", "backup")
+    primary.push(ModelRole.AGENT, RuntimeError("bug"))
+    backup.push(ModelRole.AGENT, DONE)
+    model = _resilient([primary, backup], clock, failure_threshold=1)
+
+    with pytest.raises(RuntimeError, match="bug"):
+        await model.chat(ROUND, AgentOutcome)
+
+    assert backup.calls == []
+    assert _state(model, "primary").state is BreakerState.CLOSED
+
+
+async def test_forced_answers_and_rounds_share_each_models_breaker(clock: VirtualClock) -> None:
+    """A provider that keeps failing the gate is skipped for the agent's rounds too."""
+    primary, backup = _models("primary", "backup")
+    primary.push(ModelRole.GATE, LlmError("down"), LlmError("down"))
+    backup.push(ModelRole.GATE, ACK, ACK)
+    backup.push(ModelRole.AGENT, DONE)
+    model = _resilient([primary, backup], clock, failure_threshold=2)
+    await model.generate(GATE, GateDecision)
+    await model.generate(GATE, GateDecision)
+
+    reply = await model.chat(ROUND, AgentOutcome)
+
+    assert (reply.answer, reply.usage.model) == (DONE, "backup")
+    assert primary.rounds_of(ModelRole.AGENT) == []  # the open breaker kept the round away
+
+
+async def test_the_rounds_of_one_loop_may_be_served_by_different_models(
+    clock: VirtualClock,
+) -> None:
+    """Each round walks the chain on its own: the conversation travels in the request."""
+    primary, backup = _models("primary", "backup")
+    search = call("search_sop", query="running late")
+    primary.push(ModelRole.AGENT, Round(calls=(search,)), LlmError("down"))
+    backup.push(ModelRole.AGENT, DONE)
+    model = _resilient([primary, backup], clock)
+
+    first = await model.chat(ROUND, AgentOutcome)
+    history = (first.turn, ToolResult(call_id=search.id, name=search.name, content="none"))
+    second = await model.chat(replace(ROUND, history=history), AgentOutcome)
+
+    assert (first.usage.model, second.usage.model) == ("primary", "backup")
+    (served,) = backup.calls
+    assert isinstance(served.request, ChatRequest)
+    assert served.request.history == history
+
+
 # --- breaker -----------------------------------------------------------------
 
 
-@pytest.mark.unit
 async def test_breaker_opens_after_consecutive_failures_and_skips_the_model(
     clock: VirtualClock,
 ) -> None:
@@ -143,7 +239,6 @@ async def test_breaker_opens_after_consecutive_failures_and_skips_the_model(
     assert len(backup.calls) == 4
 
 
-@pytest.mark.unit
 async def test_a_success_resets_the_consecutive_failures(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, LlmError("a"), LlmError("b"), ACK, LlmError("c"), LlmError("d"))
@@ -159,7 +254,6 @@ async def test_a_success_resets_the_consecutive_failures(clock: VirtualClock) ->
     assert len(primary.calls) == 5
 
 
-@pytest.mark.unit
 async def test_open_breaker_half_opens_after_the_cooldown_and_closes_on_success(
     clock: VirtualClock,
 ) -> None:
@@ -186,7 +280,6 @@ async def test_open_breaker_half_opens_after_the_cooldown_and_closes_on_success(
     assert status.retry_at is None
 
 
-@pytest.mark.unit
 async def test_a_failed_trial_reopens_the_breaker_for_another_cooldown(
     clock: VirtualClock,
 ) -> None:
@@ -219,20 +312,30 @@ class _FailsThenBlocks:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+    async def _wait(self) -> None:
         self.calls += 1
         if self._failures:
             self._failures -= 1
             raise LlmError("down")
         self.started.set()
         await self.release.wait()
+
+    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
+        await self._wait()
         return LlmResponse(
             parsed=schema.model_validate(ACK.model_dump()),
             usage=Usage(role=request.role.value, model="blocking"),
         )
 
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        await self._wait()
+        return ChatReply(
+            turn=AssistantTurn(),
+            answer=schema.model_validate(DONE.model_dump()),
+            usage=Usage(role=request.role.value, model="blocking"),
+        )
 
-@pytest.mark.unit
+
 async def test_half_open_lets_a_single_trial_call_through(clock: VirtualClock) -> None:
     primary = _FailsThenBlocks(failures=1)
     (backup,) = _models("backup")
@@ -253,7 +356,6 @@ async def test_half_open_lets_a_single_trial_call_through(clock: VirtualClock) -
     assert _state(model, "primary").state is BreakerState.CLOSED
 
 
-@pytest.mark.unit
 async def test_a_trial_ended_by_an_unexpected_error_stays_half_open(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, LlmError("down"), RuntimeError("bug"), ACK)
@@ -271,7 +373,6 @@ async def test_a_trial_ended_by_an_unexpected_error_stays_half_open(clock: Virtu
     assert _state(model, "primary").state is BreakerState.CLOSED
 
 
-@pytest.mark.unit
 async def test_open_breakers_are_named_in_the_aggregated_error(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     primary.push(ModelRole.GATE, LlmError("down"))
@@ -294,7 +395,6 @@ async def test_open_breakers_are_named_in_the_aggregated_error(clock: VirtualClo
 # --- health ------------------------------------------------------------------
 
 
-@pytest.mark.unit
 async def test_status_reports_every_breaker_in_chain_order(clock: VirtualClock) -> None:
     primary, backup = _models("primary", "backup")
     model = _resilient([primary, backup], clock, failure_threshold=2, cooldown_s=30)
@@ -325,7 +425,6 @@ async def test_status_reports_every_breaker_in_chain_order(clock: VirtualClock) 
 # --- construction ------------------------------------------------------------
 
 
-@pytest.mark.unit
 @pytest.mark.parametrize(
     ("names", "options", "message"),
     [
