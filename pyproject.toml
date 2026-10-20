@@ -34,6 +34,8 @@ dev = [
     "import-linter>=2.0",
     "types-pyyaml",
     "pre-commit>=4.7.0",
+    "langgraph-cli[inmem]>=0.4.37",
+    "langgraph-api>=0.16",
 ]
 
 [build-system]
