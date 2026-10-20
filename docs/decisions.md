@@ -270,15 +270,27 @@ dispatcher email then a Hero task) and the document types `bol`, `pod`,
 `Intent` and `ObligationKind` stay as the standard ids; everywhere else an intent or a kind
 is a `str` of the catalog.
 
-**Versions and canary.** Every save bumps `config_version` and the repository keeps the
-whole broker per version (`broker_versions`, jsonb). `load_run_context` reads the load's
+**Catalog rules.** Every validated `Broker` runs `catalog_problems(broker)` (all problems
+in one error): snake_case unique ids; the system intents code emits and every obligation's
+follow-up intent present, `system`, `must_act`; `eta_request` following up as
+`eta_follow_up_due`; `document` and `other` present, `other` last in priority; a field's
+check fits its kind; a requirement names a known document type and obligation kind, and
+`within_minutes` needs `opens_obligation`; limits within caps. `Broker.revised(**changes)`
+is the validated copy (`model_copy` skips validation) and `with_follow_up_intents` adds a
+new obligation's follow-up intent. Stored brokers are validated again when read.
+
+**Versions and canary.** A configuration change (`PUT /api/brokers/{id}`, a publish) bumps
+`config_version`; a rollout change re-saves the current version with its new `rollout`.
+The repository keeps the whole broker per version (`broker_versions`, jsonb; two deferred
+foreign keys tie `brokers` and `broker_versions`). `load_run_context` reads the load's
 broker, and while `rollout.percent < 100` also `get_version(previous_version)`;
 `choose_version(current, previous, load_id)` sends a load to the current version when the
 sha256 of its id falls in the first `percent` buckets of 100, so a load keeps its version
 across runs. The run records `broker_id` and `broker_config_version`. Publishing an SOP
 saves the broker with `sop_version`, `config_version + 1` and `rollout = {percent: 100,
 previous_version: <old>}`; a canary publishes with a lower percent; rollback is
-`percent: 0`. `Broker.validation_config()` is the broker's `ValidationConfig` with each
+`percent: 0`. Known gap: the canary splits the catalog and the limits, but the SOP index
+serves the latest published text of a broker to every load. `Broker.validation_config()` is the broker's `ValidationConfig` with each
 kind's attempt cap (`max_attempts`, per kind, `attempt_cap(kind)`).
 
 ## Knowledge base
@@ -288,17 +300,31 @@ Two ports (`ports/knowledge.py`), because they live in different phases of a run
 - `SopStore`, on the unit of work: uploaded `SopDocument`s, the broker's one `SopDraft`
   (sections under review, `proposed_intents`, `proposed_requirements`,
   `proposed_obligations`) and the published `SopVersion`s (immutable, `version` = content
-  hash). `broker_id` None is the standard layer.
+  hash). `broker_id` None is the standard layer (stored under the owner key
+  `'standard'`, since the owner is part of the primary keys). A version id is
+  `"<standard>+<broker>"`; publishing an existing version again makes it the published
+  one; `save_version(version, embeddings)` stores the sections' vectors with it.
 - `SopIndex`, in `RuntimeDeps.knowledge`, read while the run thinks (outside any
   transaction): `by_applies` (= `domain.sop.resolve`, today's deterministic selection),
   `visible`, `search` (pgvector cosine plus `ts_rank`, fused by reciprocal rank, in
   Postgres; word overlap in memory), `read`, `version`. Another broker's sections are
   never returned.
 
-`MemorySopIndex.from_files(sops/)` reads the tree on every call, exactly as the file
-repository did: an edited file applies to the next run, a broken file fails only the runs
-of the brokers that see it, and `version` is the tree's hash. `agent sop import` (card
-W3-KNW) turns `sops/` into published versions (standard, northline, keystone).
+Which index a runtime reads (`bootstrap.build_knowledge`):
+
+- Postgres: `adapters.knowledge.postgres.knowledge_index(settings, embedder=...)`, the
+  published sections in the database. A database with nothing published serves no
+  section: run `agent sop import sops/` after `agent db migrate`.
+- The memory store (the platform's sessions, a local runtime): `StoreSopIndex`, the
+  versions published in that store, with the `sops/` tree for every layer never
+  published. A broker onboarded through the API therefore reaches the runs of the same
+  simulation. It opens a unit of work per call, so it is only called while the run
+  thinks, outside any unit of work.
+- The eval runner: `MemorySopIndex.from_files(sops/)` (or a broker export's sections), the
+  tree read on every call.
+
+`agent sop import <dir> [--broker <id>]` (idempotent) turns `sops/` into published
+versions (standard, northline, keystone), creating a missing broker with `new_broker`.
 
 Embeddings: `openai/text-embedding-3-small`, 1536 dimensions (`config/models.yaml`
 `embedding`), only in live and record mode. Scripted, replay and CI use `FakeEmbedder`:
@@ -314,15 +340,16 @@ the broker's new config version.
 
 ## Agent loop
 
-Target graph (card W3-AGT): `prefilter → triage → knowledge → agent → validate`. Until it
-lands the graph is the pre-wave-3 one, with decide on the `agent` role and the
-`AgentOutcome` schema.
+Graph: `prefilter → triage → knowledge → agent → validate` (`application/graph/`,
+`application/agent.py`, `application/agent_tools.py`).
 
 - **triage** is the gate on the broker's catalog: system intents from code, message
-  intents and `must_act` from the catalog; `Broker.triage = False` skips the model.
-- **knowledge** gives the sections of `by_applies` and the catalog. Today it still
-  escalates a gap (`SOP_GAP_TITLE`, reason `sop_gap:`); with AGT the gap moves to the
-  agent: `finish(no_procedure=true)` with nothing accepted escalates the same way.
+  intents and `must_act` from the catalog; for `standard_broker()` its prompt is the tuned
+  gate prompt byte for byte. `Broker.triage = False` skips the model (the message goes on
+  as `other`). Its trace node keeps the id `gate`.
+- **knowledge** gives the sections of `by_applies` and the catalog, and no longer
+  escalates: the gap moves to the agent, `finish(no_procedure=true)` with nothing approved
+  escalates with `SOP_GAP_TITLE` and reason `sop_gap:`.
 - **agent** is one `generate` call on the `agent` role with tools, `max_tool_rounds =
   max_steps` and `max_cost_usd`; the adapter's loop runs the rounds (so `llm_calls` stays
   1 per agent node) and checks the running cost after each round. Read tools:
@@ -339,8 +366,22 @@ lands the graph is the pre-wave-3 one, with decide on the `agent` role and the
   `script.decide`) is validated as before.
 - **validate** runs the rules over the staged actions plus the answer's actions: the merge
   point, and defense in depth (a violation on a staged action is logged and recorded).
-- Over `max_rejections` refused calls: escalate with `blocked_actions`, the accepted
-  actions still run.
+- The verdict, in order: a high-severity violation, or more refused calls than
+  `max_rejections` → `BLOCKED_TITLE` (reason `blocked: <rules>` or `blocked:
+  max_rejections`), the accepted actions still run; `no_procedure` with nothing approved →
+  `sop_gap`; nothing approved → `noop`; else `acted`. The validator uses the broker's
+  limits (`ctx.broker.validation_config()`); `RuntimeConfig.validation` is no longer read
+  by runs.
+- `RunRecord.plan` holds every action the agent proposed (staged calls in order, refused
+  ones included, then the answer's own actions minus exact repeats); `RunRecord.intent` is
+  the agent's label when the catalog knows it, else the triage intent.
+- The run context carries a 200-event history window (`history_events_limit`) and the
+  load's documents (read when an attachment or `document_processed` event is in that
+  window), so the read tools need no transaction.
+- `application/tools.py` keeps only the tool texts (the eval metadata hashes them);
+  `decide.py` is gone. The OpenRouter adapter sends images as data-URL parts, stops the
+  rounds once `max_cost_usd` is spent and writes each round's `usage` in its assistant
+  entry; the cassette key adds image hashes and the cost cap only when a request has them.
 
 Model roles: `gate`, `agent` (was `decide`), `judge`, `driver_sim`, `extract` (documents,
 images included), `compile` (SOP drafts, scenario drafts). `LlmRequest` carries `images`
@@ -353,8 +394,11 @@ names it in `requests` (`purpose: eta_request` is the older spelling of `request
 eta_request`, and a contradiction is refused): the executor opens that obligation with
 the first one and counts every later one, and the rules project it the same way.
 `open_obligation` opens one with no attempt (a document the load owes). The attempt cap
-is per kind (`ValidationConfig.max_attempts`, filled from the catalog). With AGT,
-`update_stage` into a stage with a `DocumentRequirement` opens its `opens_obligation`
+is per kind (`ValidationConfig.max_attempts`, filled from the catalog; rules
+`attempt_cap`, which counts SMS and email `requests`, and `known_obligation_kind`, which
+refuses a kind outside the catalog; `obligation_exists` refuses `open_obligation` when one
+is already open). An email's `requests` opens and counts like an SMS's. `update_stage`
+into a stage with a `DocumentRequirement` opens its `opens_obligation`
 (attempts 0), with a timer after `within_minutes` when set; its follow-up timer produces
 the kind's follow-up intent; when the attempts are used up, `on_exhausted` says who gets
 the case.
@@ -389,7 +433,20 @@ its units of work).
 - **Only the `document_processed` run acts on a document.** The message's own run never
   does (the prompt and `sops/standard/documents.md` say so), so an attachment is never
   handled twice.
-- Ingress: `POST /api/loads/{id}/attachments` (multipart) and `attachments[].ref`.
+- Ingress: `POST /api/loads/{id}/attachments` (multipart: `file`, `sender_contact_id`,
+  `body`, `channel`, `message_id`, `occurred_at`; 201; the document stays pending until
+  the next tick; 413 over 20 MB) and `attachments[].ref`.
+- As built (`application/documents.py`): the model answers a generic `Extraction`
+  (`{type_id, confidence, fields: [{name, value}], notes}`), validated against the chosen
+  type in code. `needs_review` = confidence under 0.7, an unknown type, a missing or
+  unreadable value, a failed check, or a non-empty POD `exceptions`. A model, file or
+  reader error marks the document `failed`, and its `document_processed` event still goes
+  out with that status (the SOP hands it to a Hero); it is never retried. A document of an
+  unknown load is saved `failed` with no event. `date_in_window` picks the stops from the
+  field name (`deliver` → delivery stops, `pickup`/`ship` → pickup stops). The expected
+  seal is the last one an inbound message reported. The event body is the reading's
+  summary (type, status, reasons). Two workers may read the same document; only one
+  announces it.
 
 ## Evals for non-determinism
 
@@ -409,6 +466,9 @@ POD). The negative control adds an agent that stages `send_email` to an outside 
 
 Replay cassettes miss until the wave 3 re-record (card W3-BAKE): the role is `agent` now
 and the schemas changed. On `wave3`, CI runs the replay step with `continue-on-error`.
+Broker exports must pass `catalog_problems`; a scenario with a `broker_file` runs on the
+in-memory index (its sections replace the broker's layer), so the Postgres variant that
+reads imported sections skips it.
 
 ## Wave 3 file ownership
 
@@ -440,13 +500,11 @@ Frozen after C0 (no card edits them; changes go through the orchestrator): `api/
 `0005` documents (W3-DOC), `0006` W3-OPS if needed. One file per card, never shared: the
 migrator refuses an applied file that was edited.
 
-**Adapters found by name.** The composition root loads a card's adapter by module and
+**Adapters found by name (all landed).** The composition root loads a card's adapter by module and
 attribute (`bootstrap.LazyAdapter`), so the card plugs in without editing it:
 `adapters.knowledge.postgres.knowledge_index(settings)` (W3-KNW, for
 `PERSISTENCE=postgres`; until then the runs read `sops/`), and
 `application.documents.DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=,
 timeout_s=)` with `adapters.documents.pdfium.PdfiumPageReader()` (W3-DOC; until both exist
-the runtime runs `NullDocumentProcessor`). The Postgres repository stubs raise
-`NotImplementedError("card BRK|KNW|DOC")`, except the broker reads, which find no broker
-(the standard catalog applies); so on Postgres a message with an attachment cannot be
-ingested until W3-DOC lands.
+the runtime runs `NullDocumentProcessor`). Every Postgres repository is implemented
+(migrations 0003 brokers, 0004 knowledge, 0005 documents).
