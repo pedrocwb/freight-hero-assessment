@@ -12,7 +12,7 @@ from freight_agent.domain.validation import Violation
 
 class RunStatus(StrEnum):
     SKIPPED = "skipped"  # prefilter: duplicate, stale timer, nothing to do (no LLM call)
-    NOOP = "noop"  # gate or decide chose to do nothing
+    NOOP = "noop"  # triage or the agent chose to do nothing
     ACTED = "acted"
     ESCALATED = "escalated"
     FAILED = "failed"
@@ -31,8 +31,10 @@ class Usage(DomainModel):
 class TrajectoryStep(DomainModel):
     """One tool call of the agent loop, as the run's trajectory shows it.
 
-    `accepted` is set for action tools (staged or refused by a rule) and None for read
-    tools. `cost_usd` is the model round that made the call.
+    `accepted` is set for action tools (staged, or refused by a rule or for bad
+    arguments) and None for read tools. `cost_usd` is the cost of the model round that
+    made the call (every call of one round shows the same round). The final answer
+    (`finish`) is not a step: it is the run's plan and intent.
     """
 
     tool: str
@@ -52,6 +54,8 @@ class RunRecord(DomainModel):
     gate: GateDecision | None = None
     sop_section_ids: tuple[str, ...] = ()
     sop_version: str | None = None  # content hash of the SOP files the run read
+    # Every action the agent proposed: the action tool calls, then the answer's own
+    # actions. Always a plain `Plan`, so a record read back from storage compares equal.
     plan: Plan | None = None
     violations: tuple[Violation, ...] = ()
     usage: tuple[Usage, ...] = ()
@@ -59,7 +63,8 @@ class RunRecord(DomainModel):
     error: str | None = None
     trace_url: str | None = None
     # Wave 3, all optional so records stored before them still validate.
-    intent: str | None = None  # the agent's reading of the event, when it labelled it
+    # The run's reading of the event: the agent's catalog label, else the triage intent.
+    intent: str | None = None
     broker_id: str | None = None  # the broker config the run used
     broker_config_version: int | None = None  # its version (canary: pinned per run)
     trajectory: tuple[TrajectoryStep, ...] = ()  # the agent's tool calls, in order

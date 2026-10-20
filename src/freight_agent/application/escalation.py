@@ -2,9 +2,10 @@
 
 Each escalation path of a run (docs/decisions.md, "Run pipeline") ends with one
 Hero task written here in code, never by the model: an unknown sender, an event
-that no SOP section covers, a model failure or a run over its deadline, and
-actions the validator blocked. The texts tell a Hero what happened and what is
-left to do by hand; the eval scenarios match on the titles.
+that no SOP section covers (the agent's `no_procedure`), a model failure or a run over
+its deadline, and actions the validator blocked or an agent over its rejection budget.
+The texts tell a Hero what happened and what is left to do by hand; the eval scenarios
+match on the titles.
 """
 
 from collections.abc import Mapping
@@ -25,6 +26,7 @@ MODEL_FAILURE_TITLE = "Agent failed on an event: handle it by hand"
 DEADLINE_TITLE = "Agent run timed out: handle the event by hand"
 BLOCKED_TITLE = "Agent action blocked by a safety check"
 
+MAX_REJECTIONS = "max_rejections"  # the reason's code when the rejection budget is spent
 QUOTE_LIMIT = 300  # characters of a message quoted in a task
 
 
@@ -53,7 +55,8 @@ def unknown_sender(ctx: RunContext, detail: str) -> Escalation:
 
 
 def sop_gap(ctx: RunContext, intent: str) -> Escalation:
-    """No section with an explicit intent applies: the agent does not improvise."""
+    """The agent found no procedure for the event (`finish` with `no_procedure` and
+    nothing approved): it does not improvise."""
     load = ctx.load
     stage = load.stage.value
     return Escalation(
@@ -101,22 +104,53 @@ def deadline_passed(ctx: RunContext, deadline_s: float) -> Escalation:
     )
 
 
-def blocked_actions(ctx: RunContext, plan: Plan, outcome: ValidationOutcome) -> Escalation:
-    """The validator dropped an action for a high-severity reason (a security check)."""
+@dataclass(frozen=True)
+class RejectionBudget:
+    """The agent's action tool calls that rules or bad arguments refused, against the
+    broker's `BrokerLimits.max_rejections`."""
+
+    refused: int
+    limit: int
+
+    @property
+    def exceeded(self) -> bool:
+        return self.refused > self.limit
+
+
+def blocked_actions(
+    ctx: RunContext,
+    plan: Plan,
+    outcome: ValidationOutcome,
+    budget: RejectionBudget | None = None,
+) -> Escalation:
+    """The validator dropped an action for a high-severity reason (a security check), or
+    the agent's refused calls went over the broker's rejection budget (`budget`)."""
     lines = [
         f"- action {v.action_index} ({plan.actions[v.action_index].type}): {v.rule}: {v.message}"
         for v in outcome.violations
     ]
     ran = len(outcome.approved)
     rules = sorted({v.rule for v in outcome.violations if v.severity is Severity.HIGH})
+    over = budget is not None and budget.exceeded
+    if budget is not None and over:
+        rules.insert(0, MAX_REJECTIONS)
+        lines.insert(
+            0,
+            f"The agent's action calls were refused {budget.refused} times, over the limit "
+            f"of {budget.limit}.",
+        )
+    hint = (
+        "Check whether the message tried to redirect the agent."
+        if not over
+        else "Check what the agent was trying to do, and do it by hand."
+    )
     return Escalation(
         task=CreateHeroTask(
             title=BLOCKED_TITLE,
             description=(
                 f"The validator blocked actions the agent proposed for {describe_event(ctx)}:\n"
                 + "\n".join(lines)
-                + f"\n{ran} other action{'' if ran == 1 else 's'} of the plan ran. Check "
-                "whether the message tried to redirect the agent."
+                + f"\n{ran} other action{'' if ran == 1 else 's'} of the plan ran. {hint}"
             ),
             urgent=True,
         ),

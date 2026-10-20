@@ -9,7 +9,7 @@ import pytest
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.persistence.memory.store import MemoryEventQueue
 from freight_agent.application.runtime import RuntimeConfig
-from freight_agent.domain.actions import Purpose, SendEmail, SendSms
+from freight_agent.domain.actions import AgentOutcome, Purpose, SendEmail, SendSms
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
@@ -77,16 +77,19 @@ async def test_an_unknown_sender_goes_to_a_hero_without_a_model_call(
 
 
 async def test_an_event_no_sop_covers_escalates_and_records_the_gap(load: Load) -> None:
+    """The knowledge step finds only general sections; the agent searches, finds no
+    procedure and says so (`no_procedure`): the run hands the event to a Hero."""
     world = await World(load).start()
     await world.message(at(7, 12), "Fueling up, then back on the road")
     world.model.push(GATE, decision(Intent.STATUS_UPDATE))
+    world.model.push(DECIDE, AgentOutcome(rationale="No section covers it.", no_procedure=True))
 
     runs = await world.tick(at(7, 13))
 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert runs[0].error == "sop_gap: status_update/to_pickup"
     assert runs[0].sop_section_ids == ("communication_rules", "escalation")  # general only
-    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 0)
+    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)
     [task] = world.sent("hero_task")
     assert task.payload["title"] == "No SOP for this situation"
     assert "status_update" in task.payload["description"]

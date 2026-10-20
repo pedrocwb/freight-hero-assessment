@@ -3,7 +3,8 @@
 Each rule is a small object (open for extension: add a rule, do not edit the
 validator). Violating actions are dropped and reported; they are never edited.
 `check_action` judges one action, so an agent tool can answer "accepted" or "refused
-by <rule>" at the call; `validate` folds it over a whole plan.
+by <rule>" at the call; `validate` folds it over a whole plan, so staging actions one by
+one with `check_action` approves exactly what `validate` approves for the same sequence.
 """
 
 from collections.abc import Sequence
@@ -56,6 +57,9 @@ class ValidationContext(DomainModel):
     open_obligations: tuple[Obligation, ...] = ()
     recent_outbound: tuple[OutboundRecord, ...] = ()
     config: ValidationConfig = ValidationConfig()
+    # The obligation kinds of the broker's catalog: an action may only name one of them.
+    # None: any kind (a context built without a catalog).
+    obligation_kinds: tuple[str, ...] | None = None
 
 
 class Rule(Protocol):

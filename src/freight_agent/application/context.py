@@ -1,8 +1,9 @@
 """What one run may read, loaded once at the start of the run.
 
-Every later step (prefilter, gate, SOP resolution, decide, validate, execute)
-reads this snapshot instead of querying the repositories again, so a run sees
-one consistent view of the load's memory.
+Every later step (prefilter, triage, knowledge, the agent and its read tools, validate,
+execute) reads this snapshot instead of querying the repositories again, so a run sees
+one consistent view of the load's memory. The agent thinks outside any transaction, so
+whatever its read tools need (a longer history, the load's documents) is loaded here.
 """
 
 from collections.abc import Mapping, Sequence
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import cast
 
 from freight_agent.domain.broker import Broker, choose_version, standard_broker
+from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import RUN_TRIGGERS, Event, EventType
 from freight_agent.domain.load import Channel, Load, Role
@@ -39,10 +41,30 @@ class RunContext:
     # The catalog and limits this run follows: the load's broker at the version its
     # rollout gives this load, or the standard catalog for a broker never saved.
     broker: Broker = field(default_factory=standard_broker)
+    # A longer window of the same history, for the agent's `get_history` tool; empty
+    # when the run was loaded without one (then the tool reads `recent_events`).
+    history: tuple[Event, ...] = ()
+    documents: tuple[Document, ...] = ()  # the load's documents, oldest first
 
     @property
     def open_obligations(self) -> tuple[Obligation, ...]:
         return tuple(o for o in self.obligations if o.is_open)
+
+    @property
+    def long_history(self) -> tuple[Event, ...]:
+        """The longest history the run read: `history`, else `recent_events`."""
+        return self.history if len(self.history) > len(self.recent_events) else self.recent_events
+
+    def document(self, document_or_attachment_id: str) -> Document | None:
+        """A document of the load by its id, or by the id of its attachment."""
+        return next(
+            (
+                d
+                for d in self.documents
+                if document_or_attachment_id in (d.document_id, d.attachment_id)
+            ),
+            None,
+        )
 
     def open_obligation(self, kind: str) -> Obligation | None:
         return next((o for o in self.open_obligations if o.kind == kind), None)
@@ -58,17 +80,20 @@ async def load_run_context(
     now: datetime,
     recent_limit: int,
     outbound_window_minutes: int | None = None,
+    history_limit: int = 0,
 ) -> RunContext:
-    """Read the load, its broker, ledger, timers, recent events and recent outbound messages.
+    """Read the load, its broker, ledger, timers, recent events, recent outbound messages
+    and documents.
 
-    `outbound_window_minutes` defaults to the broker's SMS rate window. Raises
-    `DomainError` when the event names a load that was never registered: there is no
-    SOP, contact list or ledger to act on.
+    `outbound_window_minutes` defaults to the broker's SMS rate window. `history_limit`
+    (when larger than `recent_limit`) reads a longer window of the same history for the
+    agent's `get_history` tool. Raises `DomainError` when the event names a load that was
+    never registered: there is no SOP, contact list or ledger to act on.
     """
     load = await uow.loads.get(event.load_id)
     if load is None:
         raise DomainError(f"unknown load {event.load_id!r} for event {event.event_id!r}")
-    broker = await _broker_for(uow, load)
+    broker = await broker_for(uow, load)
     if outbound_window_minutes is None:
         outbound_window_minutes = broker.limits.validation.sms_window_minutes
 
@@ -84,6 +109,11 @@ async def load_run_context(
     recent = await uow.events.recent(load.load_id, recent_limit)
     since = now - timedelta(minutes=outbound_window_minutes)
     outbound_scan = await _events_since(uow.events, load.load_id, since, recent, recent_limit)
+    recent_events = await _history_until(uow.events, event, recent, recent_limit)
+    history = recent_events
+    if history_limit > recent_limit:
+        page = await uow.events.recent(load.load_id, history_limit)
+        history = await _history_until(uow.events, event, page, history_limit)
 
     return RunContext(
         event=event,
@@ -91,16 +121,30 @@ async def load_run_context(
         now=now,
         obligations=tuple(obligations),
         pending_timers=tuple(pending),
-        recent_events=await _history_until(uow.events, event, recent, recent_limit),
+        recent_events=recent_events,
         recent_outbound=_outbound_records(outbound_scan, load, since),
         event_timer=await _event_timer(uow, event),
         tracker=await uow.loads.get_tracker(load.load_id),
         already_processed=await uow.runs.for_event(event.event_id) is not None,
         broker=broker,
+        history=history,
+        documents=await _documents(uow, load, (event, *history)),
     )
 
 
-async def _broker_for(uow: UnitOfWork, load: Load) -> Broker:
+async def _documents(uow: UnitOfWork, load: Load, seen: Sequence[Event]) -> tuple[Document, ...]:
+    """The load's documents, when the events in view show one could exist.
+
+    A document is created only for an attachment of a logged message (or announced by a
+    `document_processed` event), so a history with neither has no document in view and
+    the run skips the query.
+    """
+    if not any(e.attachments or e.type is EventType.DOCUMENT_PROCESSED for e in seen):
+        return ()
+    return tuple(await uow.documents.list_for_load(load.load_id))
+
+
+async def broker_for(uow: UnitOfWork, load: Load) -> Broker:
     """The load's broker, at the version its rollout gives this load (`choose_version`).
 
     A broker never saved runs on the standard catalog, so loads of brokers onboarded

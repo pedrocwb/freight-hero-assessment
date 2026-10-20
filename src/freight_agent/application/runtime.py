@@ -9,9 +9,10 @@ a database would hold the claimed rows):
 
 1. claim: one unit of work claims the next event, reads its context
    (`load_run_context`) and commits the claim;
-2. think: the run graph (prefilter, gate, SOP resolution, decide, validate) runs
+2. think: the run graph (prefilter, triage, knowledge, agent, validate) runs
    outside any transaction, under the run deadline; it reads the SOP through the
-   knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of work;
+   knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of work, and
+   the agent's read tools answer from the context read in phase 1;
 3. commit: one unit of work checks again that no other run finished the event,
    executes the verdict's actions, saves the run record and completes the event.
 
@@ -35,6 +36,7 @@ from datetime import datetime
 from typing import cast
 
 from freight_agent.application import escalation
+from freight_agent.application.agent import Agent
 from freight_agent.application.context import load_run_context
 from freight_agent.application.contracts import (
     InboundMessage,
@@ -42,7 +44,6 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
-from freight_agent.application.decide import Decider
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.executor import ExecutionResult, Executor
 from freight_agent.application.gate import Gate
@@ -75,16 +76,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """The process's settings. What a run may do (validation limits, the agent's tool
+    rounds, cost and rejection budgets) is its broker's (`Broker.limits`), not here."""
+
     ping_filter: PingFilterConfig = field(default_factory=PingFilterConfig)
+    # Not read by the runs since wave 3: each run validates with its broker's
+    # `BrokerLimits.validation`. Kept because the eval metadata still hashes it.
     validation: ValidationConfig = field(default_factory=ValidationConfig)
-    recent_events_limit: int = 30
+    recent_events_limit: int = 30  # the transcript in the agent's prompt
+    history_events_limit: int = 200  # what the agent's get_history tool can read
     run_deadline_s: float = 240.0
     # How long a claimed event may stay in flight before `process_all` takes it back;
     # None: `run_deadline_s` plus a minute, so a run that is still thinking keeps it.
     claim_lease_s: float | None = None
     max_delivery_attempts: int = 5
-    llm_timeout_s: float = 60.0  # per model call; the adapter enforces it
-    decide_max_tool_rounds: int = 2
+    llm_timeout_s: float = 60.0  # per model call (the whole tool loop); the adapter enforces it
     outbox_batch_size: int = 100  # items one `dispatch_outbox` call sends at most
     recent_pings_per_load: int = 64  # ping ids the risk tracker keeps to drop redeliveries
     # Production keeps the worker going: an unexpected error becomes a failed attempt
@@ -147,16 +153,11 @@ class AgentRuntime:
         self._graph = build_graph(
             GraphDeps(
                 gate=Gate(deps.llm, timeout_s=config.llm_timeout_s),
-                decider=Decider(
-                    deps.llm,
-                    max_tool_rounds=config.decide_max_tool_rounds,
-                    timeout_s=config.llm_timeout_s,
-                ),
+                agent=Agent(deps.llm, deps.knowledge, timeout_s=config.llm_timeout_s),
                 knowledge=deps.knowledge,
-                validation=config.validation,
             )
         )
-        self._executor = Executor(deps.clock, deps.ids, config.validation.deferral)
+        self._executor = Executor(deps.clock, deps.ids)
 
     def _uow(self) -> UnitOfWork:
         return self._deps.uow_factory()
@@ -362,6 +363,7 @@ class AgentRuntime:
                     event,
                     now=attempt.started_at,
                     recent_limit=deps.config.recent_events_limit,
+                    history_limit=deps.config.history_events_limit,
                 )
                 attempt.state = RunState(ctx=ctx)
             except Exception as exc:  # the claim still commits: the failure path releases it

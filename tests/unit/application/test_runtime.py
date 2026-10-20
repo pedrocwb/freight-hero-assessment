@@ -586,4 +586,10 @@ async def test_a_run_records_the_broker_config_it_followed(load: Load) -> None:
     (run,) = await world.tick(at(7, 1))
 
     assert (run.broker_id, run.broker_config_version) == ("standard", 1)
-    assert (run.intent, run.trajectory, run.sections_searched, run.rejections) == (None, (), (), 0)
+    # The triage intent; a scripted plan in the answer stages nothing and searches nothing.
+    assert (run.intent, run.trajectory, run.sections_searched, run.rejections) == (
+        Intent.DELAY_RISK_HIGH,
+        (),
+        (),
+        0,
+    )
