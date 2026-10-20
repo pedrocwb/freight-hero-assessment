@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from freight_agent.domain.broker import (
     DocumentRequirement,
@@ -27,7 +28,9 @@ from freight_agent.domain.sop import (
     adopt_sop,
     contributors,
     effective_sections,
+    follow_up_intents,
     resolve,
+    revised_broker,
     search_text,
     section_from_draft,
     version_hash,
@@ -709,3 +712,26 @@ def test_a_broker_saved_for_the_first_time_keeps_version_one() -> None:
 
     assert (adopted.sop_version, adopted.config_version) == ("abc123", 1)
     assert adopted.rollout == Rollout()
+
+
+@pytest.mark.unit
+def test_an_obligation_s_named_follow_up_intent_is_the_one_added() -> None:
+    named = POD.model_copy(update={"follow_up_intent": "pod_overdue"})
+
+    intents = follow_up_intents(standard_broker().intents, (FASTER_ETA, named, POD))
+
+    added = intents[len(standard_broker().intents) :]
+    assert [(i.intent_id, i.system, i.must_act) for i in added] == [
+        ("pod_overdue", True, True),
+        ("pod_follow_up_due", True, True),
+    ]
+    assert added[1].title == "POD request follow-up due"
+
+
+@pytest.mark.unit
+def test_a_revised_broker_is_validated() -> None:
+    broker = new_broker("acme", "Acme")
+
+    assert revised_broker(broker, name="Acme Freight").name == "Acme Freight"
+    with pytest.raises(ValidationError):
+        revised_broker(broker, rollout={"percent": 101})

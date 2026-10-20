@@ -23,6 +23,7 @@ from pydantic import field_validator
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.broker import (
+    FOLLOW_UP_SUFFIX,
     STANDARD_BROKER_ID,
     Broker,
     DocumentRequirement,
@@ -374,13 +375,14 @@ def section_from_draft(section: DraftSection, broker_id: str | None, source: str
 
 
 def with_proposals(broker: Broker, draft: SopDraft) -> Broker:
-    """The broker's catalog once the draft is published.
+    """The broker's catalog once the draft is published, not validated yet: a draft may
+    propose a catalog that does not work, which its lint reports (`revised_broker`
+    validates).
 
     Adds the intents the editor accepted (an id already in the catalog keeps its
     definition), and puts in every obligation and requirement the draft proposes (one of
-    the same kind, or the same type and stage, is replaced). A new obligation kind also
-    gets its follow-up intent, a system intent, unless the catalog has it: its follow-up
-    timer produces that intent.
+    the same kind, or the same type and stage, is replaced). Each obligation also gets
+    its follow-up intent, a system intent, unless the catalog has it: its timer emits it.
     """
     intents = list(broker.intents)
     known = {i.intent_id for i in intents}
@@ -391,44 +393,68 @@ def with_proposals(broker: Broker, draft: SopDraft) -> Broker:
     proposed_kinds = {o.kind: o for o in draft.proposed_obligations}
     obligations = [proposed_kinds.pop(o.kind, o) for o in broker.obligations]
     obligations.extend(proposed_kinds.values())
-    updated = broker.model_copy(
-        update={"intents": tuple(intents), "obligations": tuple(obligations)}
-    )
-    for obligation in draft.proposed_obligations:
-        follow_up = updated.follow_up_intent(obligation.kind)
-        if follow_up is not None and follow_up not in known:
-            intents.append(
-                IntentDef(
-                    intent_id=follow_up,
-                    title=f"{obligation.title} follow-up due",
-                    description=(
-                        f"The follow-up timer of an open {obligation.title} is due: its wait "
-                        "ended without an answer."
-                    ),
-                    system=True,
-                )
-            )
-            known.add(follow_up)
     requirements = {(r.type_id, r.at_stage): r for r in broker.documents}
     requirements.update({(r.type_id, r.at_stage): r for r in draft.proposed_requirements})
-    return updated.model_copy(
-        update={"intents": tuple(intents), "documents": tuple(requirements.values())}
+    return broker.model_copy(
+        update={
+            "intents": follow_up_intents(intents, obligations),
+            "obligations": tuple(obligations),
+            "documents": tuple(requirements.values()),
+        }
     )
+
+
+def follow_up_intents(
+    intents: Sequence[IntentDef], obligations: Sequence[ObligationDef]
+) -> tuple[IntentDef, ...]:
+    """`intents`, plus a system intent for each obligation whose follow-up intent is
+    missing (its timer emits it). Intents already there are kept as they are.
+
+    The same as card W3-BRK's `domain.broker.with_follow_up_intents`, which this mirrors
+    until both cards are on one branch; then this delegates to it.
+    """
+    found = list(intents)
+    known = {i.intent_id for i in found}
+    for obligation in obligations:
+        intent_id = obligation.follow_up_intent or f"{obligation.kind}{FOLLOW_UP_SUFFIX}"
+        if intent_id in known:
+            continue
+        known.add(intent_id)
+        found.append(
+            IntentDef(
+                intent_id=intent_id,
+                title=f"{obligation.title} follow-up due",
+                description=(
+                    f"The follow-up timer of an open {obligation.kind} obligation is due: its"
+                    " wait ended without an answer."
+                ),
+                system=True,
+            )
+        )
+    return tuple(found)
+
+
+def revised_broker(broker: Broker, **changes: object) -> Broker:
+    """`broker` with `changes`, validated (`model_copy` skips validation).
+
+    The same as card W3-BRK's `Broker.revised`, which also checks the whole catalog;
+    this mirrors it until both cards are on one branch.
+    """
+    return Broker.model_validate({**broker.model_dump(), **changes})
 
 
 def adopt_sop(broker: Broker, sop_version: str, *, saved: bool, percent: int = 100) -> Broker:
-    """The broker's next configuration, running SOP `sop_version`.
+    """The broker's next configuration, running SOP `sop_version`, validated.
 
     A broker already saved gets a new `config_version`, and `percent` of its loads run
     on it, the rest on the version it replaces (a canary; 0 is a rollback). A broker
     saved for the first time keeps version 1, with no previous version to share with.
     """
     if not saved:
-        return broker.model_copy(update={"sop_version": sop_version, "rollout": Rollout()})
-    return broker.model_copy(
-        update={
-            "sop_version": sop_version,
-            "config_version": broker.config_version + 1,
-            "rollout": Rollout(percent=percent, previous_version=broker.config_version),
-        }
+        return revised_broker(broker, sop_version=sop_version, rollout=Rollout())
+    return revised_broker(
+        broker,
+        sop_version=sop_version,
+        config_version=broker.config_version + 1,
+        rollout=Rollout(percent=percent, previous_version=broker.config_version),
     )
