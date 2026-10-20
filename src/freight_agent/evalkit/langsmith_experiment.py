@@ -121,8 +121,9 @@ def dataset_name(suite: str) -> str:
 
 
 def example_inputs(scenario: Scenario) -> dict[str, Any]:
-    """What the agent is given. The script is left out: live runs ignore it."""
-    return {
+    """What the agent is given. The script is left out: live runs ignore it. The broker
+    file is there only when the scenario names one, so older examples keep their hash."""
+    inputs: dict[str, Any] = {
         "scenario_id": scenario.id,
         "title": scenario.title,
         "description": scenario.description,
@@ -133,6 +134,9 @@ def example_inputs(scenario: Scenario) -> dict[str, Any]:
         "start": scenario.start,
         "steps": [_step_input(step) for step in scenario.steps],
     }
+    if scenario.broker_file is not None:
+        inputs["broker_file"] = scenario.broker_file
+    return inputs
 
 
 def example_outputs(scenario: Scenario) -> dict[str, Any]:

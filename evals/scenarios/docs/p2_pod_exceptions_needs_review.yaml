@@ -56,14 +56,16 @@ steps:
         - {filename: pod.pdf, fixture: fixtures/docs/pod_exceptions.pdf, content_type: application/pdf}
     script:
       extract:
+        # domain.documents.Extraction: the wrong PO and the exceptions make it needs_review.
         - type_id: pod
           confidence: 0.95
-          extracted:
-            receiver: Valley DC
-            po_numbers: "55812"
-            signed: true
-            delivered_at: "2026-10-14T09:42"
-            exceptions: "2 cases damaged, 1 short"
+          fields:
+            - {name: receiver, value: Valley DC}
+            - {name: po_numbers, value: "55812"}
+            - {name: signed, value: "true"}
+            - {name: delivered_at, value: "2026-10-14T09:42"}
+            - {name: exceptions, value: "2 cases damaged, 1 short"}
+          notes: Shortage and Damage are ticked on the POD.
       agent:
         - rationale: The message only carries the file; the document_processed run acts on it.
         - rationale: >-

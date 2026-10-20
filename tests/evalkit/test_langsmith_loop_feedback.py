@@ -12,7 +12,7 @@ import pytest
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import RunStatus, TrajectoryStep
 from freight_agent.evalkit.judge import JudgeResult, JudgeVerdict
-from freight_agent.evalkit.langsmith_experiment import LangSmithExperiment
+from freight_agent.evalkit.langsmith_experiment import LangSmithExperiment, example_inputs
 from freight_agent.evalkit.results import ScenarioResult, StepObservation
 from freight_agent.evalkit.suite import ScenarioSummary, SuiteResult, discover
 from tests.evalkit.test_graders import observe, run
@@ -138,3 +138,17 @@ async def test_the_trial_outputs_show_the_trajectory_and_the_verdict(evals: Path
     assert agent_run["rejections"] == 1
     assert first["judge"]["verdict"] == {"reasons": ["polite"], "score": 0.8}
     assert "usage" not in first["judge"]
+
+
+@pytest.mark.unit
+def test_a_scenarios_broker_file_and_attachments_are_dataset_inputs() -> None:
+    root = Path(__file__).resolve().parents[2]
+    (p1,) = [s for s in discover(root / "evals", "docs") if s.id == "p1_pod_clean_delivers"]
+    (core,) = [s for s in discover(root / "evals", "core") if s.id == "b_ack_with_nothing_open"]
+
+    inputs = example_inputs(p1)
+
+    assert inputs["broker_file"] == "brokers/acme.json"
+    (attachment,) = inputs["steps"][1]["message"]["attachments"]
+    assert attachment["fixture"] == "fixtures/docs/pod_clean.pdf"
+    assert "broker_file" not in example_inputs(core)

@@ -60,12 +60,18 @@ NO_SOP = MemorySopIndex((), version="test")
 POD = "fixtures/docs/pod_clean.pdf"
 
 
-class Extraction(BaseModel):
-    """Stands in for the pipeline's extraction schema (card W3-DOC)."""
+class ExtractedValue(BaseModel):
+    name: str
+    value: str | None
 
-    type_id: str
+
+class Extraction(BaseModel):
+    """Stands in for the pipeline's schema, `domain.documents.Extraction` (card W3-DOC)."""
+
+    type_id: str | None
     confidence: float
-    extracted: dict[str, Any]
+    fields: tuple[ExtractedValue, ...] = ()
+    notes: str = ""
 
 
 @dataclass
@@ -274,7 +280,11 @@ async def test_the_agent_model_returns_the_scripted_transcript_to_the_runtime() 
 EXTRACTED = {
     "type_id": "pod",
     "confidence": 0.97,
-    "extracted": {"receiver": "Valley DC", "po_numbers": "55821"},
+    "fields": [
+        {"name": "receiver", "value": "Valley DC"},
+        {"name": "po_numbers", "value": "55821"},
+    ],
+    "notes": "",
 }
 
 
@@ -571,6 +581,21 @@ async def test_a_broker_is_saved_in_the_trials_store_before_the_load() -> None:
     assert snapshot.load.load_id == LOAD_ID
     assert await runtime.next_timer_due_at() is None
     assert await runtime.tick() == []
+
+
+@pytest.mark.unit
+async def test_the_trial_runtime_may_run_on_another_store() -> None:
+    from freight_agent.adapters.persistence.memory.store import MemoryStore
+
+    store = MemoryStore()
+    broker = new_broker("acme", "Acme Freight")
+
+    runtime = build_trial_runtime(trial_deps(broker=broker), uow_factory=store.unit_of_work)
+    await runtime.register_load(fixture_load())
+
+    async with store.unit_of_work() as uow:
+        assert await uow.brokers.get("acme") == broker
+        assert await uow.loads.get(LOAD_ID) is not None
 
 
 @pytest.mark.unit
