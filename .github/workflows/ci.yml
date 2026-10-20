@@ -1,6 +1,7 @@
 # The quality gates of every change: lint, types, layer rules, tests with coverage and
-# the scenario evals in scripted mode. Each gate is a Makefile target, so `make ci`
-# runs the same checks locally.
+# the scenario evals (core, agent and docs suites) in scripted and replay mode. Each gate
+# is a Makefile target, so `make ci` runs the same checks locally. The Postgres tests and
+# the image build are jobs of their own (`make integration`, `docker build .`).
 name: CI
 
 on:
@@ -73,16 +74,20 @@ jobs:
       - name: SOP lint
         run: make sop-lint
 
-      # Exit 1: a regression scenario failed; 2: the harness could not run a scenario.
+      # Every suite under evals/scenarios/ of `make eval` (core, agent, docs), each run
+      # even when one before it failed. Exit 1: a regression scenario failed; 2: the
+      # harness could not run a scenario.
       - name: Evals, scripted mode
         run: make eval
 
       # The real model's recorded answers (evals/cassettes), offline and without a key.
       # A changed prompt, SOP, scenario or model misses its recording and fails here:
-      # re-record with `uv run agent eval run --mode record --cost-cap-usd 0.20`.
-      # Wave 3 renamed the decide role to agent and changed the schemas, so every
-      # recording misses (CassetteMissing) until the wave 3 re-record. Non-blocking until
-      # then: remove `continue-on-error` when card W3-BAKE commits the new cassettes.
+      # re-record each suite with `uv run agent eval run --suite S --mode record
+      # --cost-cap-usd 0.20`.
+      # Wave 3 renamed the decide role to agent and changed the prompts and schemas, so
+      # every recording misses (CassetteMissing) until the wave 3 re-record. Non-blocking
+      # until then: the orchestrator removes `continue-on-error` in the commit that adds
+      # the new cassettes (card W3-BAKE).
       - name: Evals, replay mode
         continue-on-error: true
         run: make eval-replay
@@ -99,7 +104,7 @@ jobs:
             *) exit "$status" ;;
           esac
 
-  # Runs only once tests marked `integration` exist (Postgres adapter, card PG-1).
+  # Runs once tests marked `integration` exist (they do since the Postgres adapter).
   integration:
     name: Integration tests (Postgres)
     needs: checks
@@ -140,7 +145,44 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      # The contract suite runs here too: with DATABASE_URL set, every persistence contract
-      # test also runs on Postgres (Liskov: the same suite for the memory store and Postgres).
+      # What `docker compose up` runs before the app: every migration from an empty
+      # database, through the CLI (0001 to 0005 once the wave 3 cards land).
+      - name: Migrations (agent db migrate)
+        run: uv run agent db migrate
+
+      # The contract suites run here too: with DATABASE_URL set, each one also runs on
+      # Postgres (the unit of work, brokers, the SOP store and index, documents: one suite
+      # per port for the memory store and Postgres). The Postgres scenario tests run every
+      # suite on both stores, and on the imported brokers and sections. `-rs` lists what
+      # was skipped and why.
       - name: Integration and Postgres contract tests
-        run: uv run pytest -m "integration or contract"
+        run: make integration
+
+  # The image `docker compose up --build` runs: it builds (web UI included), starts with
+  # no key and no database (replay, memory), answers its health check and serves the UI.
+  image:
+    name: Docker image
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: docker build --tag freight-agent:ci .
+
+      - name: Serve the API and the UI
+        run: |
+          docker run --detach --name app --publish 127.0.0.1:8000:8000 freight-agent:ci
+          for _ in $(seq 30); do
+            curl --silent --fail http://127.0.0.1:8000/api/health > /dev/null && break
+            sleep 2
+          done
+          curl --silent --fail http://127.0.0.1:8000/api/health
+          curl --silent --fail http://127.0.0.1:8000/ | grep -q '<div id="root">'
+
+      - name: Container log
+        if: always()
+        run: docker logs app || true
