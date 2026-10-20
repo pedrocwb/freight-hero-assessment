@@ -521,3 +521,79 @@ def test_the_simulation_builds_the_agent_runtime(tmp_path: Path) -> None:
 def test_the_simulation_needs_a_timezone_aware_start(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="timezone"):
         build_simulation(_settings(tmp_path), datetime(2026, 10, 13, 7, 0))
+
+
+# --- knowledge, blobs and documents (wave 3) -------------------------------------
+
+
+@pytest.mark.unit
+async def test_the_local_runtime_reads_the_sop_files(tmp_path: Path) -> None:
+    knowledge = bootstrap.build_knowledge(_settings(tmp_path))
+
+    assert isinstance(knowledge, MemorySopIndex)
+    assert await knowledge.version("northline") == FileSopRepository(SOPS).version()
+
+
+@pytest.mark.unit
+def test_postgres_reads_the_sop_files_until_the_knowledge_index_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absent(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES)
+
+    knowledge = bootstrap.build_knowledge(_settings(tmp_path, persistence="postgres"))
+
+    assert isinstance(knowledge, MemorySopIndex)
+
+
+@pytest.mark.unit
+def test_postgres_uses_the_knowledge_index_once_it_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = MemorySopIndex([], version="db")
+    seen: list[Settings] = []
+
+    def knowledge_index(settings: Settings) -> MemorySopIndex:
+        seen.append(settings)
+        return index
+
+    _fake_module(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES, knowledge_index)
+    settings = _settings(tmp_path, persistence="postgres")
+
+    assert bootstrap.build_knowledge(settings) is index
+    assert seen == [settings]
+
+
+@pytest.mark.unit
+def test_blobs_go_under_blobs_dir_and_nothing_is_written_up_front(tmp_path: Path) -> None:
+    blobs = bootstrap.build_blobs(_settings(tmp_path, blobs_dir=tmp_path / "files"))
+
+    assert isinstance(blobs, FsBlobStore)
+    assert not (tmp_path / "files").exists()
+
+
+@pytest.mark.unit
+def test_the_document_pipeline_is_built_once_its_card_provides_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict[str, Any]] = []
+
+    class Pipeline:
+        def __init__(self, **ports: Any) -> None:
+            built.append(ports)
+
+        async def process_pending(self, limit: int = 10) -> list[Any]:
+            return []
+
+    class Pages:
+        pass
+
+    _fake_module(monkeypatch, bootstrap.DOCUMENT_PIPELINE, Pipeline)
+    _fake_module(monkeypatch, bootstrap.PAGE_READER, Pages)
+
+    deps = build_runtime_deps(_settings(tmp_path))
+
+    assert isinstance(deps.documents, Pipeline)
+    (ports,) = built
+    assert set(ports) == {"uow_factory", "clock", "ids", "llm", "blobs", "pages", "timeout_s"}
+    assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
+    assert isinstance(ports["pages"], Pages)

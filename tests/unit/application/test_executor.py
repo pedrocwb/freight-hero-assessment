@@ -14,6 +14,7 @@ from freight_agent.domain.actions import (
     CloseStatus,
     CreateHeroTask,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
     PostInternalSlack,
     Purpose,
@@ -183,6 +184,56 @@ async def _a1(world: _World) -> ExecutionResult:
     return await world.run(
         _risk_high(), ASK_ETA, ScheduleTimer(kind=ETA, due_in_minutes=30), at_time=at(7, 1)
     )
+
+
+# --- Obligations of any kind: requests and open_obligation (wave 3) ---------------------------
+
+
+async def test_an_sms_that_requests_a_kind_opens_that_obligation_then_counts_it(
+    world: _World,
+) -> None:
+    ask_pod = SendSms(contact_id=DRIVER, text="Please send the signed POD.", requests="pod")
+
+    await world.run(_driver_sms("m1", at(9, 0), "at the receiver"), ask_pod, at_time=at(9, 1))
+    first = await world.obligation()
+    await world.run(_driver_sms("m2", at(9, 30), "unloading"), ask_pod, at_time=at(9, 31))
+
+    assert (first.kind, first.attempts, first.last_action_at) == ("pod", 1, at(9, 1))
+    again = await world.obligation()
+    assert (again.obligation_id, again.attempts) == (first.obligation_id, 2)
+
+
+async def test_open_obligation_opens_with_no_attempt_and_takes_a_timer(world: _World) -> None:
+    result = await world.run(
+        _driver_sms("m1", at(9, 0), "at the receiver"),
+        OpenObligation(kind="pod"),
+        ScheduleTimer(kind="pod", due_in_minutes=120),
+        at_time=at(9, 1),
+    )
+
+    obligation = await world.obligation()
+    assert (obligation.kind, obligation.attempts, obligation.last_action_at) == ("pod", 0, None)
+    assert obligation.active_timer_id == "timer_1"
+    assert (await world.timers())["timer_1"].due_at == at(11, 1)
+    assert result.outbox == ()
+    assert result.skipped == ()
+
+
+async def test_open_obligation_is_skipped_when_one_is_already_open(world: _World) -> None:
+    await world.run(
+        _driver_sms("m1", at(9, 0), "at the receiver"), OpenObligation(kind="pod"), at_time=at(9, 1)
+    )
+
+    result = await world.run(
+        _driver_sms("m2", at(9, 5), "still here"), OpenObligation(kind="pod"), at_time=at(9, 6)
+    )
+
+    assert result.skipped == (
+        SkippedAction(
+            index=0, type="open_obligation", reason="an open pod obligation already exists"
+        ),
+    )
+    assert len(await world.obligations()) == 1
 
 
 # --- The main scenario: open, follow up, defer ------------------------------------------------

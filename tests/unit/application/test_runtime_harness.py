@@ -102,7 +102,11 @@ STANDARD = (
     ),
     section("driver_questions", "Answer from the load metadata.", intents=(Intent.QUESTION,)),
     section("acknowledgements", "Do nothing.", intents=(Intent.ACKNOWLEDGEMENT,)),
-    section("documents", "Create a Hero task to review it.", intents=(Intent.DOCUMENT,)),
+    section(
+        "documents",
+        "Create a Hero task to review it.",
+        intents=(Intent.DOCUMENT, Intent.DOCUMENT_PROCESSED),
+    ),
 )
 NORTHLINE = (
     section(

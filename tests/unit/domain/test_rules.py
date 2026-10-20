@@ -16,6 +16,7 @@ from freight_agent.domain.actions import (
     CloseStatus,
     CreateHeroTask,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
     PostInternalSlack,
     Purpose,
@@ -294,6 +295,24 @@ def test_obligation_exists_drops_a_timer_after_the_plan_closed_the_obligation(lo
 @pytest.mark.unit
 def test_obligation_exists_ignores_other_actions(load: Load) -> None:
     assert check(ObligationExists(), eta_sms(), context(load)) is None
+
+
+@pytest.mark.unit
+def test_obligation_exists_allows_a_timer_after_the_plan_opened_the_obligation(
+    load: Load,
+) -> None:
+    timer = ScheduleTimer(kind="pod", due_in_minutes=120)
+
+    assert check(ObligationExists(), timer, context(load), (OpenObligation(kind="pod"),)) is None
+    dropped(ObligationExists(), timer, context(load), (OpenObligation(kind="bol"),))
+
+
+@pytest.mark.unit
+def test_obligation_exists_counts_an_sms_that_requests_the_kind(load: Load) -> None:
+    timer = ScheduleTimer(kind="pod", due_in_minutes=120)
+    ask_pod = SendSms(contact_id=DRIVER, text="Please send the POD.", requests="pod")
+
+    assert check(ObligationExists(), timer, context(load), (ask_pod,)) is None
 
 
 # --- deferral_policy ------------------------------------------------------------------

@@ -25,6 +25,7 @@ from freight_agent.domain.validation import (
     ValidationConfig,
     ValidationContext,
     Violation,
+    check_action,
     validate,
 )
 
@@ -49,6 +50,25 @@ class _RejectNotes:
 @pytest.mark.unit
 def test_eta_attempt_cap_defaults_to_two() -> None:
     assert ValidationConfig().attempt_cap("eta_request") == 2
+
+
+@pytest.mark.unit
+def test_a_kind_with_no_cap_is_not_capped() -> None:
+    assert ValidationConfig().attempt_cap("pod") is None
+    assert ValidationConfig(max_attempts={"pod": 1}).attempt_cap("pod") == 1
+
+
+@pytest.mark.unit
+def test_check_action_judges_one_action_after_the_approved_ones(load: Load) -> None:
+    ctx = ValidationContext(load=load, now=NOW)
+    note = WriteTmsNote(text="ETA 09:40.")
+    rules = (_RejectNotes(),)
+
+    (violation,) = check_action(note, ctx, (CreateHeroTask(title="t", description="d"),), rules)
+
+    assert (violation.rule, violation.action_index) == ("reject_notes", 1)
+    assert check_action(note, ctx, (), rules, index=4)[0].action_index == 4
+    assert check_action(CreateHeroTask(title="t", description="d"), ctx, (), rules) == ()
 
 
 @pytest.mark.unit

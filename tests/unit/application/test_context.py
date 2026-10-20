@@ -7,6 +7,7 @@ import pytest
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.context import RunContext, load_run_context
+from freight_agent.domain.broker import Broker, BrokerLimits, Rollout, new_broker, standard_broker
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Direction, Event, EventType
 from freight_agent.domain.load import Channel, Contact, DelayRisk, Load, Role
@@ -14,7 +15,7 @@ from freight_agent.domain.obligations import Obligation, ObligationKind, Obligat
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.domain.validation import OutboundRecord
+from freight_agent.domain.validation import OutboundRecord, ValidationConfig
 
 LA = ZoneInfo("America/Los_Angeles")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
@@ -641,3 +642,76 @@ async def test_already_processed_when_a_run_exists_for_the_event(
 
     assert (await _context(store, event)).already_processed is True
     assert (await _context(store, _message("m2"))).already_processed is False
+
+
+# --- the broker (wave 3) ---------------------------------------------------------------------
+
+
+async def _save_brokers(store: MemoryStore, *brokers: Broker) -> None:
+    async with store.unit_of_work() as uow:
+        for broker in brokers:
+            await uow.brokers.save(broker)
+        await uow.commit()
+
+
+def _northline(version: int, percent: int = 100, previous: int | None = None) -> Broker:
+    return new_broker("northline", "Northline Logistics").model_copy(
+        update={
+            "config_version": version,
+            "rollout": Rollout(percent=percent, previous_version=previous),
+        }
+    )
+
+
+@pytest.mark.unit
+async def test_a_broker_never_saved_runs_on_the_standard_catalog(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1")])
+
+    ctx = await _context(store, _message("m1"))
+
+    assert ctx.broker == standard_broker()
+
+
+@pytest.mark.unit
+async def test_the_load_s_broker_is_read_at_its_current_version(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1")])
+    await _save_brokers(store, _northline(1), _northline(2, previous=1))
+
+    ctx = await _context(store, _message("m1"))
+
+    assert (ctx.broker.broker_id, ctx.broker.config_version) == ("northline", 2)
+
+
+@pytest.mark.unit
+async def test_a_rollback_runs_the_load_on_the_previous_version(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1")])
+    await _save_brokers(store, _northline(1), _northline(2, percent=0, previous=1))
+
+    ctx = await _context(store, _message("m1"))
+
+    assert ctx.broker.config_version == 1
+
+
+@pytest.mark.unit
+async def test_the_outbound_window_defaults_to_the_broker_s_rate_window(
+    store: MemoryStore, load: Load
+) -> None:
+    narrow = _northline(1).model_copy(
+        update={"limits": BrokerLimits(validation=ValidationConfig(sms_window_minutes=10))}
+    )
+    sms = _action("e:0", "sms", {"contact_id": "drv_20931", "text": "ETA?"}, at=_at(70))
+    await _seed(store, loads=[load], events=[_message("m1"), sms])
+    await _save_brokers(store, narrow)
+
+    async with store.unit_of_work() as uow:
+        ctx = await load_run_context(uow, _message("m1"), now=NOW, recent_limit=30)
+    wide = await _context(store, _message("m1"), window=60)
+
+    assert ctx.recent_outbound == ()  # 20 minutes ago: outside the broker's 10-minute window
+    assert [r.contact_id for r in wide.recent_outbound] == ["drv_20931"]
