@@ -309,36 +309,6 @@ export interface Fixture {
   metadata: LoadMetadata;
 }
 
-export interface ConversationItem {
-  at: string;
-  direction: "in" | "out";
-  channel: ConversationChannel;
-  who: string; // contact id, or "agent"
-  role: string;
-  text: string;
-  subject?: string | null;
-  status?: string | null;
-}
-
-export interface TmsNote {
-  at: string;
-  text: string;
-}
-
-export interface HeroTask {
-  task_id: string;
-  load_id: string;
-  title: string;
-  description: string;
-  urgent: boolean;
-  created_at: string;
-  status: "open" | "done";
-  done_at?: string | null;
-  note?: string | null;
-}
-
-export type TaskFilter = "open" | "done" | "all";
-
 export interface ResolvedSection {
   section_id: string;
   title: string;
@@ -679,7 +649,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
       call<AdvanceResult>({ method: "POST", path: "/sim/advance", body: by }),
     tick: () => call<AdvanceResult>({ method: "POST", path: "/sim/tick" }),
 
-    listLoads: () => call<LoadSummary[]>({ method: "GET", path: "/loads" }),
     getLoad: (loadId: string) => call<LoadSnapshot>({ method: "GET", path: load(loadId) }),
     createLoad: (metadata: LoadMetadata) =>
       call<LoadSummary>({ method: "POST", path: "/loads", body: metadata }),
@@ -698,23 +667,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
         path: "/v1/pings",
         query: { latency_seconds: latencySeconds },
         body: ping,
-      }),
-
-    conversation: (loadId: string, channel: ConversationChannel) =>
-      call<ConversationItem[]>({
-        method: "GET",
-        path: `${load(loadId)}/conversation`,
-        query: { channel },
-      }),
-    tmsNotes: (loadId: string) => call<TmsNote[]>({ method: "GET", path: `${load(loadId)}/tms` }),
-
-    heroTasks: (status: TaskFilter) =>
-      call<HeroTask[]>({ method: "GET", path: "/hero/tasks", query: { status } }),
-    completeHeroTask: (taskId: string, note: string) =>
-      call<HeroTask>({
-        method: "POST",
-        path: `/hero/tasks/${encodeURIComponent(taskId)}/complete`,
-        body: { note },
       }),
 
     runs: (loadId: string) => call<RunRecord[]>({ method: "GET", path: `${load(loadId)}/runs` }),
@@ -767,8 +719,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
       }),
     loadDocuments: (loadId: string) =>
       call<DocumentView[]>({ method: "GET", path: `${load(loadId)}/documents` }),
-    getDocument: (documentId: string) =>
-      call<DocumentView>({ method: "GET", path: `/documents/${encodeURIComponent(documentId)}` }),
   };
 }
 

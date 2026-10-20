@@ -9,14 +9,26 @@ import {
   type ReactNode,
 } from "react";
 
-import { api, type Load, type LoadSnapshot, type LoadSummary, type SimState } from "../api";
+import {
+  api,
+  type Load,
+  type LoadSnapshot,
+  type LoadSummary,
+  type ScenarioRun,
+  type ScenarioStart,
+  type SimState,
+} from "../api";
 import { useEventStream, type StreamEvent, type StreamStatus } from "../hooks/useEventStream";
 import { useResource, type Resource } from "../hooks/useResource";
 import { ALL_TOPICS, invalidate, subscribe } from "../lib/bus";
 import { currentStop } from "../lib/load";
+import { isPlaying, newerRun } from "../lib/scenarios";
 import { useToasts } from "./toasts";
 
 export const DEFAULT_TIMEZONE = "America/Los_Angeles";
+
+/** While a scenario plays, its progress is read every second besides the stream's events. */
+const SCENARIO_POLL_MS = 1000;
 
 interface SimContextValue {
   state: SimState | undefined;
@@ -31,13 +43,18 @@ interface SimContextValue {
   load: Load | undefined;
   /** The selected load's current stop timezone; the sim's zone when no load is selected. */
   timezone: string;
-  tzFor: (loadId: string | null | undefined) => string;
   stream: StreamStatus;
   latencySeconds: number;
   setLatencySeconds: (seconds: number) => void;
   /** Run a write, show its error as a toast, then refresh every panel. */
   perform: <T>(work: () => Promise<T>) => Promise<T | undefined>;
   busy: boolean;
+  /** The scenario that plays now or played last; null before the first. */
+  scenarioRun: ScenarioRun | null;
+  /** A scenario plays: it owns the clock and the world until it ends. */
+  playing: boolean;
+  /** Start a scenario and select its load. */
+  startScenario: (scenarioId: string) => Promise<ScenarioStart | undefined>;
 }
 
 const SimContext = createContext<SimContextValue | null>(null);
@@ -69,6 +86,11 @@ function upsert(loads: LoadSummary[], summary: LoadSummary): LoadSummary[] {
   return copy;
 }
 
+/** What changes as a scenario plays: its status and each step's. */
+function progressKey(run: ScenarioRun | null): string {
+  return run ? `${run.started_at}|${run.status}|${run.steps.map((s) => s.status).join(",")}` : "";
+}
+
 export function SimProvider({ children }: { children: ReactNode }) {
   const toasts = useToasts();
   const [state, setStateRaw] = useState<SimState | undefined>(undefined);
@@ -76,7 +98,7 @@ export function SimProvider({ children }: { children: ReactNode }) {
   const [selectedLoadId, setSelectedLoadId] = useState<string | null>(stored);
   const [latencySeconds, setLatencySeconds] = useState(60);
   const [pending, setPending] = useState(0);
-  const zones = useRef(new Map<string, string>());
+  const [scenarioRun, setScenarioRun] = useState<ScenarioRun | null>(null);
 
   const setState = useCallback((next: SimState) => {
     setStateRaw(next);
@@ -100,14 +122,20 @@ export function SimProvider({ children }: { children: ReactNode }) {
 
   // Keep the selection on a load that exists: the first one after a reset or on first visit.
   // Checked when the list changes only, so a load selected right after its creation is not
-  // undone by a list fetched a moment before it existed.
+  // undone by a list fetched a moment before it existed. A scenario's load is awaited: the
+  // scenario resets the world and creates it while it plays.
   const selectedRef = useRef(selectedLoadId);
   selectedRef.current = selectedLoadId;
+  const awaited = useRef<string | null>(null);
   useEffect(() => {
     if (!state) return;
     const ids = state.loads.map((l) => l.load_id);
     const selected = selectedRef.current;
-    if (selected && ids.includes(selected)) return;
+    if (selected && ids.includes(selected)) {
+      if (awaited.current === selected) awaited.current = null;
+      return;
+    }
+    if (selected && awaited.current === selected) return;
     const next = ids[0] ?? null;
     setSelectedLoadId(next);
     store(next);
@@ -126,23 +154,41 @@ export function SimProvider({ children }: { children: ReactNode }) {
     [selectLoad],
   );
 
-  const snapshot = useResource(
-    selectedLoadId,
-    () => api.getLoad(selectedLoadId as string),
-    ["snapshot"],
-  );
+  // Fetched only once the load is in the list, so an awaited load is not a 404.
+  const known = selectedLoadId !== null && loads.some((l) => l.load_id === selectedLoadId);
+  const snapshot = useResource(known ? selectedLoadId : null, () => api.getLoad(selectedLoadId as string), ["snapshot"]);
   const load = snapshot.data?.load.load_id === selectedLoadId ? snapshot.data?.load : undefined;
 
-  if (load) {
-    const stop = currentStop(load);
-    if (stop) zones.current.set(load.load_id, stop.timezone);
-  }
-  const fallbackZone = state?.timezone || DEFAULT_TIMEZONE;
-  const tzFor = useCallback(
-    (loadId: string | null | undefined) => (loadId && zones.current.get(loadId)) || fallbackZone,
-    [fallbackZone],
-  );
-  const timezone = (load && currentStop(load)?.timezone) || fallbackZone;
+  const timezone = (load && currentStop(load)?.timezone) || state?.timezone || DEFAULT_TIMEZONE;
+
+  // The scenario run: from the stream, from a poll every second while it plays, and on demand.
+  const runRef = useRef<ScenarioRun | null>(null);
+  const acceptScenario = useCallback((incoming: ScenarioRun | null) => {
+    const current = runRef.current;
+    const next = newerRun(current, incoming);
+    if (next === current) return;
+    runRef.current = next;
+    setScenarioRun(next);
+    // A step moved: the world it plays in moved with it.
+    if (progressKey(next) !== progressKey(current)) invalidate("state", "snapshot");
+  }, []);
+  const refreshScenario = useCallback(async () => {
+    try {
+      acceptScenario(await api.scenarioRun());
+    } catch {
+      // The Scenarios screen keeps the last report; the stream or the next poll catches up.
+    }
+  }, [acceptScenario]);
+  useEffect(() => {
+    void refreshScenario();
+    return subscribe(["scenario"], () => void refreshScenario());
+  }, [refreshScenario]);
+  const playing = isPlaying(scenarioRun);
+  useEffect(() => {
+    if (!playing) return undefined;
+    const timer = setInterval(() => void refreshScenario(), SCENARIO_POLL_MS);
+    return () => clearInterval(timer);
+  }, [playing, refreshScenario]);
 
   const onEvent = useCallback(
     (event: StreamEvent) => {
@@ -155,14 +201,15 @@ export function SimProvider({ children }: { children: ReactNode }) {
           invalidate("snapshot");
           break;
         case "run":
-          invalidate(...ALL_TOPICS);
-          break;
         case "outbox":
-          invalidate("conversation", "tms", "tasks", "snapshot");
+          invalidate("snapshot");
+          break;
+        case "scenario":
+          acceptScenario(event.data);
           break;
       }
     },
-    [setState],
+    [setState, acceptScenario],
   );
   const onPoll = useCallback(() => invalidate(...ALL_TOPICS), []);
   const stream = useEventStream(onEvent, onPoll);
@@ -183,6 +230,18 @@ export function SimProvider({ children }: { children: ReactNode }) {
     [toasts],
   );
 
+  const startScenario = useCallback(
+    async (scenarioId: string) => {
+      const started = await perform(() => api.runScenario(scenarioId));
+      if (started) {
+        awaited.current = started.load_id;
+        selectLoad(started.load_id);
+      }
+      return started;
+    },
+    [perform, selectLoad],
+  );
+
   const value: SimContextValue = {
     state,
     stateError,
@@ -194,12 +253,14 @@ export function SimProvider({ children }: { children: ReactNode }) {
     snapshot,
     load,
     timezone,
-    tzFor,
     stream,
     latencySeconds,
     setLatencySeconds,
     perform,
     busy: pending > 0,
+    scenarioRun,
+    playing,
+    startScenario,
   };
   return <SimContext.Provider value={value}>{children}</SimContext.Provider>;
 }

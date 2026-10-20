@@ -1,68 +1,35 @@
 import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 
-import { api, langsmithProject, modelReady } from "./api";
+import { langsmithProject, modelReady } from "./api";
 import { ClockRail } from "./components/ClockRail";
 import { Toasts } from "./components/ui";
-import { useResource } from "./hooks/useResource";
-import { BrokerSlack } from "./screens/BrokerSlack";
-import { ControlRoom } from "./screens/ControlRoom";
-import { DriverPhone } from "./screens/DriverPhone";
-import { EmailThread } from "./screens/EmailThread";
-import { HeroConsole } from "./screens/HeroConsole";
-import { Inspector } from "./screens/Inspector";
+import { href, parseHash, type Route, type ScreenId } from "./lib/route";
+import { LoadInspector } from "./screens/LoadInspector";
+import { Scenarios } from "./screens/Scenarios";
 import { SopViewer } from "./screens/SopViewer";
 import { SimProvider, useSim } from "./state/sim";
 import { ToastProvider } from "./state/toasts";
 
-type ScreenId =
-  | "control"
-  | "driver"
-  | "email"
-  | "slack"
-  | "hero"
-  | "inspector"
-  | "sops";
-
-interface ScreenDef {
-  id: ScreenId;
-  label: string;
-  group: string;
-}
-
-const SCREENS: ScreenDef[] = [
-  { id: "control", label: "Control room", group: "Simulation" },
-  { id: "driver", label: "Driver phone", group: "Play a role" },
-  { id: "email", label: "Main email thread", group: "Play a role" },
-  { id: "slack", label: "Broker Slack", group: "Play a role" },
-  { id: "hero", label: "Hero console", group: "Play a role" },
-  { id: "inspector", label: "Agent inspector", group: "Look inside" },
-  { id: "sops", label: "SOP viewer", group: "Look inside" },
+const SCREENS: { id: ScreenId; label: string }[] = [
+  { id: "scenarios", label: "Scenarios" },
+  { id: "inspector", label: "Load inspector" },
+  { id: "sops", label: "SOPs" },
 ];
 
-function screenFromHash(): ScreenId {
-  const id = window.location.hash.replace(/^#\/?/, "").split("?")[0];
-  return SCREENS.some((s) => s.id === id) ? (id as ScreenId) : "control";
-}
-
-function useScreen(): [ScreenId, (id: ScreenId) => void] {
-  const [screen, setScreen] = useState<ScreenId>(screenFromHash);
+function useRoute(): Route {
+  const [route, setRoute] = useState(() => parseHash(window.location.hash));
   useEffect(() => {
-    const onHash = () => setScreen(screenFromHash());
+    const onHash = () => setRoute(parseHash(window.location.hash));
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
-  return [screen, (id) => (window.location.hash = `/${id}`)];
+  return route;
 }
 
 function StreamBadge() {
   const { stream } = useSim();
-  const label =
-    stream === "live"
-      ? "Live"
-      : stream === "polling"
-        ? "Polling every 5 s"
-        : "Connecting";
+  const label = stream === "live" ? "Live" : stream === "polling" ? "Polling every 5 s" : "Connecting";
   const title =
     stream === "polling"
       ? "The event stream is down, so panels refresh every 5 seconds"
@@ -100,7 +67,7 @@ function ModelBadge() {
   );
 }
 
-function LoadPicker() {
+function LoadPicker({ screen }: { screen: ScreenId }) {
   const { loads, selectedLoadId, selectLoad } = useSim();
   return (
     <label className="load-picker">
@@ -108,7 +75,11 @@ function LoadPicker() {
       <select
         className="input"
         value={selectedLoadId ?? ""}
-        onChange={(e) => selectLoad(e.target.value || null)}
+        onChange={(e) => {
+          selectLoad(e.target.value || null);
+          // A link's load and run no longer apply once another load is picked.
+          if (screen === "inspector") window.location.hash = href("inspector");
+        }}
         disabled={!loads.length}
       >
         {!loads.length ? <option value="">No loads yet</option> : null}
@@ -124,25 +95,16 @@ function LoadPicker() {
 
 function Shell() {
   const sim = useSim();
-  const [screen, go] = useScreen();
-  const openTasks = useResource("tasks:open", () => api.heroTasks("open"), ["tasks"]);
-
-  const urgentOpen = openTasks.data?.filter((t) => t.urgent).length ?? 0;
+  const { screen, params } = useRoute();
+  const runs = sim.snapshot.data?.runs.length ?? 0;
   const badges: Partial<Record<ScreenId, ReactNode>> = {
-    hero: openTasks.data?.length ? (
-      <span className={clsx("count", urgentOpen && "count--urgent")}>
-        {openTasks.data.length}
-        <span className="visually-hidden"> open, {urgentOpen} urgent</span>
-      </span>
-    ) : null,
-    inspector: sim.snapshot.data?.runs.length ? <span className="count">{sim.snapshot.data.runs.length}</span> : null,
+    scenarios: sim.playing ? <span className="count count--live">playing</span> : null,
+    inspector: runs ? <span className="count">{runs}</span> : null,
   };
-
-  const groups = [...new Set(SCREENS.map((s) => s.group))];
   const current = SCREENS.find((s) => s.id === screen) ?? SCREENS[0]!;
 
   useEffect(() => {
-    document.title = `${current.label}, load agent simulator`;
+    document.title = `${current.label}, load agent platform`;
   }, [current.label]);
 
   return (
@@ -153,9 +115,9 @@ function Shell() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true" />
-          <span className="brand-name">Load agent simulator</span>
+          <span className="brand-name">Load agent platform</span>
         </div>
-        <LoadPicker />
+        <LoadPicker screen={screen} />
         <div className="topbar-meta">
           <ModelBadge />
           <StreamBadge />
@@ -165,25 +127,20 @@ function Shell() {
       <aside className="rail">
         <ClockRail />
         <nav className="nav" aria-label="Screens">
-          {groups.map((group) => (
-            <div className="nav-group" key={group}>
-              <p className="nav-group-label">{group}</p>
-              <ul className="nav-list">
-                {SCREENS.filter((s) => s.group === group).map((s) => (
-                  <li key={s.id}>
-                    <a
-                      href={`#/${s.id}`}
-                      className={clsx("nav-link", s.id === screen && "nav-link--current")}
-                      aria-current={s.id === screen ? "page" : undefined}
-                    >
-                      <span>{s.label}</span>
-                      {badges[s.id] ?? null}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+          <ul className="nav-list">
+            {SCREENS.map((s) => (
+              <li key={s.id}>
+                <a
+                  href={href(s.id)}
+                  className={clsx("nav-link", s.id === screen && "nav-link--current")}
+                  aria-current={s.id === screen ? "page" : undefined}
+                >
+                  <span>{s.label}</span>
+                  {badges[s.id] ?? null}
+                </a>
+              </li>
+            ))}
+          </ul>
         </nav>
       </aside>
 
@@ -194,12 +151,8 @@ function Shell() {
             web/README.md); this page retries every 5 seconds.
           </div>
         ) : null}
-        {screen === "control" && <ControlRoom go={go} />}
-        {screen === "driver" && <DriverPhone />}
-        {screen === "email" && <EmailThread />}
-        {screen === "slack" && <BrokerSlack />}
-        {screen === "hero" && <HeroConsole />}
-        {screen === "inspector" && <Inspector />}
+        {screen === "scenarios" && <Scenarios params={params} />}
+        {screen === "inspector" && <LoadInspector params={params} />}
         {screen === "sops" && <SopViewer />}
       </main>
       <Toasts />

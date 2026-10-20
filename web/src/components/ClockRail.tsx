@@ -32,6 +32,8 @@ export function ClockRail() {
   const now = state?.now;
   const next = state?.next_timer_due_at ?? null;
   const untilNext = now && next ? minutesBetween(now, next) : null;
+  // A scenario moves the clock itself while it plays.
+  const held = !state || sim.busy || sim.playing;
 
   async function move(by: AdvanceBy | "tick", label: string) {
     const result = await sim.perform<AdvanceResult>(() => (by === "tick" ? api.tick() : api.advance(by)));
@@ -79,7 +81,7 @@ export function ClockRail() {
             key={minutes}
             type="button"
             className="btn"
-            disabled={!state || sim.busy}
+            disabled={held}
             onClick={() => void move({ minutes }, `+${minutes} min`)}
           >
             +{minutes} min
@@ -88,22 +90,26 @@ export function ClockRail() {
         <button
           type="button"
           className="btn btn--primary clock-next"
-          disabled={!next || sim.busy}
+          disabled={!next || held}
           onClick={() => next && void move({ to: next }, "To next timer")}
           title={next ? `Advance to ${formatTime(next, timezone)} and fire the timer` : "No timer pending"}
         >
           To next timer
         </button>
-        <button type="button" className="btn" disabled={!state || sim.busy} onClick={() => void move("tick", "Tick")}>
+        <button type="button" className="btn" disabled={held} onClick={() => void move("tick", "Tick")}>
           Tick
         </button>
-        <button type="button" className="btn btn--quiet" disabled={sim.busy} onClick={() => setResetOpen(true)}>
+        <button type="button" className="btn btn--quiet" disabled={sim.busy || sim.playing} onClick={() => setResetOpen(true)}>
           Reset
         </button>
       </div>
 
       <p className="clock-last" aria-live="polite">
-        {sim.busy ? "Working…" : last ?? `Queue: ${state?.queue_size ?? 0} event${state?.queue_size === 1 ? "" : "s"}`}
+        {sim.playing
+          ? "A scenario is playing: it moves the clock."
+          : sim.busy
+            ? "Working…"
+            : last ?? `Queue: ${state?.queue_size ?? 0} event${state?.queue_size === 1 ? "" : "s"}`}
       </p>
 
       <Modal

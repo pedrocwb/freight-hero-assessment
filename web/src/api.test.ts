@@ -94,26 +94,21 @@ describe("api client", () => {
     expect(bodyOf(calls[0])).not.toHaveProperty("message_id");
   });
 
-  it("asks for one conversation channel and escapes the load id", async () => {
-    const { calls, api } = recorder(200, []);
-    await api.conversation("481/207", "email");
-    expect(calls[0]?.url).toBe("/api/loads/481%2F207/conversation?channel=email");
+  it("escapes the load id in its path", async () => {
+    const { calls, api } = recorder(200, {});
+    await api.getLoad("481/207");
+    expect(calls[0]?.url).toBe("/api/loads/481%2F207");
   });
 
-  it("builds the hero task and SOP preview queries", async () => {
+  it("builds the SOP preview query", async () => {
     const { calls, api } = recorder(200, []);
-    await api.heroTasks("open");
-    await api.completeHeroTask("out_5", "called the driver, ETA 9:40");
     await api.sopPreview({
       clientId: "keystone",
       loadTypes: ["reefer"],
       intent: "driver_departed",
       stage: "to_delivery",
     });
-    expect(calls[0]?.url).toBe("/api/hero/tasks?status=open");
-    expect(calls[1]?.url).toBe("/api/hero/tasks/out_5/complete");
-    expect(bodyOf(calls[1])).toEqual({ note: "called the driver, ETA 9:40" });
-    expect(calls[2]?.url).toBe(
+    expect(calls[0]?.url).toBe(
       "/api/sops/preview?client_id=keystone&load_types=reefer&intent=driver_departed&stage=to_delivery",
     );
   });
@@ -246,12 +241,12 @@ describe("SOP search", () => {
 });
 
 describe("documents", () => {
-  it("reads a load's documents and one document", async () => {
+  it("reads a load's documents and its runs", async () => {
     const { calls, api } = recorder(200, []);
     await api.loadDocuments("730118");
-    await api.getDocument("doc_pod_1");
+    await api.runs("730118");
     expect(calls[0]?.url).toBe("/api/loads/730118/documents");
-    expect(calls[1]?.url).toBe("/api/documents/doc_pod_1");
+    expect(calls[1]?.url).toBe("/api/loads/730118/runs");
   });
 
 });

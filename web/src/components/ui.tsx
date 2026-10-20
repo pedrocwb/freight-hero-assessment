@@ -16,16 +16,6 @@ export function ScreenHead(props: { title: string; lede?: ReactNode; actions?: R
   );
 }
 
-/** Shown on screens that need a selected load when there is none. */
-export function NoLoad(props: { what: string }) {
-  return (
-    <Empty title="No load selected">
-      Create a load from a fixture in the Control room to start; {props.what} shows here once it
-      exists.
-    </Empty>
-  );
-}
-
 export function Panel(props: {
   title: ReactNode;
   id?: string;
@@ -94,37 +84,6 @@ export function RiskChip({ risk }: { risk: DelayRisk }) {
 
 export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" | "agent" | "proposed" }) {
   return <span className={clsx("tag", tone && `tag--${tone}`)}>{children}</span>;
-}
-
-/** A horizontal meter: value against a limit, with the limit marked when it is in range. */
-export function Meter(props: {
-  value: number;
-  max: number;
-  label: string;
-  warnAt?: number;
-  valueText: string;
-}) {
-  const ratio = props.max > 0 ? props.value / props.max : 0;
-  const level = ratio > 1 ? "critical" : props.warnAt !== undefined && ratio > props.warnAt ? "warn" : "ok";
-  return (
-    <div className="meter">
-      <div className="meter-row">
-        <span className="meter-label">{props.label}</span>
-        <span className="meter-value">{props.valueText}</span>
-      </div>
-      <div
-        className="meter-track"
-        role="meter"
-        aria-label={props.label}
-        aria-valuemin={0}
-        aria-valuemax={props.max}
-        aria-valuenow={Math.round(props.value * 1000) / 1000}
-        aria-valuetext={props.valueText}
-      >
-        <div className={clsx("meter-fill", `meter-fill--${level}`)} style={{ width: `${Math.min(ratio, 1) * 100}%` }} />
-      </div>
-    </div>
-  );
 }
 
 export function Toasts() {

@@ -42,8 +42,8 @@ export function DocumentsPanel() {
       {docs.error ? <InlineError message={docs.error} onRetry={() => void docs.reload()} /> : null}
       {docs.data && list.length === 0 ? (
         <Empty title="No document yet">
-          Attach a file to a message on the Driver phone or the email thread. The next tick reads
-          it: its type, its values and the checks against the load show here.
+          Attach a file to a message in Free play. The next tick reads it: its type, its values
+          and the checks against the load show here.
         </Empty>
       ) : null}
       <ul className="doc-list">

@@ -6,18 +6,10 @@
 
 export type Topic =
   | "state" // sim clock, queue, load summaries
-  | "snapshot" // the selected load: ledger, timers, events, outbox, runs
-  | "conversation"
-  | "tms"
-  | "tasks";
+  | "snapshot" // the selected load: ledger, timers, events, outbox, runs, documents
+  | "scenario"; // the scenario that plays or played last
 
-export const ALL_TOPICS: readonly Topic[] = [
-  "state",
-  "snapshot",
-  "conversation",
-  "tms",
-  "tasks",
-];
+export const ALL_TOPICS: readonly Topic[] = ["state", "snapshot", "scenario"];
 
 type Listener = () => void;
 
