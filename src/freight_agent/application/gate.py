@@ -1,17 +1,20 @@
-"""The gate: what does this event mean, and does it need a decision?
+"""The gate (the graph's triage step): what does this event mean, and does it need the agent?
 
 System events (risk change, timer, attachment, processed document) get their intent
-from code. Only inbound messages call the gate model. The broker's catalog says which
-intents a message can have and which must act (`IntentDef.must_act`): those always go
-on to decide, whatever the model said, so a weak model cannot drop a required action;
-it can only fail to skip noise.
+from code; a timer's intent is the follow-up intent of its obligation kind in the
+broker's catalog. Only inbound messages call the gate model, on a prompt rendered from
+the broker's message intents (`prompts.render_gate_system_prompt`). The catalog says
+which intents a message can have and which must act (`IntentDef.must_act`): those always
+go on to the agent, whatever the model said, so a weak model cannot drop a required
+action; it can only fail to skip noise. A broker with `triage` off skips the model: every
+message goes to the agent as `other`, and the agent labels it.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from freight_agent.application.context import RunContext
-from freight_agent.application.prompts import GATE_SYSTEM_PROMPT, render_gate_prompt
+from freight_agent.application.prompts import render_gate_prompt, render_gate_system_prompt
 from freight_agent.domain.broker import Broker, standard_broker
 from freight_agent.domain.events import EventType
 from freight_agent.domain.intents import GateDecision, Intent
@@ -24,6 +27,12 @@ def follow_up_intent(kind: str, broker: Broker | None = None) -> str | None:
     """What a due follow-up timer of an obligation of `kind` means, in the broker's
     catalog (default: the standard one). None for a kind the catalog does not have."""
     return (broker or standard_broker()).follow_up_intent(kind)
+
+
+# A message of a broker that skips triage: the agent reads it and labels it.
+_UNTRIAGED = GateDecision(
+    intent=Intent.OTHER, act=True, reason="triage is off for this broker: the agent reads it"
+)
 
 
 @dataclass(frozen=True)
@@ -47,9 +56,11 @@ class Gate:
         decision = system_decision(ctx)
         if decision is not None:
             return GateResult(decision=decision, broker=ctx.broker)
+        if not ctx.broker.triage:
+            return GateResult(decision=_UNTRIAGED, broker=ctx.broker)
         request = LlmRequest(
             role=ModelRole.GATE,
-            system=GATE_SYSTEM_PROMPT,
+            system=render_gate_system_prompt(ctx.broker),
             user=render_gate_prompt(ctx),
             max_tool_rounds=0,
             timeout_s=self._timeout_s,
@@ -114,7 +125,7 @@ def _timer_decision(ctx: RunContext) -> GateDecision:
     kind = _timer_kind(ctx)
     intent = ctx.broker.follow_up_intent(kind) if kind is not None else None
     if intent is None:
-        # A timer the agent set means something was meant to happen: let decide look.
+        # A timer the agent set means something was meant to happen: let the agent look.
         return GateDecision(intent=Intent.OTHER, act=True, reason="timer of an unknown kind")
     return GateDecision(intent=intent, act=True, reason=f"{kind} follow-up timer is due")
 
@@ -133,7 +144,7 @@ def _timer_kind(ctx: RunContext) -> str | None:
 def _message_decision(decision: GateDecision, broker: Broker) -> GateDecision:
     """A message can only have a message intent of the catalog. Any other answer (a
     system intent, an id the catalog lacks) is corrected to `other`, which still goes on
-    to decide."""
+    to the agent."""
     if decision.intent in {i.intent_id for i in broker.message_intents()}:
         return decision
     return GateDecision(

@@ -8,8 +8,9 @@ import pytest
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.context import RunContext, load_run_context
 from freight_agent.domain.broker import Broker, BrokerLimits, Rollout, new_broker, standard_broker
+from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
-from freight_agent.domain.events import Direction, Event, EventType
+from freight_agent.domain.events import Attachment, Direction, Event, EventType
 from freight_agent.domain.load import Channel, Contact, DelayRisk, Load, Role
 from freight_agent.domain.obligations import Obligation, ObligationKind, ObligationStatus
 from freight_agent.domain.ping_filter import RiskTracker
@@ -715,3 +716,121 @@ async def test_the_outbound_window_defaults_to_the_broker_s_rate_window(
 
     assert ctx.recent_outbound == ()  # 20 minutes ago: outside the broker's 10-minute window
     assert [r.contact_id for r in wide.recent_outbound] == ["drv_20931"]
+
+
+# --- what the agent's read tools need (wave 3) ---------------------------------------------
+
+
+@pytest.mark.unit
+async def test_a_longer_history_window_is_read_for_get_history(
+    store: MemoryStore, load: Load
+) -> None:
+    history = [_message(f"m{i}", minutes=i) for i in range(50)]
+    later = _message("m_later", minutes=60)  # queued behind the event: not history
+    await _seed(store, loads=[load], events=[*history, later])
+
+    async with store.unit_of_work() as uow:
+        ctx = await load_run_context(uow, history[-1], now=NOW, recent_limit=5, history_limit=40)
+
+    assert [e.event_id for e in ctx.recent_events] == [f"m{i}" for i in range(45, 50)]
+    assert [e.event_id for e in ctx.history] == [f"m{i}" for i in range(10, 50)]
+    assert ctx.long_history == ctx.history
+
+
+@pytest.mark.unit
+async def test_without_a_longer_window_the_history_is_the_recent_events(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1"), _message("m2", minutes=1)])
+
+    ctx = await _context(store, _message("m2", minutes=1), recent_limit=30)
+
+    assert ctx.history == ctx.recent_events == ctx.long_history
+    assert (
+        RunContext(
+            event=ctx.event,
+            load=ctx.load,
+            now=NOW,
+            obligations=(),
+            pending_timers=(),
+            recent_events=ctx.recent_events,
+            recent_outbound=(),
+        ).long_history
+        == ctx.recent_events
+    )
+
+
+def _document(document_id: str, attachment_id: str, *, load_id: str = "481207") -> Document:
+    return Document.pending(
+        document_id=document_id,
+        load_id=load_id,
+        attachment_id=attachment_id,
+        broker_id="northline",
+        blob_ref="sha256:x",
+        filename="pod.pdf",
+        content_type="application/pdf",
+        received_at=_at(1),
+    )
+
+
+@pytest.mark.unit
+async def test_the_documents_of_the_load_are_read_when_an_attachment_is_in_view(
+    store: MemoryStore, load: Load
+) -> None:
+    pod = Attachment(
+        attachment_id="att_1", filename="pod.pdf", content_type="application/pdf", ref="r"
+    )
+    photo = _message("m1").model_copy(update={"attachments": (pod,)})
+    await _seed(store, loads=[load, _other_load(load)], events=[photo, _message("m2", minutes=2)])
+    async with store.unit_of_work() as uow:
+        await uow.documents.save(_document("doc_1", "att_1"))
+        await uow.documents.save(_document("doc_9", "att_9", load_id=OTHER))
+        await uow.commit()
+
+    ctx = await _context(store, _message("m2", minutes=2))
+
+    assert [d.document_id for d in ctx.documents] == ["doc_1"]
+    assert ctx.document("doc_1") == ctx.document("att_1") == ctx.documents[0]
+    assert ctx.document("doc_9") is None
+
+
+@pytest.mark.unit
+async def test_a_processed_document_event_reads_the_documents(
+    store: MemoryStore, load: Load
+) -> None:
+    announced = Event(
+        event_id="doc:doc_1",
+        load_id="481207",
+        type=EventType.DOCUMENT_PROCESSED,
+        occurred_at=_at(3),
+        channel=Channel.SYSTEM,
+        data={"document_id": "doc_1"},
+    )
+    await _seed(store, loads=[load], events=[announced])
+    async with store.unit_of_work() as uow:
+        await uow.documents.save(_document("doc_1", "att_1"))
+        await uow.commit()
+
+    ctx = await _context(store, announced)
+
+    assert [d.document_id for d in ctx.documents] == ["doc_1"]
+
+
+class _NoDocuments:
+    """A document repository that must not be read (the Postgres stub before W3-DOC)."""
+
+    async def list_for_load(self, load_id: str) -> list[Document]:
+        raise AssertionError("no attachment is in view: the documents must not be read")
+
+
+@pytest.mark.unit
+async def test_a_history_with_no_attachment_reads_no_document(
+    store: MemoryStore, load: Load
+) -> None:
+    await _seed(store, loads=[load], events=[_message("m1")])
+
+    async with store.unit_of_work() as uow:
+        uow.documents = _NoDocuments()  # type: ignore[assignment]
+        ctx = await load_run_context(uow, _message("m1"), now=NOW, recent_limit=30)
+
+    assert ctx.documents == ()

@@ -24,12 +24,15 @@ from freight_agent.domain.actions import (
     UpdateStage,
     WriteTmsNote,
 )
+from freight_agent.domain.broker import Broker, BrokerLimits, DocumentRequirement, standard_broker
+from freight_agent.domain.documents import Document, DocumentStatus
 from freight_agent.domain.events import Direction, Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import DeferralPolicy, Obligation, ObligationKind
 from freight_agent.domain.obligations import ObligationStatus as Status
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.domain.validation import ValidationConfig
 from freight_agent.ports.repositories import UnitOfWork
 
 pytestmark = pytest.mark.unit
@@ -90,12 +93,13 @@ class _World:
     unit of work.
     """
 
-    def __init__(self, load: Load) -> None:
+    def __init__(self, load: Load, broker: Broker | None = None) -> None:
         self.store = MemoryStore()
         self.clock = VirtualClock(at(6, 55))
         self.ids = SequentialIdGenerator()
         self.load = load
-        self.executor = Executor(self.clock, self.ids, DeferralPolicy())
+        self.broker = broker or standard_broker()
+        self.executor = Executor(self.clock, self.ids)
 
     async def register(self) -> None:
         async with self.store.unit_of_work() as uow:
@@ -142,7 +146,13 @@ class _World:
             recent_events=(event,),
             recent_outbound=(),
             event_timer=event_timer,
+            broker=self.broker,
         )
+
+    async def save_document(self, document: Document) -> None:
+        async with self.store.unit_of_work() as uow:
+            await uow.documents.save(document)
+            await uow.commit()
 
     async def obligations(self) -> list[Obligation]:
         async with self.store.unit_of_work() as uow:
@@ -217,6 +227,36 @@ async def test_open_obligation_opens_with_no_attempt_and_takes_a_timer(world: _W
     assert (await world.timers())["timer_1"].due_at == at(11, 1)
     assert result.outbox == ()
     assert result.skipped == ()
+
+
+async def test_an_email_that_requests_a_kind_opens_and_counts_it_like_an_sms(
+    world: _World,
+) -> None:
+    ask = SendEmail(
+        to_contact_ids=(DISPATCHER,), body="Please send the driver's ETA.", requests=ETA
+    )
+
+    await world.run(_risk_high(), ask, at_time=at(7, 1))
+    first = await world.obligation()
+    await world.run(_risk_high("ping_2", at(7, 30)), ASK_ETA, at_time=at(7, 31))
+
+    assert (first.kind, first.attempts, first.last_action_at) == (ETA, 1, at(7, 1))
+    again = await world.obligation()
+    assert (again.obligation_id, again.attempts, again.last_action_at) == (
+        first.obligation_id,
+        2,
+        at(7, 31),
+    )
+
+
+async def test_an_email_that_requests_nothing_leaves_the_ledger_alone(world: _World) -> None:
+    tell = SendEmail(
+        to_contact_ids=(DISPATCHER,), body="The driver does not answer.", purpose=Purpose.ESCALATION
+    )
+
+    await world.run(_risk_high(), tell, at_time=at(7, 1))
+
+    assert await world.obligations() == []
 
 
 async def test_open_obligation_is_skipped_when_one_is_already_open(world: _World) -> None:
@@ -438,6 +478,162 @@ async def test_update_stage_saves_the_load(world: _World) -> None:
     assert stored.stage is Stage.TO_DELIVERY
     assert stored == world.load.model_copy(update={"stage": Stage.TO_DELIVERY})
     assert result.load == stored
+
+
+# --- Document requirements: a stage that requires a document opens its obligation (F5) -------
+
+POD_AT_DELIVERY = DocumentRequirement(
+    type_id="pod", at_stage=Stage.AT_DELIVERY, within_minutes=120, opens_obligation="pod"
+)
+
+
+def _requiring(*requirements: DocumentRequirement) -> Broker:
+    return standard_broker().model_copy(update={"documents": requirements})
+
+
+def _pod(status: DocumentStatus, type_id: str = "pod") -> Document:
+    return Document(
+        document_id="doc_1",
+        load_id=LOAD_ID,
+        attachment_id="att_1",
+        broker_id="northline",
+        blob_ref="sha256:x",
+        filename="pod.pdf",
+        content_type="application/pdf",
+        status=status,
+        type_id=type_id,
+        received_at=at(8, 0),
+    )
+
+
+async def _arrive(world: _World) -> ExecutionResult:
+    return await world.run(
+        _driver_sms("m_here", at(9, 0), "at the receiver"),
+        UpdateStage(stage=Stage.AT_DELIVERY),
+        at_time=at(9, 1),
+    )
+
+
+async def test_entering_a_stage_with_a_requirement_opens_its_obligation_and_timer(
+    load: Load,
+) -> None:
+    world = _World(
+        load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(POD_AT_DELIVERY)
+    )
+    await world.register()
+
+    result = await _arrive(world)
+
+    obligation = await world.obligation()
+    assert (obligation.kind, obligation.attempts, obligation.last_action_at) == ("pod", 0, None)
+    timer = (await world.timers())[obligation.active_timer_id or ""]
+    assert timer.due_at == at(11, 1)
+    assert timer.reason == "pod due within 120 min"
+    assert result.obligations == (obligation,)
+    assert result.timers == (timer,)
+    assert result.skipped == ()
+
+
+async def test_a_requirement_without_a_deadline_opens_the_obligation_without_a_timer(
+    load: Load,
+) -> None:
+    requirement = POD_AT_DELIVERY.model_copy(update={"within_minutes": None})
+    world = _World(load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(requirement))
+    await world.register()
+
+    await _arrive(world)
+
+    obligation = await world.obligation()
+    assert obligation.active_timer_id is None
+    assert await world.timers() == {}
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        POD_AT_DELIVERY.model_copy(update={"opens_obligation": None}),
+        POD_AT_DELIVERY.model_copy(update={"at_stage": Stage.DELIVERED}),
+    ],
+    ids=["opens nothing", "another stage"],
+)
+async def test_a_requirement_that_opens_nothing_here_changes_no_ledger(
+    load: Load, requirement: DocumentRequirement
+) -> None:
+    world = _World(load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(requirement))
+    await world.register()
+
+    await _arrive(world)
+
+    assert await world.obligations() == []
+
+
+async def test_a_requirement_obligation_already_open_is_not_opened_again(load: Load) -> None:
+    world = _World(
+        load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(POD_AT_DELIVERY)
+    )
+    await world.register()
+    await world.run(
+        _driver_sms("m1", at(8, 0), "almost there"), OpenObligation(kind="pod"), at_time=at(8, 1)
+    )
+
+    result = await _arrive(world)
+
+    assert len(await world.obligations()) == 1
+    assert result.obligations == ()
+
+
+async def test_a_clean_document_already_in_hand_satisfies_the_requirement(load: Load) -> None:
+    world = _World(
+        load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(POD_AT_DELIVERY)
+    )
+    await world.register()
+    await world.save_document(_pod(DocumentStatus.PROCESSED))
+
+    await _arrive(world)
+
+    assert await world.obligations() == []
+
+
+@pytest.mark.parametrize(
+    "document",
+    [_pod(DocumentStatus.NEEDS_REVIEW), _pod(DocumentStatus.PROCESSED, type_id="bol")],
+    ids=["needs review", "another type"],
+)
+async def test_a_document_that_is_not_a_clean_one_of_the_type_leaves_the_requirement_open(
+    load: Load, document: Document
+) -> None:
+    world = _World(
+        load.model_copy(update={"stage": Stage.TO_DELIVERY}), _requiring(POD_AT_DELIVERY)
+    )
+    await world.register()
+    await world.save_document(document)
+
+    await _arrive(world)
+
+    assert (await world.obligation()).kind == "pod"
+
+
+async def test_the_deferral_policy_is_the_brokers(load: Load) -> None:
+    """A broker that allows 30-minute deferrals: the executor applies its policy."""
+    patient = standard_broker().model_copy(
+        update={
+            "limits": BrokerLimits(
+                validation=ValidationConfig(deferral=DeferralPolicy(max_minutes=30))
+            )
+        }
+    )
+    world = _World(load, patient)
+    await world.register()
+    await _a1(world)
+
+    result = await world.run(
+        _driver_sms("m_defer", at(7, 10), "give me 25 min"),
+        DeferObligation(kind=ETA, minutes=25),
+        at_time=at(7, 11),
+    )
+
+    assert result.skipped == ()
+    assert (await world.obligation()).deferred_until == at(7, 35)
 
 
 async def test_the_load_is_returned_unchanged_without_a_stage_update(world: _World) -> None:

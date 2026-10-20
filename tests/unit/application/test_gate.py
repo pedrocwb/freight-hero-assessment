@@ -8,6 +8,7 @@ import pytest
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import Gate, GateResult, follow_up_intent
+from freight_agent.application.prompts import GATE_SYSTEM_PROMPT, render_gate_system_prompt
 from freight_agent.domain.broker import Broker, IntentDef, ObligationDef, standard_broker
 from freight_agent.domain.events import Attachment, Direction, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
@@ -340,6 +341,50 @@ async def test_a_message_may_have_an_intent_of_the_broker_s_catalog(load: Load) 
     assert result.decision.intent == "detention_request"
     assert not result.should_act  # the catalog says this intent need not act
     assert result.broker == ctx.broker
+    system = model.calls[0].request.system
+    assert system == render_gate_system_prompt(ctx.broker)
+    assert "- detention_request: the carrier asks to be paid for waiting at a stop." in system
+
+
+@pytest.mark.unit
+async def test_the_standard_catalog_gets_the_tuned_gate_prompt(load: Load) -> None:
+    model = ScriptedModel()
+    model.push(ModelRole.GATE, GateDecision(intent="question", act=True, reason="r"))
+
+    await Gate(model).classify(context(load, sms("PO?")))
+
+    assert model.calls[0].request.system == GATE_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+async def test_a_broker_without_triage_sends_every_message_to_the_agent_unread(
+    load: Load,
+) -> None:
+    untriaged = standard_broker().model_copy(update={"triage": False})
+    model = ScriptedModel()
+
+    result = await Gate(model).classify(replace(context(load, sms("ok")), broker=untriaged))
+
+    assert model.calls == []
+    assert (result.decision.intent, result.decision.act) == (Intent.OTHER, True)
+    assert result.should_act and result.usage is None
+
+
+@pytest.mark.unit
+async def test_without_triage_system_events_still_get_their_intent_from_code(
+    load: Load,
+) -> None:
+    untriaged = standard_broker().model_copy(update={"triage": False})
+    photo = event(
+        EventType.INBOUND_MESSAGE, channel=Channel.SMS, sender=DRIVER, attachments=(_BOL,)
+    )
+
+    result = await Gate(ScriptedModel()).classify(replace(context(load, photo), broker=untriaged))
+
+    assert result.decision.intent == Intent.DOCUMENT
+
+
+_BOL = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
 
 
 @pytest.mark.unit
