@@ -5,16 +5,12 @@ import { api } from "./api";
 import { ClockRail } from "./components/ClockRail";
 import { Toasts } from "./components/ui";
 import { useResource } from "./hooks/useResource";
-import { Brokers } from "./screens/Brokers";
 import { BrokerSlack } from "./screens/BrokerSlack";
 import { ControlRoom } from "./screens/ControlRoom";
 import { DriverPhone } from "./screens/DriverPhone";
 import { EmailThread } from "./screens/EmailThread";
-import { Evals } from "./screens/Evals";
-import { HealthScreen } from "./screens/Health";
 import { HeroConsole } from "./screens/HeroConsole";
 import { Inspector } from "./screens/Inspector";
-import { SopStudio } from "./screens/SopStudio";
 import { SopViewer } from "./screens/SopViewer";
 import { SimProvider, useSim } from "./state/sim";
 import { ToastProvider } from "./state/toasts";
@@ -26,11 +22,7 @@ type ScreenId =
   | "slack"
   | "hero"
   | "inspector"
-  | "sops"
-  | "evals"
-  | "health"
-  | "brokers"
-  | "studio";
+  | "sops";
 
 interface ScreenDef {
   id: ScreenId;
@@ -46,10 +38,6 @@ const SCREENS: ScreenDef[] = [
   { id: "hero", label: "Hero console", group: "Play a role" },
   { id: "inspector", label: "Agent inspector", group: "Look inside" },
   { id: "sops", label: "SOP viewer", group: "Look inside" },
-  { id: "evals", label: "Evals", group: "Look inside" },
-  { id: "health", label: "Health", group: "Look inside" },
-  { id: "brokers", label: "Brokers", group: "Onboard a broker" },
-  { id: "studio", label: "SOP studio", group: "Onboard a broker" },
 ];
 
 function screenFromHash(): ScreenId {
@@ -113,7 +101,6 @@ function Shell() {
   const sim = useSim();
   const [screen, go] = useScreen();
   const openTasks = useResource("tasks:open", () => api.heroTasks("open"), ["tasks"]);
-  const health = useResource("health", () => api.health(), ["health"]);
 
   const urgentOpen = openTasks.data?.filter((t) => t.urgent).length ?? 0;
   const badges: Partial<Record<ScreenId, ReactNode>> = {
@@ -124,11 +111,6 @@ function Shell() {
       </span>
     ) : null,
     inspector: sim.snapshot.data?.runs.length ? <span className="count">{sim.snapshot.data.runs.length}</span> : null,
-    health: health.data ? (
-      <span className={clsx("level-dot", `level-dot--${health.data.status}`)} title={`Health: ${health.data.status}`}>
-        <span className="visually-hidden">{health.data.status}</span>
-      </span>
-    ) : null,
   };
 
   const groups = [...new Set(SCREENS.map((s) => s.group))];
@@ -196,10 +178,6 @@ function Shell() {
         {screen === "hero" && <HeroConsole />}
         {screen === "inspector" && <Inspector />}
         {screen === "sops" && <SopViewer />}
-        {screen === "evals" && <Evals />}
-        {screen === "health" && <HealthScreen resource={health} />}
-        {screen === "brokers" && <Brokers />}
-        {screen === "studio" && <SopStudio />}
       </main>
       <Toasts />
     </div>

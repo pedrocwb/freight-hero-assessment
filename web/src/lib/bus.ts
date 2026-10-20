@@ -9,12 +9,7 @@ export type Topic =
   | "snapshot" // the selected load: ledger, timers, events, outbox, runs
   | "conversation"
   | "tms"
-  | "tasks"
-  | "health"
-  // Broker configuration and SOP drafts change only by the page's own writes, so the
-  // stream and the polling fallback leave them out of ALL_TOPICS.
-  | "brokers"
-  | "knowledge";
+  | "tasks";
 
 export const ALL_TOPICS: readonly Topic[] = [
   "state",
@@ -22,7 +17,6 @@ export const ALL_TOPICS: readonly Topic[] = [
   "conversation",
   "tms",
   "tasks",
-  "health",
 ];
 
 type Listener = () => void;

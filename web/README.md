@@ -36,10 +36,6 @@ pnpm dev            # http://localhost:5173, /api is proxied to http://localhost
 | Hero console | Tasks across loads, urgent first; filter open, done or all; complete with a note |
 | Agent inspector | Each run: trigger, status, intent, the broker and config version it ran on, gate intent and reason, SOP sections, the trajectory (every tool call with its arguments, result, accepted or rejected, cost), rejections and sections searched, the staged plan, validator drops, tokens, cost, latency; the ledger, the load's documents with their checks, the timers and the spend per load against $1 |
 | SOP viewer | Sections that apply for a broker, load types, intent (from the broker's catalog) and stage, the catalog, the SOP version, and the agent's SOP search |
-| Evals | Scenarios with tags; run the suite or one scenario in scripted or replay mode, k trials, or a whole suite on one broker (also live, with a cost cap); results with pass^k, failures, cost and the LangSmith link of a live run |
-| Health | Status and reasons, queue age against the 5-minute SLA, run p95, spend per load, outbox, settings (secrets only as set or unset) |
-| Brokers | Each broker's profile: intents (system ones read-only), obligation types, document types and requirements, limits and the agent's budget (`max_steps: 0` is the single-plan mode); create one as a copy of the standard broker; save as a new config version; the rollout (share of loads on the current version, rollback to 0%) and the version list |
-| SOP studio | Upload a broker's SOP (PDF or Markdown), review the compiled draft (sections with their intents, stages, mode and source pages; proposed intents with evidence, document requirements and obligations), see the lint, publish (optionally as a canary), list the published versions, run the broker's eval suite |
 
 The clock sits beside every screen: +1, +5 and +30 minutes, "To next timer" (advances to
 `next_timer_due_at`), tick and reset. Every time is shown in the current stop's timezone

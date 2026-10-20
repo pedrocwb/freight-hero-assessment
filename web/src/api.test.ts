@@ -6,12 +6,10 @@ import {
   buildRequest,
   buildUrl,
   createApi,
-  draftInput,
   errorDetail,
   inboundMessage,
   runCost,
   type Fetcher,
-  type SopDraft,
 } from "./api";
 
 interface Call {
@@ -118,17 +116,6 @@ describe("api client", () => {
     );
   });
 
-  it("normalizes the eval summary it gets back", async () => {
-    const { calls, api } = recorder(200, {
-      suite: "core",
-      scenarios: [{ scenario_id: "a", passed: true, pass_k: 1, failures: [], cost_usd: 0.01 }],
-    });
-    const summary = await api.runEvals({ suite: "core", mode: "replay", k: 1, scenario: null });
-    expect(bodyOf(calls[0])).toEqual({ suite: "core", mode: "replay", k: 1, scenario: null });
-    expect(summary.passed).toBe(1);
-    expect(summary.scenarios[0]?.scenarioId).toBe("a");
-  });
-
   it("raises the API's detail as the error message", async () => {
     const { api } = recorder(400, { detail: "invalid load metadata: 'stops'" });
     await expect(api.createLoad({ load_id: "x" })).rejects.toMatchObject({
@@ -153,8 +140,8 @@ const formOf = (call: Call | undefined) => call?.init?.body as FormData;
 describe("multipart requests", () => {
   it("sends a form as it is, without a JSON content type, so the browser sets the boundary", () => {
     const form = new FormData();
-    form.append("file", new Blob(["%PDF"], { type: "application/pdf" }), "acme_sop.pdf");
-    const { init } = buildRequest("/api", { method: "POST", path: "/brokers/acme/sops", form });
+    form.append("file", new Blob(["%PDF"], { type: "application/pdf" }), "pod_clean.pdf");
+    const { init } = buildRequest("/api", { method: "POST", path: "/loads/481207/attachments", form });
     expect(init.body).toBe(form);
     expect(init.headers).toEqual({ Accept: "application/json" });
   });
@@ -194,74 +181,9 @@ describe("multipart requests", () => {
     expect(result.document_id).toBe("d1");
   });
 
-  it("uploads one SOP file per request under the broker", async () => {
-    const { calls, api } = recorder(200, { document_id: "sd1", pages: 6, status: "compiled" });
-    await api.uploadSop("acme", new File(["%PDF"], "acme_sop.pdf", { type: "application/pdf" }));
-    expect(calls[0]?.url).toBe("/api/brokers/acme/sops");
-    expect((formOf(calls[0]).get("file") as File).name).toBe("acme_sop.pdf");
-  });
 });
 
-describe("brokers (card BRK)", () => {
-  it("lists, reads and creates brokers", async () => {
-    const { calls, api } = recorder(200, []);
-    await api.listBrokers();
-    await api.getBroker("acme west");
-    await api.createBroker({ broker_id: "acme", name: "Acme Freight" });
-    expect(calls.map((c) => `${c.init?.method} ${c.url}`)).toEqual([
-      "GET /api/brokers",
-      "GET /api/brokers/acme%20west",
-      "POST /api/brokers",
-    ]);
-    expect(bodyOf(calls[2])).toEqual({ broker_id: "acme", name: "Acme Freight" });
-  });
-
-  it("reads the versions and sets the rollout", async () => {
-    const { calls, api } = recorder(200, {});
-    await api.brokerVersions("acme");
-    await api.setRollout("acme", { percent: 0, previous_version: 1 });
-    expect(calls[0]?.url).toBe("/api/brokers/acme/versions");
-    expect(calls[1]?.url).toBe("/api/brokers/acme/rollout");
-    expect(bodyOf(calls[1])).toEqual({ percent: 0, previous_version: 1 });
-  });
-
-  it("raises a 409 for an unknown previous version with the API's words", async () => {
-    const { api } = recorder(409, { detail: "broker acme has no previous version 7" });
-    await expect(api.setRollout("acme", { percent: 50, previous_version: 7 })).rejects.toMatchObject({ status: 409, detail: "broker acme has no previous version 7" });
-  });
-});
-
-describe("knowledge (card KNW)", () => {
-  it("reads a missing draft as null, and any other error as an error", async () => {
-    expect(await recorder(404, { detail: "no draft" }).api.sopDraft("acme")).toBeNull();
-    await expect(recorder(500, { detail: "boom" }).api.sopDraft("acme")).rejects.toBeInstanceOf(ApiError);
-  });
-
-  it("saves the reviewed draft and publishes it, as a canary when a percent is given", async () => {
-    const { calls, api } = recorder(200, { version: "abc", config_version: 3, lint: [] });
-    const draft: SopDraft = {
-      broker_id: "acme",
-      sections: [],
-      proposed_intents: [],
-      proposed_requirements: [],
-      proposed_obligations: [],
-      document_ids: ["sd1"],
-      updated_at: "t",
-    };
-    await api.saveSopDraft("acme", draftInput({ ...draft, broker_id: "acme" }));
-    await api.publishSop("acme", { percent: 20 });
-    await api.publishSop("acme");
-    await api.sopVersions("acme");
-    expect(calls[0]?.init?.method).toBe("PUT");
-    expect(calls[0]?.url).toBe("/api/brokers/acme/sops/draft");
-    // SopDraftIn forbids extra fields: no broker_id, document_ids or updated_at.
-    expect(bodyOf(calls[0])).toEqual({ sections: [], proposed_intents: [], proposed_requirements: [], proposed_obligations: [] });
-    expect(calls[1]?.url).toBe("/api/brokers/acme/sops/publish");
-    expect(bodyOf(calls[1])).toEqual({ percent: 20 });
-    expect(bodyOf(calls[2])).toEqual({ percent: 100 });
-    expect(calls[3]?.url).toBe("/api/brokers/acme/sops/versions");
-  });
-
+describe("SOP search", () => {
   it("searches the sections a broker's loads see", async () => {
     const { calls, api } = recorder(200, []);
     await api.searchSops({ brokerId: "keystone", loadTypes: ["reefer"], q: " trailer temperature seal ", k: 5 });
@@ -269,7 +191,7 @@ describe("knowledge (card KNW)", () => {
   });
 });
 
-describe("documents and broker evals (cards DOC, EVK)", () => {
+describe("documents", () => {
   it("reads a load's documents and one document", async () => {
     const { calls, api } = recorder(200, []);
     await api.loadDocuments("730118");
@@ -278,20 +200,6 @@ describe("documents and broker evals (cards DOC, EVK)", () => {
     expect(calls[1]?.url).toBe("/api/documents/doc_pod_1");
   });
 
-  it("runs a broker's suite with a cost cap and keeps the LangSmith link", async () => {
-    const { calls, api } = recorder(200, {
-      suite: "core",
-      mode: "live",
-      k: 1,
-      langsmith_url: "https://smith.langchain.com/o/x/datasets/y/compare",
-      scenarios: [{ scenario_id: "a", passed: true, failures: [], cost_usd: 0.002 }],
-    });
-    const summary = await api.runBrokerEvals("acme", { suite: "core", mode: "live", k: 1, cost_cap_usd: 0.1 });
-    expect(calls[0]?.url).toBe("/api/brokers/acme/evals/run");
-    expect(bodyOf(calls[0])).toEqual({ suite: "core", mode: "live", k: 1, cost_cap_usd: 0.1 });
-    expect(summary.langsmithUrl).toBe("https://smith.langchain.com/o/x/datasets/y/compare");
-    expect(summary.passed).toBe(1);
-  });
 });
 
 describe("errorDetail", () => {

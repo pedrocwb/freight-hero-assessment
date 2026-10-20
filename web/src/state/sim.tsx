@@ -152,13 +152,13 @@ export function SimProvider({ children }: { children: ReactNode }) {
           break;
         case "load":
           setStateRaw((s) => (s ? { ...s, loads: upsert(s.loads, event.data) } : s));
-          invalidate("snapshot", "health");
+          invalidate("snapshot");
           break;
         case "run":
           invalidate(...ALL_TOPICS);
           break;
         case "outbox":
-          invalidate("conversation", "tms", "tasks", "snapshot", "health");
+          invalidate("conversation", "tms", "tasks", "snapshot");
           break;
       }
     },

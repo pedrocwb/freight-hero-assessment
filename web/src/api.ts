@@ -9,12 +9,7 @@
  *
  * `createApi` takes the fetch function, so tests check the requests it builds without a
  * network.
- *
- * The wave 3 shapes (brokers, the knowledge base, documents, broker evals, the agent's
- * trajectory) name the backend card that serves them: BRK, KNW, DOC, EVK, AGT.
  */
-
-import { normalizeEvalSummary, type EvalSummary } from "./lib/evals";
 
 // --- domain shapes -------------------------------------------------------------------
 
@@ -362,331 +357,7 @@ export interface ResolvedSop {
   catalog: CatalogEntry[];
 }
 
-export interface EvalScenario {
-  id: string;
-  title: string;
-  suite: string;
-  tags: string[];
-}
-
-/** `live` only on a broker's suite run, with a cost cap. */
-export type EvalMode = "scripted" | "replay" | "live";
-
-export interface EvalRunRequest {
-  suite: string;
-  mode: Exclude<EvalMode, "live">;
-  k: number;
-  scenario: string | null;
-}
-
-export type HealthLevel = "ok" | "warn" | "critical";
-
-export interface HealthReason {
-  check: string;
-  level: HealthLevel;
-  message: string;
-}
-
-export interface QueueMetrics {
-  queued: number;
-  oldest_event_id: string | null;
-  oldest_age_s: number | null;
-  sla_s: number;
-  over_sla: boolean;
-  dead_letters: number;
-}
-
-export interface ModelErrors {
-  model: string;
-  calls: number;
-  errors: number;
-  error_rate: number;
-}
-
-export interface RunMetrics {
-  total: number;
-  finished: number;
-  duration_p50_s: number | null;
-  duration_p95_s: number | null;
-  status_counts: Partial<Record<RunStatus, number>>;
-  status_rates: Partial<Record<RunStatus, number>>;
-  planned: number;
-  blocked_runs: number;
-  high_severity_runs: number;
-  block_rate: number;
-  models: ModelErrors[];
-}
-
-export interface LoadCost {
-  load_id: string;
-  runs: number;
-  cost_usd: number;
-  budget_used: number;
-  over_warning: boolean;
-  over_budget: boolean;
-}
-
-export interface CostMetrics {
-  budget_usd: number;
-  total_cost_usd: number;
-  avg_cost_per_run_usd: number;
-  loads: LoadCost[];
-}
-
-export interface OutboxMetrics {
-  pending: number;
-  failed: number;
-  stuck: number;
-  oldest_pending_age_s: number | null;
-  failed_ids: string[];
-  stuck_ids: string[];
-}
-
-export interface Health {
-  status: HealthLevel;
-  reasons: HealthReason[];
-  queue?: QueueMetrics | null;
-  runs?: RunMetrics | null;
-  cost?: CostMetrics | null;
-  outbox?: OutboxMetrics | null;
-  settings?: Record<string, string> | null;
-}
-
-// --- brokers as data (card BRK: domain/broker.py, api/routes/brokers.py) ----------------
-
-export type EscalationTarget = "dispatcher_email" | "hero_task" | "broker_slack";
-export const ESCALATION_TARGETS: readonly EscalationTarget[] = ["dispatcher_email", "hero_task", "broker_slack"];
-
-/** One intent of a broker's catalog. System intents (set by code, not the gate) are read-only. */
-export interface IntentDef {
-  intent_id: string;
-  title: string;
-  description: string;
-  examples: string[];
-  priority: number;
-  must_act: boolean;
-  noop_eligible: boolean;
-  system: boolean;
-}
-
-/** What the agent can owe on a load; `follow_up_intent` "" means `<kind>_follow_up_due`. */
-export interface ObligationDef {
-  kind: string;
-  title: string;
-  description: string;
-  follow_up_minutes: number;
-  max_attempts: number;
-  follow_up_intent: string;
-  on_exhausted: EscalationTarget[];
-}
-
-export type FieldKind = "text" | "number" | "date" | "datetime" | "bool";
-export type FieldCheckKind =
-  | "none"
-  | "po_number"
-  | "mc_number"
-  | "stop_name"
-  | "date_in_window"
-  | "seal_number"
-  | "signature";
-
-export interface FieldDef {
-  name: string;
-  description: string;
-  kind: FieldKind;
-  check: FieldCheckKind;
-}
-
-export interface DocumentTypeDef {
-  type_id: string;
-  title: string;
-  description: string;
-  fields: FieldDef[];
-}
-
-/** A document the broker expects at a stage; it may open an obligation with a timer. */
-export interface DocumentRequirement {
-  type_id: string;
-  at_stage: Stage;
-  within_minutes: number | null;
-  opens_obligation: string | null;
-}
-
-export interface DeferralPolicy {
-  max_minutes: number;
-  max_per_obligation: number;
-  grace_minutes: number;
-}
-
-export interface ValidationConfig {
-  sms_max_per_window: number;
-  sms_window_minutes: number;
-  deferral: DeferralPolicy;
-  /** Attempt cap per obligation kind; the broker fills it from `ObligationDef.max_attempts`. */
-  max_attempts: Record<string, number>;
-}
-
-/** The validator's limits plus the agent loop's budget; `max_steps: 0` is the single-plan mode. */
-export interface BrokerLimits {
-  validation: ValidationConfig;
-  max_steps: number;
-  max_cost_usd: number;
-  max_rejections: number;
-}
-
-/** `percent` of the loads run on the current config version, the rest on `previous_version`. */
-export interface Rollout {
-  percent: number;
-  previous_version: number | null;
-}
-
-export interface Broker {
-  broker_id: string;
-  name: string;
-  triage: boolean;
-  intents: IntentDef[];
-  obligations: ObligationDef[];
-  document_types: DocumentTypeDef[];
-  documents: DocumentRequirement[];
-  limits: BrokerLimits;
-  sop_version: string | null;
-  config_version: number;
-  rollout: Rollout;
-}
-
-/** `BrokerView`: the broker's current version, as stored. */
-export type BrokerView = Broker;
-
-/**
- * `BrokerIn`: `POST /api/brokers` creates a copy of the standard catalog, then these
- * fields (`broker_id` and `name` required); `PUT /api/brokers/{id}` saves a new
- * `config_version`. A field left out keeps its value.
- */
-export type BrokerIn = Partial<
-  Pick<Broker, "broker_id" | "name" | "triage" | "intents" | "obligations" | "document_types" | "documents" | "limits">
->;
-
-/** The body of `POST /api/brokers`. */
-export type BrokerCreate = BrokerIn & { broker_id: string; name: string };
-
-/** `BrokerVersionView`: one saved version of a broker, with its catalog's ids. */
-export interface BrokerVersionView {
-  config_version: number;
-  name: string;
-  sop_version: string | null;
-  rollout: Rollout;
-  /** The version `GET /api/brokers/{id}` returns. */
-  current: boolean;
-  intents: string[];
-  obligations: string[];
-}
-
-/** `RolloutIn`: 0 is a rollback; `previous_version` left out keeps the broker's. 409 for a version never saved. */
-export interface RolloutIn {
-  percent: number;
-  previous_version?: number | null;
-}
-
-export const STANDARD_BROKER_ID = "standard";
-
-// --- knowledge base (card KNW: api/routes/knowledge.py) ---------------------------------
-
-export type MergeMode = "replace" | "extend";
-
-/** Where a draft section came from: an uploaded SOP document and its pages. */
-export interface SourceRef {
-  document_id: string;
-  pages: number[];
-}
-
-/** A compiled section under review; `proposed` until a person accepts it. */
-export interface DraftSection {
-  section_id: string;
-  layer?: "standard" | "client" | "load_type";
-  title: string;
-  description: string;
-  /** The `applies` intents; empty means every intent. */
-  intents: Intent[];
-  /** The `applies` stages; empty means every stage. */
-  stages: Stage[];
-  mode: MergeMode;
-  body: string;
-  load_type?: string | null;
-  source: SourceRef | null;
-  proposed: boolean;
-}
-
-/** A new intent the compiler read in the SOP; `evidence` quotes the text, `accepted` is null until a person decides. */
-export interface ProposedIntent extends IntentDef {
-  evidence: string;
-  accepted: boolean | null;
-}
-
-/** `domain.sop.SopDocument` without its blob reference. */
-export interface SopDocumentView {
-  document_id: string;
-  broker_id: string | null;
-  filename: string;
-  content_type: string;
-  pages: number;
-  sha256: string;
-  uploaded_at: string;
-}
-
-/**
- * The broker's one draft. Besides sections, the compiler proposes catalog changes the
- * SOP implies: intents, document requirements and obligations; publishing applies them.
- */
-export interface SopDraft {
-  broker_id: string | null;
-  sections: DraftSection[];
-  proposed_intents: ProposedIntent[];
-  proposed_requirements: DocumentRequirement[];
-  proposed_obligations: ObligationDef[];
-  document_ids: string[];
-  updated_at: string;
-}
-
-/**
- * `SopDraftView`: the draft and the lint problems a publish would report now.
- * `documents` is not in the C0 schema (asked of card KNW, for the file names of the
- * sources); the page works without it.
- */
-export type SopDraftView = SopDraft & { lint: string[]; documents?: SopDocumentView[] };
-
-/** `SopDraftIn` (PUT): the edited draft, as a whole. */
-export type SopDraftIn = Pick<SopDraft, "sections" | "proposed_intents" | "proposed_requirements" | "proposed_obligations">;
-
-/** `SopUploadResult` of `POST /api/brokers/{id}/sops`. */
-export interface SopUploadResult {
-  document_id: string;
-  pages: number;
-  status: string;
-}
-
-/** `SopPublishIn`: `percent` below 100 starts a canary (default 100). */
-export interface SopPublishIn {
-  percent: number;
-}
-
-export interface SopPublishResult {
-  /** The published SOP version (content hash). */
-  version: string;
-  /** The broker's new config version. */
-  config_version: number;
-  /** Warnings the publish accepted. */
-  lint: string[];
-}
-
-/** `SopVersionView`: one published SOP version. */
-export interface SopVersionView {
-  broker_id: string | null;
-  version: string;
-  published_at: string;
-  published_by: string;
-  section_ids: string[];
-  lint: string[];
-}
+// --- knowledge (api/routes/sops.py) ----------------------------------------------------
 
 /** `SearchHitView`; `score` only orders the hits of one search. */
 export interface SearchHit {
@@ -741,16 +412,6 @@ export interface AttachmentUploadResult {
   attachment_id: string;
   document_id: string;
   event_id: string;
-}
-
-// --- broker evals (card EVK: api/routes/broker_evals.py) --------------------------------
-
-/** `BrokerEvalRunRequest`: a suite on the broker's current version; `cost_cap_usd` stops a live run past it. */
-export interface BrokerEvalRunRequest {
-  suite: string;
-  mode: EvalMode;
-  k: number;
-  cost_cap_usd: number;
 }
 
 // --- ingress ---------------------------------------------------------------------------
@@ -844,36 +505,6 @@ export function attachmentForm(upload: AttachmentUpload): FormData {
   return form;
 }
 
-/** The multipart form of a SOP upload: one file per request. */
-export function sopForm(file: Blob, filename?: string): FormData {
-  const form = new FormData();
-  form.append("file", file, filename ?? (file instanceof File ? file.name : "sop"));
-  return form;
-}
-
-/** Only the fields `PUT /api/brokers/{id}` takes; the API owns versions and the rollout. */
-export function brokerInput(broker: Broker): BrokerIn {
-  return {
-    name: broker.name,
-    triage: broker.triage,
-    intents: broker.intents,
-    obligations: broker.obligations,
-    document_types: broker.document_types,
-    documents: broker.documents,
-    limits: broker.limits,
-  };
-}
-
-/** Only the fields `PUT .../sops/draft` takes. */
-export function draftInput(draft: SopDraft): SopDraftIn {
-  return {
-    sections: draft.sections,
-    proposed_intents: draft.proposed_intents,
-    proposed_requirements: draft.proposed_requirements,
-    proposed_obligations: draft.proposed_obligations ?? [],
-  };
-}
-
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -954,18 +585,7 @@ export function createApi(fetcher: Fetcher, base = "/api") {
     return payload as T;
   }
 
-  /** A 404 read as "there is none yet" (a broker with no SOP draft). */
-  async function orNull<T>(request: Promise<T>): Promise<T | null> {
-    try {
-      return await request;
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return null;
-      throw error;
-    }
-  }
-
   const load = (id: string) => `/loads/${encodeURIComponent(id)}`;
-  const broker = (id: string) => `/brokers/${encodeURIComponent(id)}`;
 
   return {
     streamUrl: `${base}/stream`,
@@ -1047,35 +667,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
         query: { q: args.q.trim(), broker_id: args.brokerId, load_types: args.loadTypes, k: args.k },
       }),
 
-    evalScenarios: () => call<EvalScenario[]>({ method: "GET", path: "/evals/scenarios" }),
-    runEvals: async (request: EvalRunRequest): Promise<EvalSummary> =>
-      normalizeEvalSummary(
-        await call<unknown>({ method: "POST", path: "/evals/run", body: request }),
-      ),
-
-    // Card BRK: brokers as data.
-    listBrokers: () => call<BrokerView[]>({ method: "GET", path: "/brokers" }),
-    getBroker: (brokerId: string) => call<BrokerView>({ method: "GET", path: broker(brokerId) }),
-    createBroker: (body: BrokerCreate) => call<BrokerView>({ method: "POST", path: "/brokers", body }),
-    updateBroker: (brokerId: string, body: BrokerIn) =>
-      call<BrokerView>({ method: "PUT", path: broker(brokerId), body }),
-    brokerVersions: (brokerId: string) =>
-      call<BrokerVersionView[]>({ method: "GET", path: `${broker(brokerId)}/versions` }),
-    setRollout: (brokerId: string, body: RolloutIn) =>
-      call<BrokerView>({ method: "POST", path: `${broker(brokerId)}/rollout`, body }),
-
-    // Card KNW: a broker's SOP, from upload to a published version.
-    uploadSop: (brokerId: string, file: Blob, filename?: string) =>
-      call<SopUploadResult>({ method: "POST", path: `${broker(brokerId)}/sops`, form: sopForm(file, filename) }),
-    sopDraft: (brokerId: string) =>
-      orNull(call<SopDraftView>({ method: "GET", path: `${broker(brokerId)}/sops/draft` })),
-    saveSopDraft: (brokerId: string, body: SopDraftIn) =>
-      call<SopDraftView>({ method: "PUT", path: `${broker(brokerId)}/sops/draft`, body }),
-    publishSop: (brokerId: string, body: SopPublishIn = { percent: 100 }) =>
-      call<SopPublishResult>({ method: "POST", path: `${broker(brokerId)}/sops/publish`, body }),
-    sopVersions: (brokerId: string) =>
-      call<SopVersionView[]>({ method: "GET", path: `${broker(brokerId)}/sops/versions` }),
-
     // Card DOC: attachments and the documents the pipeline made of them.
     uploadAttachment: (loadId: string, upload: AttachmentUpload, latencySeconds?: number) =>
       call<AttachmentUploadResult>({
@@ -1088,14 +679,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
       call<DocumentView[]>({ method: "GET", path: `${load(loadId)}/documents` }),
     getDocument: (documentId: string) =>
       call<DocumentView>({ method: "GET", path: `/documents/${encodeURIComponent(documentId)}` }),
-
-    // Card EVK: a suite on one broker's config and published SOP.
-    runBrokerEvals: async (brokerId: string, request: BrokerEvalRunRequest): Promise<EvalSummary> =>
-      normalizeEvalSummary(
-        await call<unknown>({ method: "POST", path: `${broker(brokerId)}/evals/run`, body: request }),
-      ),
-
-    health: () => call<Health>({ method: "GET", path: "/health" }),
   };
 }
 

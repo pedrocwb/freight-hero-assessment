@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
-import type { DelayRisk, HealthLevel, RunStatus } from "../api";
+import type { DelayRisk, RunStatus } from "../api";
 import { useToasts } from "../state/toasts";
 
 export function ScreenHead(props: { title: string; lede?: ReactNode; actions?: ReactNode }) {
@@ -90,12 +90,6 @@ export function RiskChip({ risk }: { risk: DelayRisk }) {
       {`${risk.charAt(0).toUpperCase()}${risk.slice(1)} risk`}
     </span>
   );
-}
-
-const LEVEL_LABEL: Record<HealthLevel, string> = { ok: "Healthy", warn: "Warning", critical: "Critical" };
-
-export function LevelChip({ level }: { level: HealthLevel }) {
-  return <span className={clsx("chip", `chip--level-${level}`)}>{LEVEL_LABEL[level] ?? level}</span>;
 }
 
 export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" | "agent" | "proposed" }) {
