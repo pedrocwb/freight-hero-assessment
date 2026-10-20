@@ -1,19 +1,19 @@
-"""The agent's action vocabulary and the plan the decide step returns.
+"""The agent's action vocabulary, the plan, and the agent's final answer.
 
 The model proposes; code disposes. Nothing here has side effects. Ledger
 changes are expressed by obligation *kind* and timers in *minutes from now*
 so the model never handles ids or computes absolute times. A kind is a string id of
 the broker's obligation catalog (`domain.broker.ObligationDef`).
 
-An outbound message that asks for something names the obligation it opens or counts
-in `requests` (`send_sms(requests="pod")`). `purpose: eta_request` is the older
-spelling of the same thing and still means `requests: eta_request`.
+An outbound message (SMS or email) that asks for something names the obligation it
+opens or counts in `requests` (`send_sms(requests="pod")`). `purpose: eta_request` is
+the older spelling of the same thing and still means `requests: eta_request`.
 """
 
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.load import Stage
@@ -156,7 +156,7 @@ OUTBOUND_TYPES = frozenset({"send_sms", "send_email", "post_broker_slack"})
 
 
 class Plan(DomainModel):
-    """Structured output of the decide model. An empty plan is a valid no-op.
+    """What the agent proposes, in order. An empty plan is a valid no-op.
 
     The rationale comes first: small models fill fields in schema order, and given the
     actions first they returned an empty list, then a rationale naming the right actions.
@@ -175,15 +175,29 @@ class Plan(DomainModel):
     )
 
 
+FINISH = "finish"
+
+
 class AgentOutcome(Plan):
     """The agent's final answer: a plan, plus how it read the event.
 
+    The model gives it by calling `finish` (the schema's title names the answer tool).
     `actions` given here are validated like a plan's (the 22 core scenarios answer this
-    way); actions the agent staged through its tools are recomputed from the transcript
-    by the agent node. `intent` labels the event with a catalog id when the agent read it
-    differently from the gate. `no_procedure` says no SOP section covers the event.
+    way, and with no action tools it is the whole plan); actions the agent staged through
+    its tools are recomputed from the transcript by the agent node. `intent` labels the
+    event with a catalog id when the agent read it differently from the gate.
+    `no_procedure` says no SOP section covers the event.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid", title=FINISH)
+
+    actions: tuple[Action, ...] = Field(
+        default=(),
+        description=(
+            "Every action of the plan that you did not stage with an action tool, in order. "
+            "With no action tools, every action the rationale names. Empty only when none."
+        ),
+    )
     intent: str | None = Field(
         default=None, description="The intent id of the event, when it differs from the gate"
     )
