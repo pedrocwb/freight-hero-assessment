@@ -10,7 +10,7 @@ change only with every user of them.
 """
 
 from datetime import datetime
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -18,13 +18,8 @@ from freight_agent.application.contracts import InboundMessage, LocationPing
 from freight_agent.domain.documents import Document, DocumentStatus, FieldCheck
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Channel, DelayRisk, Stage
-from freight_agent.domain.outbox import OutboxStatus
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import ResolvedSection, SearchHit
-from freight_agent.settings import LlmMode
-
-ConversationChannel = Literal["sms", "email", "slack"]
-TaskStatus = Literal["open", "done"]
 
 
 class _Body(BaseModel):
@@ -38,7 +33,6 @@ class ResetRequest(_Body):
     start: datetime | None = Field(
         default=None, description="Default 2026-10-13T06:55 in the timezone; no offset: local"
     )
-    llm_mode: LlmMode | None = Field(default=None, description="Default: the LLM_MODE setting")
     timezone: str | None = Field(default=None, description="IANA name; America/Los_Angeles")
 
 
@@ -64,13 +58,19 @@ class LoadSummary(_Body):
     cost_usd: float
 
 
+class LangSmithState(_Body):
+    enabled: bool = Field(description="Runs are traced to LangSmith")
+    project_url: str | None = Field(description="The tracing project's page, once known")
+
+
 class SimState(_Body):
     now: datetime
     timezone: str
     next_timer_due_at: datetime | None
-    llm_mode: str
     queue_size: int
     loads: tuple[LoadSummary, ...]
+    langsmith: LangSmithState
+    model_ready: bool = Field(description="False when OPENROUTER_API_KEY is not set")
 
 
 class RunView(RunRecord):
@@ -138,40 +138,7 @@ class PingIn(_Body):
         )
 
 
-# --- channels and the Hero console ------------------------------------------------------------
-
-
-class ConversationEntry(_Body):
-    at: datetime
-    direction: Literal["in", "out"]
-    channel: ConversationChannel
-    who: str = Field(description='The sender\'s contact id, or "agent"')
-    role: str = Field(description="driver, dispatcher, broker, agent or unknown")
-    text: str
-    subject: str | None = None
-    status: OutboxStatus | None = Field(default=None, description="Delivery, outbound only")
-    to: tuple[str, ...] | None = Field(default=None, description="Recipients, SMS and email out")
-
-
-class TmsNote(_Body):
-    at: datetime
-    text: str
-
-
-class HeroTask(_Body):
-    task_id: str = Field(description="The outbox id of the agent's create_hero_task")
-    load_id: str
-    title: str
-    description: str
-    urgent: bool
-    created_at: datetime
-    status: TaskStatus
-    done_at: datetime | None = None
-    note: str | None = None
-
-
-class CompleteTaskRequest(_Body):
-    note: str | None = None
+# --- fixtures ---------------------------------------------------------------------------------
 
 
 class Fixture(_Body):

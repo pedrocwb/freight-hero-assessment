@@ -1,16 +1,21 @@
 """The simulation service: one in-process simulation that people drive through the API.
 
 It holds the current `Session` (a runtime on a virtual clock with recording gateways and
-an in-memory store, plus the platform state that lives and dies with it, such as Hero
-completions) and an `asyncio.Lock` that serializes everything that moves the clock or
-feeds the agent. Reads take no lock: each one reads the store through its own unit of
-work, which the store serializes on its own.
+an in-memory store) and an `asyncio.Lock` that serializes everything that moves the clock
+or feeds the agent. Reads take no lock: each one reads the store through its own unit of
+work, which the store serializes on its own. While a scenario plays (`api.scenarios`)
+every write from a client is refused (409): another client would break the run.
 
-Time moves the way the eval runner moves it (`evalkit.runner`, `docs/decisions.md`):
+Time moves the way the scenario player moves it (`evalkit.runner`, `docs/decisions.md`):
 advancing stops at every timer due on the way and ticks there with zero latency; an
 ingested message or ping runs `latency_seconds` after it, on one tick. After each change
 the new runs, the new or updated outbox items, the changed load summaries and the clock
 are published on the event bus, in that order.
+
+The model is always the live one (`bootstrap.platform_llm`), counted per session so a
+scenario played on the platform (`api.scenarios`) checks its model calls as an eval
+does. Without `OPENROUTER_API_KEY` the platform still starts and says so
+(`SimState.model_ready`); a run that needs the model then escalates to a Hero.
 """
 
 import asyncio
@@ -24,15 +29,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.api import views
 from freight_agent.api.bus import EventBus, sse_message
 from freight_agent.api.errors import BadRequest, Conflict, NotFound
 from freight_agent.api.schemas import (
     AdvanceRequest,
     AttachmentUploadResult,
-    ConversationChannel,
-    ConversationEntry,
-    HeroTask,
+    LangSmithState,
     LoadSummary,
     MessageIn,
     PingIn,
@@ -40,8 +44,6 @@ from freight_agent.api.schemas import (
     RunView,
     SimState,
     StepResult,
-    TaskStatus,
-    TmsNote,
 )
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
 from freight_agent.bootstrap import (
@@ -49,7 +51,9 @@ from freight_agent.bootstrap import (
     Simulation,
     build_knowledge,
     build_runtime,
+    build_tracer,
     build_uow_factory,
+    platform_llm,
 )
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Attachment
@@ -57,11 +61,15 @@ from freight_agent.domain.load import Channel, Load
 from freight_agent.domain.outbox import OutboxStatus
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import later
+from freight_agent.evalkit.counting import CountingModel
+from freight_agent.evalkit.results import StepObservation
+from freight_agent.evalkit.runner import ScenarioPlayer
 from freight_agent.ports.documents import BlobStore
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.ports.repositories import UnitOfWorkFactory
-from freight_agent.settings import LlmMode, MissingSetting, Settings
+from freight_agent.ports.tracing import Tracer
+from freight_agent.settings import MissingSetting, Settings
 
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 # The assignment's morning: five minutes before the 07:00 ping.
@@ -80,10 +88,10 @@ class Session:
     simulation: Simulation
     uow: UnitOfWorkFactory  # the runtime's store, for the read side the facade lacks
     timezone: ZoneInfo
-    llm_mode: str
+    model: CountingModel  # the runtime's model, counted (a scenario checks its calls)
+    inner_model: LanguageModel  # the same model uncounted, for the judge
     knowledge: SopIndex  # the SOP index the session's runs read
     blobs: BlobStore  # the session's attachment bytes, gone with a reset
-    completions: dict[str, views.Completion] = field(default_factory=dict)
     published_outbox: dict[str, OutboxStatus] = field(default_factory=dict)
     published_loads: dict[str, LoadSummary] = field(default_factory=dict)
 
@@ -118,44 +126,38 @@ class AttachmentUpload:
     occurred_at: datetime | None = None
 
 
-def _interactive_mode(settings: Settings) -> LlmMode:
-    """`LLM_MODE`, whatever keys are present: the live model spends money, so it is used
-    only when asked for (`LLM_MODE=live`, or `llm_mode` on reset). Replay answers only
-    the prompts of recorded eval scenarios."""
-    return settings.llm_mode
-
-
 def open_session(
     settings: Settings,
     *,
     start: datetime,
     timezone: ZoneInfo,
-    llm_mode: LlmMode | None = None,
     llm: LanguageModel | None = None,
+    tracer: Tracer | None = None,
 ) -> Session:
     """A fresh simulation, as `bootstrap.build_simulation` builds it, keeping its store.
 
     The platform runs on an in-memory store, so a reset really starts over; attachment
-    bytes live in memory with it. The model comes
-    from `llm_mode` (default: the setting) unless `llm` is given, which tests use to
-    script the agent.
+    bytes live in memory with it. The model is the live one (`platform_llm`, on the
+    session's clock for its circuit breakers) unless `llm` is given, which tests use to
+    play the agent's rounds.
     """
-    mode = llm_mode or _interactive_mode(settings)
-    effective = settings.model_copy(update={"llm_mode": mode})
-    persistence = build_uow_factory(effective)
+    persistence = build_uow_factory(settings)
     clock = VirtualClock(start.astimezone(timezone))
     gateways = RecordingGateways()
     blobs = MemoryBlobStore()
     try:
-        knowledge = build_knowledge(effective)
+        inner = llm if llm is not None else platform_llm(settings, clock=clock)
+        model = CountingModel(inner)
+        knowledge = build_knowledge(settings)
         runtime = build_runtime(
-            effective,
+            settings,
             clock=clock,
             gateways=gateways.as_gateways(),
-            llm=llm,
+            llm=model,
             persistence=persistence,
             knowledge=knowledge,
             blobs=blobs,
+            tracer=tracer,
         )
     except (MissingSetting, BootstrapError, ValueError) as exc:
         raise BadRequest(str(exc)) from exc
@@ -163,7 +165,8 @@ def open_session(
         simulation=Simulation(runtime=runtime, clock=clock, gateways=gateways),
         uow=persistence,
         timezone=timezone,
-        llm_mode=mode,
+        model=model,
+        inner_model=inner,
         knowledge=knowledge,
         blobs=blobs,
     )
@@ -186,7 +189,17 @@ class SimulationService:
         self._llm = llm
         self.bus = bus or EventBus()
         self._lock = asyncio.Lock()
+        self._tracer = build_tracer(settings)
         self._session = self._open(ResetRequest())
+        self.playing: str | None = None  # the scenario playing (`api.scenarios`), if any
+
+    def _writable(self) -> None:
+        """A client's write while a scenario plays would break the run: refused."""
+        if self.playing is not None:
+            raise Conflict(
+                f"the scenario {self.playing} is playing: wait for it to finish "
+                "(GET /api/scenarios/run)"
+            )
 
     @property
     def settings(self) -> Settings:
@@ -207,18 +220,23 @@ class SimulationService:
     def blobs(self) -> BlobStore:
         return self._session.blobs
 
+    @property
+    def session(self) -> Session:
+        return self._session
+
     def _open(self, request: ResetRequest) -> Session:
         timezone = zone(request.timezone or DEFAULT_TIMEZONE)
         start = request.start or DEFAULT_START
         start = start.replace(tzinfo=timezone) if start.tzinfo is None else start
         return open_session(
-            self._settings, start=start, timezone=timezone, llm_mode=request.llm_mode, llm=self._llm
+            self._settings, start=start, timezone=timezone, llm=self._llm, tracer=self._tracer
         )
 
     # --- simulation -----------------------------------------------------------------------
 
     async def reset(self, request: ResetRequest) -> SimState:
         """A fresh simulation; the old one stays if the new one cannot be built."""
+        self._writable()
         async with self._lock:
             self._session = self._open(request)
             return await self._publish(self._session, ())
@@ -228,6 +246,7 @@ class SimulationService:
         return await self._state(session, await self._snapshots(session))
 
     async def advance(self, request: AdvanceRequest) -> StepResult:
+        self._writable()
         async with self._lock:
             session = self._session
             now = session.now()
@@ -245,11 +264,37 @@ class SimulationService:
         return StepResult(state=state, runs=tuple(RunView.of(r) for r in runs))
 
     async def tick(self) -> StepResult:
+        self._writable()
         async with self._lock:
             session = self._session
             runs = await session.simulation.runtime.tick()
             state = await self._publish(session, runs)
         return StepResult(state=state, runs=tuple(RunView.of(r) for r in runs))
+
+    # --- scenarios (api.scenarios) --------------------------------------------------------
+
+    async def open_scenario(self, start: datetime, timezone: ZoneInfo) -> Session:
+        """A fresh simulation whose clock starts at a scenario's start, in its timezone."""
+        async with self._lock:
+            self._session = open_session(
+                self._settings, start=start, timezone=timezone, llm=self._llm, tracer=self._tracer
+            )
+            await self._publish(self._session, ())
+            return self._session
+
+    async def start_scenario(self, session: Session, player: ScenarioPlayer) -> None:
+        async with self._lock:
+            await player.start()
+            await self._publish(session, ())
+
+    async def play_step(
+        self, session: Session, player: ScenarioPlayer, index: int
+    ) -> StepObservation:
+        """One step of a scenario, then what changed goes out on the bus, as for any input."""
+        async with self._lock:
+            observation = await player.play(index)
+            await self._publish(session, observation.runs)
+        return observation
 
     async def _run_timers_until(self, session: Session, target: datetime) -> list[RunRecord]:
         """Stop at every pending timer due by `target`, in due order, and tick there; then
@@ -271,6 +316,7 @@ class SimulationService:
     # --- loads ----------------------------------------------------------------------------
 
     async def create_load(self, metadata: Mapping[str, Any]) -> LoadSummary:
+        self._writable()
         load = Load.from_metadata(metadata)  # DomainError: a 400 with the reason
         async with self._lock:
             session = self._session
@@ -283,22 +329,11 @@ class SimulationService:
             await self._publish(session, ())
         return views.load_summary(await self.snapshot(load.load_id))
 
-    async def loads(self) -> list[LoadSummary]:
-        return [views.load_summary(s) for s in await self._snapshots(self._session)]
-
     async def snapshot(self, load_id: str) -> LoadSnapshot:
         try:
             return await self._session.simulation.runtime.snapshot(load_id)
         except DomainError as exc:
             raise NotFound(f"unknown load {load_id!r}") from exc
-
-    async def conversation(
-        self, load_id: str, channel: ConversationChannel | None
-    ) -> list[ConversationEntry]:
-        return views.conversation(await self.snapshot(load_id), channel)
-
-    async def tms(self, load_id: str) -> list[TmsNote]:
-        return views.tms_notes(await self.snapshot(load_id))
 
     async def runs(self, load_id: str) -> list[RunView]:
         return [RunView.of(run) for run in (await self.snapshot(load_id)).runs]
@@ -308,6 +343,7 @@ class SimulationService:
     async def ingest_message(self, message: MessageIn, latency_s: float) -> IngestResult:
         """A redelivered message (a message id already logged) changes nothing: the
         runtime reports it as a duplicate, and the clock neither moves nor ticks."""
+        self._writable()
         async with self._lock:
             session = self._session
             await self._require_load(session, message.load_id)
@@ -325,6 +361,7 @@ class SimulationService:
     async def ingest_ping(self, ping: PingIn, latency_s: float) -> IngestResult:
         """A redelivered ping (an id the load's risk tracker remembers) changes nothing,
         the clock included."""
+        self._writable()
         async with self._lock:
             session = self._session
             await self._require_load(session, ping.load_id)
@@ -348,6 +385,7 @@ class SimulationService:
         document first, then runs the message and the document's `document_processed`
         event. A message id already logged is a 409, before anything is stored.
         """
+        self._writable()
         async with self._lock:
             session = self._session
             await self._require_load(session, upload.load_id)
@@ -409,24 +447,6 @@ class SimulationService:
         if load_id not in await self._load_ids(session):
             raise NotFound(f"unknown load {load_id!r}")
 
-    # --- Hero console ---------------------------------------------------------------------
-
-    async def hero_tasks(self, status: TaskStatus | None) -> list[HeroTask]:
-        session = self._session
-        return views.hero_tasks(await self._snapshots(session), session.completions, status)
-
-    async def complete_task(self, task_id: str, note: str | None) -> HeroTask:
-        """Mark a task done. Completing a done task again changes nothing."""
-        async with self._lock:
-            session = self._session
-            if task_id not in session.completions:
-                if not any(t.task_id == task_id for t in await self.hero_tasks(None)):
-                    raise NotFound(f"unknown Hero task {task_id!r}")
-                session.completions[task_id] = views.Completion(done_at=session.now(), note=note)
-            task = next(t for t in await self.hero_tasks(None) if t.task_id == task_id)
-            self.bus.publish("hero_task", task)
-        return task
-
     # --- stream ---------------------------------------------------------------------------
 
     def stream(self, *, heartbeat_s: float = DEFAULT_HEARTBEAT_S) -> AsyncIterator[str]:
@@ -457,10 +477,17 @@ class SimulationService:
             now=session.now(),
             timezone=session.timezone.key,
             next_timer_due_at=None if due is None else session.local(due),
-            llm_mode=session.llm_mode,
             queue_size=queued,
             loads=tuple(views.load_summary(s) for s in snapshots),
+            langsmith=await self._langsmith(),
+            model_ready=self._settings.model_ready,
         )
+
+    async def _langsmith(self) -> LangSmithState:
+        tracer = self._tracer
+        if not isinstance(tracer, LangSmithLinks):
+            return LangSmithState(enabled=False, project_url=None)
+        return LangSmithState(enabled=True, project_url=await tracer.cached_project_url())
 
     async def _publish(self, session: Session, runs: Sequence[RunRecord]) -> SimState:
         """Publish what changed: runs, new or updated outbox items, changed loads, the clock."""

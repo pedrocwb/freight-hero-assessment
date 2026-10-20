@@ -2,7 +2,8 @@
 
 `create_app` is the only entry point. It builds the simulation from the settings through
 the composition root, so the API runs the same `AgentRuntime` as the CLI and the evals,
-on a virtual clock with recording gateways. Tests pass `llm` to script the agent.
+on a virtual clock with recording gateways, on the live model. Tests pass `llm` to play
+the agent's rounds.
 
 When the web UI has been built (`pnpm build` in `web/`, or the Docker image), the same app
 serves it, so one process on one port is the whole platform. Without a build the app is
@@ -24,6 +25,7 @@ from starlette.types import Scope
 
 from freight_agent.api.errors import install_error_handlers
 from freight_agent.api.routes import ROUTERS
+from freight_agent.api.scenarios import ScenarioRunner
 from freight_agent.api.simulation import DEFAULT_HEARTBEAT_S, SimulationService
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.settings import Settings
@@ -48,7 +50,7 @@ def create_app(
 ) -> FastAPI:
     """The API with a fresh simulation at the default start (`POST /api/sim/reset` moves it).
 
-    `llm` replaces the model of every simulation the app builds, whatever the mode says.
+    `llm` replaces the model of every simulation the app builds.
     `web_dist` is the built UI to serve; None means `settings.web_dist` (`WEB_DIST`, from
     the environment or `.env`). A folder with no `index.html` serves nothing.
     """
@@ -60,6 +62,7 @@ def create_app(
         version="0.1.0",
     )
     app.state.service = SimulationService(settings, llm=llm)
+    app.state.scenarios = ScenarioRunner(app.state.service)
     app.state.heartbeat_s = heartbeat_s
     app.add_middleware(
         CORSMiddleware,

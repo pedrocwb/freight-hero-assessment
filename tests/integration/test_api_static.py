@@ -12,8 +12,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.api.app import create_app
+from tests.fakes import FakeModel
 from tests.integration.test_api_harness import api_settings
 
 pytestmark = pytest.mark.unit
@@ -43,11 +43,9 @@ def dist(tmp_path: Path) -> Path:
 
 
 @asynccontextmanager
-async def client_for(
-    tmp_path: Path, web_dist: Path | None = None
-) -> AsyncIterator[httpx.AsyncClient]:
+async def client_for(web_dist: Path | None = None) -> AsyncIterator[httpx.AsyncClient]:
     """`web_dist=None` leaves the folder to the app: WEB_DIST, else web/dist."""
-    app = create_app(api_settings(tmp_path), llm=ScriptedModel(), web_dist=web_dist)
+    app = create_app(api_settings(), llm=FakeModel(), web_dist=web_dist)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -56,8 +54,8 @@ async def client_for(
 # --- with a bundle ----------------------------------------------------------------------
 
 
-async def test_the_root_serves_the_index(tmp_path: Path, dist: Path) -> None:
-    async with client_for(tmp_path, web_dist=dist) as client:
+async def test_the_root_serves_the_index(dist: Path) -> None:
+    async with client_for(web_dist=dist) as client:
         response = await client.get("/")
 
     assert response.status_code == 200
@@ -65,8 +63,8 @@ async def test_the_root_serves_the_index(tmp_path: Path, dist: Path) -> None:
     assert response.text == INDEX
 
 
-async def test_assets_are_served_under_assets(tmp_path: Path, dist: Path) -> None:
-    async with client_for(tmp_path, web_dist=dist) as client:
+async def test_assets_are_served_under_assets(dist: Path) -> None:
+    async with client_for(web_dist=dist) as client:
         response = await client.get("/assets/index-3f9a1c.js")
 
     assert response.status_code == 200
@@ -75,20 +73,18 @@ async def test_assets_are_served_under_assets(tmp_path: Path, dist: Path) -> Non
 
 
 @pytest.mark.parametrize("path", ["/loads/481207", "/hero", "/evals/core?k=3", "/index"])
-async def test_an_unknown_path_falls_back_to_the_index(
-    tmp_path: Path, dist: Path, path: str
-) -> None:
+async def test_an_unknown_path_falls_back_to_the_index(dist: Path, path: str) -> None:
     """A deep link or a reload of a client-side route opens the app."""
-    async with client_for(tmp_path, web_dist=dist) as client:
+    async with client_for(web_dist=dist) as client:
         response = await client.get(path)
 
     assert response.status_code == 200
     assert response.text == INDEX
 
 
-async def test_a_missing_asset_is_a_404_not_the_index(tmp_path: Path, dist: Path) -> None:
+async def test_a_missing_asset_is_a_404_not_the_index(dist: Path) -> None:
     """A browser asking for an old hashed script must not get HTML back."""
-    async with client_for(tmp_path, web_dist=dist) as client:
+    async with client_for(web_dist=dist) as client:
         response = await client.get("/assets/index-old.js")
 
     assert response.status_code == 404
@@ -98,17 +94,15 @@ async def test_a_missing_asset_is_a_404_not_the_index(tmp_path: Path, dist: Path
 @pytest.mark.parametrize(
     "path", ["/../secret.txt", "/%2e%2e/secret.txt", "/assets/../../secret.txt"]
 )
-async def test_a_file_outside_the_bundle_is_never_served(
-    tmp_path: Path, dist: Path, path: str
-) -> None:
-    async with client_for(tmp_path, web_dist=dist) as client:
+async def test_a_file_outside_the_bundle_is_never_served(dist: Path, path: str) -> None:
+    async with client_for(web_dist=dist) as client:
         response = await client.get(path)
 
     assert SECRET not in response.text
 
 
-async def test_the_page_cannot_be_posted_to(tmp_path: Path, dist: Path) -> None:
-    async with client_for(tmp_path, web_dist=dist) as client:
+async def test_the_page_cannot_be_posted_to(dist: Path) -> None:
+    async with client_for(web_dist=dist) as client:
         response = await client.post("/loads/481207")
 
     assert response.status_code == 405
@@ -135,9 +129,9 @@ async def test_api_paths_answer_as_they_do_without_the_ui(
 ) -> None:
     """Unknown paths, wrong methods and trailing slashes under /api keep their own answer
     (404, 405, a redirect): the UI never swallows an API call."""
-    async with client_for(tmp_path, web_dist=tmp_path / "no-bundle") as client:
+    async with client_for(web_dist=tmp_path / "no-bundle") as client:
         without_ui = await client.request(method, path)
-    async with client_for(tmp_path, web_dist=dist) as client:
+    async with client_for(web_dist=dist) as client:
         with_ui = await client.request(method, path)
 
     assert with_ui.status_code == without_ui.status_code
@@ -146,8 +140,8 @@ async def test_api_paths_answer_as_they_do_without_the_ui(
     assert INDEX not in with_ui.text
 
 
-async def test_the_api_docs_still_answer(tmp_path: Path, dist: Path) -> None:
-    async with client_for(tmp_path, web_dist=dist) as client:
+async def test_the_api_docs_still_answer(dist: Path) -> None:
+    async with client_for(web_dist=dist) as client:
         schema = await client.get("/openapi.json")
 
     assert schema.status_code == 200
@@ -163,7 +157,7 @@ async def test_without_a_bundle_only_the_api_answers(tmp_path: Path, make: str) 
     folder = tmp_path / "dist"
     if make == "empty":
         folder.mkdir()
-    async with client_for(tmp_path, web_dist=folder) as client:
+    async with client_for(web_dist=folder) as client:
         root = await client.get("/")
         deep = await client.get("/loads/481207")
         state = await client.get("/api/sim/state")
@@ -177,11 +171,11 @@ async def test_without_a_bundle_only_the_api_answers(tmp_path: Path, make: str) 
 
 
 async def test_the_bundle_folder_comes_from_web_dist(
-    tmp_path: Path, dist: Path, monkeypatch: pytest.MonkeyPatch
+    dist: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("WEB_DIST", str(dist))
 
-    async with client_for(tmp_path) as client:
+    async with client_for() as client:
         response = await client.get("/")
 
     assert response.text == INDEX
@@ -193,7 +187,7 @@ async def test_the_default_is_web_dist_under_the_working_directory(
     write_bundle(tmp_path / "web" / "dist")
     monkeypatch.chdir(tmp_path)
 
-    async with client_for(tmp_path) as client:
+    async with client_for() as client:
         response = await client.get("/hero")
 
     assert response.text == INDEX

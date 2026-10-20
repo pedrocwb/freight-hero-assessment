@@ -2,23 +2,23 @@
 
 import logging
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import httpx
 import pytest
 
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.api.app import create_app
 from freight_agent.api.simulation import SimulationService
 from freight_agent.domain.actions import CloseObligation, CloseStatus
 from freight_agent.domain.obligations import ObligationKind
+from tests.fakes import FakeModel
 from tests.integration.test_api_harness import (
     ASK_AGAIN,
     DECIDE,
     FOLLOW_UP_IN_30,
     LOAD_ID,
     START,
+    TEST_KEY,
     Api,
     api_settings,
     local,
@@ -30,8 +30,8 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
@@ -39,24 +39,39 @@ async def api(tmp_path: Path) -> AsyncIterator[Api]:
 
 
 async def test_a_new_app_starts_a_simulation_at_the_scenario_start(api: Api) -> None:
+    """No key and no tracing: the UI shows the model as not ready and links no trace."""
     state = await api.get("/api/sim/state")
 
     assert state == {
         "now": START,
         "timezone": "America/Los_Angeles",
         "next_timer_due_at": None,
-        "llm_mode": "scripted",
         "queue_size": 0,
         "loads": [],
+        "langsmith": {"enabled": False, "project_url": None},
+        "model_ready": False,
     }
+
+
+async def test_the_model_is_ready_when_the_openrouter_key_is_set() -> None:
+    async with open_api(openrouter_api_key=TEST_KEY) as api:
+        state = await api.get("/api/sim/state")
+
+    assert state["model_ready"] is True
+    assert state["langsmith"] == {"enabled": False, "project_url": None}
+
+
+async def test_a_blank_openrouter_key_is_no_key() -> None:
+    async with open_api(openrouter_api_key="  ") as api:
+        state = await api.get("/api/sim/state")
+
+    assert state["model_ready"] is False
 
 
 async def test_reset_starts_a_fresh_simulation_at_the_given_time(api: Api) -> None:
     await api.create_load()
 
-    response = await api.client.post(
-        "/api/sim/reset", json={"start": "2026-10-14T08:00:00-07:00", "llm_mode": None}
-    )
+    response = await api.client.post("/api/sim/reset", json={"start": "2026-10-14T08:00:00-07:00"})
 
     assert response.status_code == 200
     state = response.json()
@@ -99,20 +114,31 @@ async def test_reset_with_an_empty_body_uses_the_default_start(api: Api) -> None
     assert response.json()["now"] == START
 
 
-async def test_reset_to_a_mode_that_needs_a_missing_key_keeps_the_old_simulation(
-    tmp_path: Path,
-) -> None:
-    # No injected model here: the mode decides which model the simulation builds.
-    app = create_app(api_settings(tmp_path))
+async def test_reset_takes_no_llm_mode_any_more(api: Api) -> None:
+    """The model is always the live one: a client still sending a mode is told so."""
+    response = await api.client.post("/api/sim/reset", json={"llm_mode": "scripted"})
+
+    assert response.status_code == 422
+
+
+async def test_without_the_key_the_platform_starts_and_a_run_escalates() -> None:
+    """No injected model and no key: the platform builds the model that fails every call
+    with the reason, so a run that needs the model escalates to a Hero, and nothing is
+    called over the network."""
+    app = create_app(api_settings())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/api/sim/reset", json={"llm_mode": "live"})
-        assert response.status_code == 400
-        assert "OPENROUTER_API_KEY" in response.json()["detail"]
-        assert (await client.get("/api/sim/state")).json()["llm_mode"] == "scripted"
+        api = Api(app=app, client=client, model=FakeModel())
+        assert (await api.get("/api/sim/state"))["model_ready"] is False
+        await api.create_load()
 
-        replay = await client.post("/api/sim/reset", json={"llm_mode": "replay"})
-        assert replay.json()["llm_mode"] == "replay"
+        await api.ping("high", local(7, 0))
+
+        [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+        [task] = await api.outbox("hero_task")
+    assert run["status"] == "escalated"
+    assert "OPENROUTER_API_KEY" in (run["error"] or "")
+    assert task["payload"]["urgent"] is True
 
 
 async def test_reset_with_an_unknown_timezone_is_a_400(api: Api) -> None:
@@ -152,15 +178,14 @@ async def test_create_a_load_from_the_fixture(api: Api) -> None:
         "pending_timers": 0,
         "cost_usd": 0.0,
     }
-    assert await api.get("/api/loads") == [summary]
-    assert (await api.get("/api/sim/state"))["loads"] == [summary]
+    assert await api.loads() == [summary]
 
 
 async def test_every_fixture_creates_a_load(api: Api) -> None:
     for name in ("load_481207", "load_481207_keystone", "load_481207_keystone_reefer"):
         await api.create_load(name)
 
-    loads = await api.get("/api/loads")
+    loads = await api.loads()
     assert [(s["broker_id"], s["stage"]) for s in loads] == [
         ("northline", "to_pickup"),
         ("keystone", "to_pickup"),
@@ -194,7 +219,7 @@ async def test_a_load_without_stops_is_a_400_and_is_not_registered(api: Api) -> 
 
     assert response.status_code == 400
     assert response.json() == {"detail": "invalid load metadata: a load needs at least one stop"}
-    assert await api.get("/api/loads") == []
+    assert await api.loads() == []
 
 
 async def test_a_load_id_that_exists_is_a_409(api: Api) -> None:
@@ -211,8 +236,7 @@ async def test_a_load_id_that_exists_is_a_409(api: Api) -> None:
     [
         "/api/loads/nope",
         "/api/loads/nope/runs",
-        "/api/loads/nope/tms",
-        "/api/loads/nope/conversation?channel=sms",
+        "/api/loads/nope/documents",
     ],
 )
 async def test_an_unknown_load_is_a_404(api: Api, path: str) -> None:
@@ -292,11 +316,11 @@ async def test_tick_runs_what_is_due_now(api: Api) -> None:
 
 
 async def test_an_unexpected_error_is_a_500_with_an_error_id_and_no_internals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The exception text can carry a connection string or a prompt: it stays in the
     server log, under the id the client gets to report."""
-    app = create_app(api_settings(tmp_path), llm=ScriptedModel())
+    app = create_app(api_settings(), llm=FakeModel())
 
     async def broken() -> None:
         raise RuntimeError("cannot reach postgresql://agent:hunter2@db/freight")

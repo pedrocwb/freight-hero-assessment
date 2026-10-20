@@ -1,12 +1,12 @@
 """Attachments and documents through the API: upload, pending, tick, processed, the run.
 
 Owner: card W3-DOC. The app runs the real composition root, so the document pipeline
-reads the fixture PDFs with pypdfium2; the scripted model answers the `extract` role
-(and the gate and the agent for the runs that follow).
+reads the fixture PDFs with pypdfium2; the fake model answers the `extract` role (and
+the gate and the agent for the runs that follow). A document is read from its load's
+list (`GET /api/loads/{load_id}/documents`).
 """
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -55,8 +55,8 @@ def clean_pod(**values: str) -> Extraction:
 
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
@@ -85,6 +85,12 @@ async def tick(api: Api) -> list[dict[str, Any]]:
     return response.json()["runs"]
 
 
+async def document(api: Api, document_id: str) -> dict[str, Any]:
+    """One document, as its load's list shows it."""
+    listed = await api.get(f"/api/loads/{LOAD_ID}/documents")
+    return next(d for d in listed if d["document_id"] == document_id)
+
+
 async def test_an_uploaded_pod_is_pending_until_the_tick_reads_it_and_runs_it(api: Api) -> None:
     await api.create_load()
 
@@ -92,20 +98,21 @@ async def test_an_uploaded_pod_is_pending_until_the_tick_reads_it_and_runs_it(ap
 
     document_id = uploaded["document_id"]
     assert uploaded["attachment_id"].startswith("att_")
-    document = await api.get(f"/api/documents/{document_id}")
-    assert (document["status"], document["filename"], document["load_id"]) == (
+    pending = await document(api, document_id)
+    assert (pending["status"], pending["filename"], pending["load_id"]) == (
         "pending",
         "pod_clean.pdf",
         LOAD_ID,
     )
-    assert "blob_ref" not in document
+    assert "blob_ref" not in pending
     assert api.model.calls == []  # nothing ran yet
-    (message,) = await api.get(f"/api/loads/{LOAD_ID}/conversation")
-    assert (message["direction"], message["who"], message["text"]) == (
-        "in",
+    (message,) = (await api.get(f"/api/loads/{LOAD_ID}"))["events"]
+    assert (message["event_id"], message["sender_contact_id"], message["body"]) == (
+        uploaded["event_id"],
         DRIVER,
         "here is the POD",
     )
+    assert [a["attachment_id"] for a in message["attachments"]] == [uploaded["attachment_id"]]
 
     api.model.push(EXTRACT, clean_pod())
     api.model.push(GATE, DOCUMENT)
@@ -116,15 +123,19 @@ async def test_an_uploaded_pod_is_pending_until_the_tick_reads_it_and_runs_it(ap
     assert runs[1]["gate"]["intent"] == "document_processed"
     assert "documents" in runs[1]["sop_section_ids"]
     assert runs[1]["status"] == "acted"
-    document = await api.get(f"/api/documents/{document_id}")
-    assert (document["status"], document["type_id"], document["pages"]) == ("processed", "pod", 1)
-    assert [c["field"] for c in document["checks"] if c["ok"]] == [
+    processed = await document(api, document_id)
+    assert (processed["status"], processed["type_id"], processed["pages"]) == (
+        "processed",
+        "pod",
+        1,
+    )
+    assert [c["field"] for c in processed["checks"] if c["ok"]] == [
         "receiver",
         "po_numbers",
         "signed",
         "delivered_at",
     ]
-    assert "PO NO.\n55821" in document["text"]
+    assert "PO NO.\n55821" in processed["text"]
     (extract,) = [c for c in api.model.calls if c.role is EXTRACT]
     assert extract.request.images == ()  # the text layer was enough
     assert "PO NO.\n55821" in extract.request.user
@@ -158,9 +169,9 @@ async def test_a_pod_with_the_wrong_po_needs_review(api: Api) -> None:
 
     await tick(api)
 
-    document = await api.get(f"/api/documents/{uploaded['document_id']}")
-    assert document["status"] == "needs_review"
-    po = next(c for c in document["checks"] if c["field"] == "po_numbers")
+    read = await document(api, uploaded["document_id"])
+    assert read["status"] == "needs_review"
+    po = next(c for c in read["checks"] if c["field"] == "po_numbers")
     assert (po["expected"], po["found"], po["ok"], po["check"]) == (
         "55821",
         "55812",
@@ -189,9 +200,9 @@ async def test_the_sender_file_name_loses_its_folders(api: Api) -> None:
     )
     assert response.status_code == 201, response.text
 
-    document = await api.get(f"/api/documents/{response.json()['document_id']}")
+    stored = await document(api, response.json()["document_id"])
 
-    assert (document["filename"], document["content_type"]) == ("pod.pdf", "application/pdf")
+    assert (stored["filename"], stored["content_type"]) == ("pod.pdf", "application/pdf")
 
 
 async def test_an_upload_for_an_unknown_load_is_a_404(api: Api) -> None:
@@ -240,9 +251,7 @@ async def test_a_channel_that_is_not_a_contact_channel_is_refused(api: Api) -> N
     assert response.status_code == 422
 
 
-async def test_an_unknown_document_or_load_is_a_404(api: Api) -> None:
-    missing = await api.client.get("/api/documents/doc_404")
+async def test_the_documents_of_an_unknown_load_are_a_404(api: Api) -> None:
     no_load = await api.client.get("/api/loads/999999/documents")
 
-    assert (missing.status_code, missing.json()["detail"]) == (404, "unknown document 'doc_404'")
     assert (no_load.status_code, no_load.json()["detail"]) == (404, "unknown load '999999'")

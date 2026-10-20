@@ -12,8 +12,8 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
@@ -70,7 +70,7 @@ async def test_a_broken_sop_file_is_reported_by_name(tmp_path: Path) -> None:
     (sops / "standard").mkdir(parents=True)
     (sops / "standard" / "broken.md").write_text("no header here\n", encoding="utf-8")
 
-    async with open_api(tmp_path, sops_dir=sops) as api:
+    async with open_api(sops_dir=sops) as api:
         response = await api.client.get("/api/sops", params={"client_id": "northline"})
 
     assert response.status_code == 422
