@@ -1,0 +1,116 @@
+# P1: a clean POD delivers the load. Acme (evals/brokers/acme.json) requires a signed POD
+# within 120 minutes of the arrival at the delivery stop: its `DocumentRequirement`
+# (pod at at_delivery, 120 min, opens the `pod` obligation) and section
+# `proof_of_delivery` (from acme_sop.md, section 3).
+#
+# Cards: W3-AGT (update_stage into a stage with a requirement opens its obligation and
+# timer; the agent loop folds the transcript) and W3-DOC (the document pipeline reads the
+# attachment on the tick, before the queue, and closes the obligation on a clean POD).
+#
+# Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
+#   step 0  09:10  driver SMS: checked in at Valley DC.
+#           09:11  run: gate (status_update, act), agent stages update_stage(at_delivery).
+#                  The executor opens `pod` (attempts 0) with a timer at 09:11 + 120 =
+#                  11:11. No SMS: the POD is not asked for yet.
+#   step 1  09:50  driver SMS with only the POD photo (pod_clean.pdf): the intent comes
+#                  from code (document), no gate call.
+#           09:51  tick: the pipeline reads the POD first (one extract call): pod, every
+#                  check ok -> processed; `pod` closes satisfied; `document_processed`
+#                  is queued behind the message. Then the message run: the agent answers
+#                  with nothing, because only the document_processed run acts on a
+#                  document (F6). Then the document_processed run: update_stage(delivered)
+#                  and a TMS note. 3 model calls: extract, agent, agent.
+#   step 2  11:20  past the POD's due time: nothing happens (the obligation is closed, so
+#                  its timer is cancelled or skipped as stale, with no model call).
+id: p1_pod_clean_delivers
+title: "A clean POD closes the POD request and delivers the load (Acme)"
+suite: docs
+tags: [regression, sop:proof_of_delivery, sop:documents, sop:status_updates]
+description: >-
+  Arrival opens the POD request with a 120-minute timer; a clean POD is read by the
+  document pipeline, closes the request as satisfied, and its document_processed run
+  sets the load to delivered with a TMS note.
+load: fixtures/load_481207.json
+broker_file: brokers/acme.json
+load_overrides:
+  stage: to_delivery
+date: 2026-10-14
+start: "09:00"
+steps:
+  - at: "09:10"
+    note: "Arrival at Valley DC: the POD becomes due at 11:11, nobody asks for it yet"
+    message: {channel: sms, sender: drv_20931, body: "checked in at valley dc, they are unloading us now"}
+    script:
+      gate:
+        - {intent: status_update, act: true, reason: "The driver reports the arrival at the receiver."}
+      agent:
+        - rationale: >-
+            proof_of_delivery, step 1: the truck is at the delivery stop, so set the load
+            to at_delivery; the POD is due in 120 minutes, do not ask for it yet.
+          tool_calls:
+            - name: update_stage
+              args: {stage: at_delivery}
+              result: "accepted as action #1"
+    expect:
+      intent: status_update
+      tools_used: [update_stage]
+      actions:
+        - {kind: stage_update, stage: at_delivery, count: 1}
+      obligations:
+        pod: {status: open, attempts: 0}
+      timers: {pending: 1, due_at: "11:11"}
+      run_status: [acted]
+      llm_calls: 2
+    forbid:
+      - {kind: sms}
+      - {kind: hero_task}
+
+  - at: "09:50"
+    note: "The signed POD arrives as a photo with no text"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: ""
+      attachments:
+        - {filename: pod_clean.pdf, fixture: fixtures/docs/pod_clean.pdf, content_type: application/pdf}
+    script:
+      extract:
+        - type_id: pod
+          confidence: 0.97
+          extracted:
+            receiver: Valley DC
+            po_numbers: "55821"
+            signed: true
+            delivered_at: "2026-10-14T09:42"
+            exceptions: ""
+      agent:
+        - rationale: >-
+            The message only carries the file: the document_processed run acts on the
+            POD, so nothing here.
+        - rationale: >-
+            proof_of_delivery, step 4: the POD is clean (processed, every check ok), so set
+            the load to delivered and write a TMS note.
+          intent: document_processed
+          actions:
+            - {type: update_stage, stage: delivered}
+            - {type: write_tms_note, text: "POD received for load 481207, signed by the receiver at Valley DC at 09:42."}
+    expect:
+      intent: document_processed
+      actions:
+        - {kind: stage_update, stage: delivered, count: 1}
+        - {kind: tms_note, contains: ["POD"], count: 1}
+      obligations:
+        pod: {status: satisfied}
+      runs: 2
+      llm_calls: 3
+    forbid:
+      - {kind: sms}
+      - {kind: email}
+      - {kind: hero_task}
+
+  - at: "11:20"
+    note: "Past the POD's due time: the satisfied request does not follow up"
+    expect:
+      no_actions: true
+      obligations:
+        pod: {status: satisfied}
