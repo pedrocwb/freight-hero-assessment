@@ -7,8 +7,9 @@ the owner 'standard' (`STANDARD_BROKER_ID`), because the owner is part of the ke
 A version is one `sop_versions` row and one `sop_sections` row per section, in order
 (`position`). The section rows carry what the index searches: the text (a generated
 `tsvector`) and the embedding, with the model that made it. A version's sections are
-written once; publishing it again moves it to the top (a new `seq`) and replaces its
-embeddings when new ones are given.
+written once; publishing it again updates its publication (time, author, lint) and,
+when new ones are given, its embeddings. The published version has the latest
+`published_at`; `seq` (the first publication's order) breaks ties and orders `versions`.
 """
 
 import builtins
@@ -140,7 +141,7 @@ class PostgresSopStore:
             f"INSERT INTO sop_versions ({_VERSION}) VALUES (%s, %s, %s, %s, %s)"
             " ON CONFLICT (broker_id, version) DO UPDATE SET"
             " published_at = EXCLUDED.published_at, published_by = EXCLUDED.published_by,"
-            " lint = EXCLUDED.lint, seq = DEFAULT"
+            " lint = EXCLUDED.lint"
             " RETURNING (xmax = 0) AS inserted",
             (
                 owner,
@@ -215,7 +216,8 @@ class PostgresSopStore:
 
     async def published(self, broker_id: str | None) -> SopVersion | None:
         found = await self._versions(
-            "seq = (SELECT max(seq) FROM sop_versions WHERE broker_id = %s)",
+            "seq = (SELECT seq FROM sop_versions WHERE broker_id = %s"
+            " ORDER BY published_at DESC, seq DESC LIMIT 1)",
             (owner_key(broker_id),),
         )
         return found[0] if found else None

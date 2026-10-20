@@ -63,23 +63,24 @@ class SopStore(Protocol):
     async def save_version(
         self, version: SopVersion, embeddings: SectionEmbeddings | None = None
     ) -> None:
-        """Publish a version: it becomes the layer's published one.
+        """Publish a version.
 
         A version's sections never change (its id is their hash). Saving a version that
-        exists publishes it again: it becomes the published one, with the new
-        `published_at`, `published_by` and `lint`, and new embeddings replace the old.
+        exists publishes it again (a reverted edit brings its old version back): its
+        sections stay, its `published_at`, `published_by` and `lint` become the new ones,
+        and new embeddings replace the old. Saved again unchanged, nothing changes.
         """
         ...
 
     async def get_version(self, broker_id: str | None, version: str) -> SopVersion | None: ...
 
     async def published(self, broker_id: str | None) -> SopVersion | None:
-        """The version published last, or None before the first publish."""
+        """The version with the latest `published_at` (among equal times, the one first
+        published last), or None before the first publish."""
         ...
 
     async def versions(self, broker_id: str | None) -> list[SopVersion]:
-        """Every published version, in the order they were last published: the last one
-        is `published`."""
+        """Every published version, in the order they were first published."""
         ...
 
 

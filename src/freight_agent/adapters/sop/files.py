@@ -13,15 +13,14 @@ the file name ("standard/escalation.md: the header has no `id`...").
 import difflib
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
-from freight_agent.domain.intents import Intent
+from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 
@@ -33,6 +32,8 @@ LAYOUT = (
 _FENCE = "---"
 _SNAKE_CASE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
 _VERSION_LENGTH = 12
+# The intents a file may name unless the caller knows its broker's catalog.
+STANDARD_INTENTS: tuple[str, ...] = tuple(i.intent_id for i in standard_broker().intents)
 
 Scope = tuple[SopLayer, str | None, str | None]
 
@@ -132,8 +133,14 @@ def duplicates(files: Iterable[SopFile]) -> list[tuple[str, SopFile, SopFile]]:
     return found
 
 
-def read_sop_file(path: Path, location: SopLocation) -> SopFile:
-    """Read one file and check every setting, collecting all problems instead of stopping."""
+def read_sop_file(
+    path: Path, location: SopLocation, *, intents: Collection[str] = STANDARD_INTENTS
+) -> SopFile:
+    """Read one file and check every setting, collecting all problems instead of stopping.
+
+    `intents` are the ids the file may name: the standard catalog's, unless the caller
+    knows the catalog of the file's broker (the importer does).
+    """
     try:
         meta, body = _split_front_matter(_read_text(path))
     except _Unreadable as exc:
@@ -142,8 +149,8 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
     section_id = _section_id(meta, problems)
     title = _text(meta, "title", problems)
     description = _text(meta, "description", problems)
-    intents = _members(meta, "intents", Intent, problems)
-    stages = _members(meta, "stages", Stage, problems)
+    intent_ids = _members(meta, "intents", {i: i for i in intents}, problems)
+    stages = _members(meta, "stages", {stage.value: stage for stage in Stage}, problems)
     mode = _mode(meta, problems)
     if not body:
         problems.append("the section has no text. Write the procedure below the closing --- line.")
@@ -156,7 +163,7 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
         load_type=location.load_type,
         title=title or section_id,
         description=description or "",
-        intents=intents,
+        intents=intent_ids,
         stages=stages,
         # decisions.md: mode is ignored in standard/, there is nothing below it to extend.
         mode=MergeMode.REPLACE if location.layer is SopLayer.STANDARD else mode,
@@ -312,16 +319,15 @@ def _text(meta: dict[Any, Any], key: str, problems: list[str]) -> str | None:
     return None
 
 
-def _members[E: StrEnum](
-    meta: dict[Any, Any], key: str, kind: type[E], problems: list[str]
+def _members[E: str](
+    meta: dict[Any, Any], key: str, known: dict[str, E], problems: list[str]
 ) -> tuple[E, ...]:
-    """A list of enum values. A single value without brackets is accepted as a list of one."""
+    """A list of known values. A single value without brackets is a list of one."""
     noun = key.removesuffix("s")
     raw = meta.get(key)
     if raw is None:
         return ()
     items: object = [raw] if isinstance(raw, str) else raw
-    known = {member.value: member for member in kind}
     if not isinstance(items, list):
         problems.append(
             f"`{key}` must be a list, like [{', '.join(list(known)[:2])}]. "

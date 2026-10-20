@@ -2,8 +2,8 @@
 
 Owner: card W3-KNW. Rows live in `_State.sop_documents`, `_State.sop_drafts` (one per
 broker; None is the standard layer) and `_State.sop_versions` (per broker, in the order
-they were last published, so the last one is the published one). The memory index
-searches by words, so embeddings are not kept.
+they were first published; a version published again keeps its place and takes the new
+publication's time). The memory index searches by words, so embeddings are not kept.
 """
 
 from typing import TYPE_CHECKING
@@ -40,10 +40,10 @@ class MemorySopStore:
         self, version: SopVersion, embeddings: SectionEmbeddings | None = None
     ) -> None:
         published = self._s.state.sop_versions.setdefault(version.broker_id, [])
-        known = next((v for v in published if v.version == version.version), None)
-        if known is not None:
-            published.remove(known)
-            version = version.model_copy(update={"sections": known.sections})
+        for position, known in enumerate(published):
+            if known.version == version.version:
+                published[position] = version.model_copy(update={"sections": known.sections})
+                return
         published.append(version)
 
     async def get_version(self, broker_id: str | None, version: str) -> SopVersion | None:
@@ -52,7 +52,10 @@ class MemorySopStore:
 
     async def published(self, broker_id: str | None) -> SopVersion | None:
         published = self._s.state.sop_versions.get(layer_owner(broker_id), [])
-        return published[-1] if published else None
+        if not published:
+            return None
+        # The latest publication; among equal times, the version first published last.
+        return max(enumerate(published), key=lambda item: (item[1].published_at, item[0]))[1]
 
     async def versions(self, broker_id: str | None) -> list[SopVersion]:
         return list(self._s.state.sop_versions.get(layer_owner(broker_id), []))

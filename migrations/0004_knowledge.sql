@@ -33,8 +33,10 @@ CREATE TABLE sop_drafts (
     updated_at timestamptz NOT NULL
 );
 
--- A version's sections never change: `version` is their hash. Publishing a version
--- again takes a new `seq`, so the published version is the one with the highest.
+-- A version's sections never change: `version` is their hash. Publishing a version again
+-- updates its publication (a reverted edit brings its old version back). The published
+-- version has the latest `published_at`; `seq`, the order of first publication, breaks
+-- ties and orders the history.
 CREATE TABLE sop_versions (
     broker_id    text COLLATE "C" NOT NULL,
     version      text COLLATE "C" NOT NULL,
@@ -44,7 +46,7 @@ CREATE TABLE sop_versions (
     seq          bigserial NOT NULL UNIQUE,
     PRIMARY KEY (broker_id, version)
 );
-CREATE INDEX sop_versions_published ON sop_versions (broker_id, seq DESC);
+CREATE INDEX sop_versions_published ON sop_versions (broker_id, published_at DESC, seq DESC);
 
 -- One row per section of a version, in the version's order (`position`). `source` is the
 -- section's provenance as the run shows it (a file of sops/, or an upload and its pages):

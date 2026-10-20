@@ -230,7 +230,7 @@ async def test_the_last_published_version_is_the_published_one(
         assert await uow.sops.get_version("acme", "v1") == v1
 
 
-async def test_publishing_a_version_again_makes_it_published_and_keeps_its_sections(
+async def test_publishing_a_version_again_brings_it_back_and_keeps_its_sections(
     uow_factory: UnitOfWorkFactory,
 ) -> None:
     v1 = version("v1", "acme", section("delay_risk_high"))
@@ -247,7 +247,23 @@ async def test_publishing_a_version_again_makes_it_published_and_keeps_its_secti
     async with uow_factory() as uow:
         published = await uow.sops.published("acme")
         assert published == again.model_copy(update={"sections": v1.sections})
-        assert [v.version for v in await uow.sops.versions("acme")] == ["v2", "v1"]
+        assert [v.version for v in await uow.sops.versions("acme")] == ["v1", "v2"]
+
+
+async def test_a_version_saved_again_unchanged_changes_nothing(
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    v1 = version("v1", "acme", section("delay_risk_high"))
+    v2 = version("v2", "acme", section("delay_risk_high", body="1. Call."))  # same time
+    async with uow_factory() as uow:
+        await uow.sops.save_version(v1)
+        await uow.sops.save_version(v2)
+        await uow.sops.save_version(v1)
+        await uow.commit()
+
+    async with uow_factory() as uow:
+        assert await uow.sops.published("acme") == v2
+        assert await uow.sops.versions("acme") == [v1, v2]
 
 
 async def test_a_version_may_carry_embeddings(uow_factory: UnitOfWorkFactory) -> None:
