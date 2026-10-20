@@ -98,7 +98,7 @@ export function LevelChip({ level }: { level: HealthLevel }) {
   return <span className={clsx("chip", `chip--level-${level}`)}>{LEVEL_LABEL[level] ?? level}</span>;
 }
 
-export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" | "agent" }) {
+export function Tag({ children, tone }: { children: ReactNode; tone?: "sop" | "muted" | "urgent" | "agent" | "proposed" }) {
   return <span className={clsx("tag", tone && `tag--${tone}`)}>{children}</span>;
 }
 

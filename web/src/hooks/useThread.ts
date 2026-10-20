@@ -73,9 +73,43 @@ export function useThread(channel: ConversationChannel) {
     [loadId, channel, sim.state, sim.latencySeconds, toasts],
   );
 
+  /**
+   * A file sent with the message, as the integration layer would deliver an MMS or an
+   * email attachment (card DOC). Resolves to a line for the composer, or null on failure.
+   */
+  const attach = useCallback(
+    async (sender: Contact, file: File, text: string): Promise<string | null> => {
+      const body = text.trim();
+      if (!loadId || !sim.state) return null;
+      const localId = `local-${++localIds}`;
+      const at = sim.state.now;
+      const update = (patch: Partial<PendingMessage>) =>
+        setPending((list) => list.map((p) => (p.localId === localId ? { ...p, ...patch } : p)));
+      // Only a message with text shows in the thread; a bare file shows as a document.
+      if (body) setPending((list) => [...list, { localId, loadId, at, who: sender.id, role: sender.role, text: body, state: "sending" }]);
+      try {
+        const result = await api.uploadAttachment(
+          loadId,
+          { file, channel, senderContactId: sender.id, body, at },
+          sim.latencySeconds,
+        );
+        update({ state: "sent" });
+        return `${file.name} sent: document ${result.document_id} waits for the next tick, which reads it before the agent runs.`;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        update({ state: "failed", error: message });
+        toasts.error(message);
+        return null;
+      } finally {
+        invalidate(...ALL_TOPICS);
+      }
+    },
+    [loadId, channel, sim.state, sim.latencySeconds, toasts],
+  );
+
   const discard = useCallback((key: string) => {
     setPending((list) => list.filter((p) => `p:${p.localId}` !== key));
   }, []);
 
-  return { resource, entries, send, discard };
+  return { resource, entries, send, attach, discard };
 }

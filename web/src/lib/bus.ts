@@ -10,7 +10,11 @@ export type Topic =
   | "conversation"
   | "tms"
   | "tasks"
-  | "health";
+  | "health"
+  // Broker configuration and SOP drafts change only by the page's own writes, so the
+  // stream and the polling fallback leave them out of ALL_TOPICS.
+  | "brokers"
+  | "knowledge";
 
 export const ALL_TOPICS: readonly Topic[] = [
   "state",

@@ -12,7 +12,7 @@ import { useSim } from "../state/sim";
 export function EmailThread() {
   const sim = useSim();
   const { load, timezone, state } = sim;
-  const { resource, entries, send, discard } = useThread("email");
+  const { resource, entries, send, attach, discard } = useThread("email");
   const writers = (load?.contacts ?? []).filter((c) => c.channels.includes("email"));
   const [writerId, setWriterId] = useState<string>("");
   const writer = writers.find((c) => c.id === writerId) ?? writers[0];
@@ -68,7 +68,7 @@ export function EmailThread() {
                     </div>
                     {to.length ? <p className="mail-to">To {to.map((id) => who(id, load?.contacts.find((c) => c.id === id)?.role ?? "")).join(", ")}</p> : null}
                     {entry.subject ? <p className="mail-subject">{entry.subject}</p> : null}
-                    <p className="mail-body">{entry.text}</p>
+                    <p className="mail-body">{entry.text || <span className="muted">Attachment, no text</span>}</p>
                     {entry.pending ? (
                       <p className="mail-state">
                         {entry.pending === "sending" ? "Sending…" : entry.pending === "sent" ? "Delivered to the agent" : `Not sent: ${entry.error}`}
@@ -110,8 +110,12 @@ export function EmailThread() {
                 sendLabel="Send email"
                 disabled={!writer || !state}
                 onSend={(text) => (writer ? send(writer, text) : Promise.resolve(false))}
+                onAttach={(file, text) => (writer ? attach(writer, file, text) : Promise.resolve(null))}
               />
-              <p className="hint">Inbound email carries only the new text, as the integration layer delivers it.</p>
+              <p className="hint">
+                Inbound email carries only the new text, as the integration layer delivers it. An
+                attached BOL, POD or receipt goes to the document pipeline on the next tick.
+              </p>
             </>
           )}
         </Panel>

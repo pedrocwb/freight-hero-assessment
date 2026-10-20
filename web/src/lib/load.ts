@@ -53,7 +53,17 @@ export function stageLabel(stage: string): string {
   return STAGE_LABEL[stage as Stage] ?? stage;
 }
 
-const ACRONYMS: Record<string, string> = { eta: "ETA", sop: "SOP", tms: "TMS", po: "PO", sms: "SMS", llm: "LLM" };
+const ACRONYMS: Record<string, string> = {
+  eta: "ETA",
+  sop: "SOP",
+  tms: "TMS",
+  po: "PO",
+  sms: "SMS",
+  llm: "LLM",
+  pod: "POD",
+  bol: "BOL",
+  mc: "MC",
+};
 
 /** "delay_risk_high" reads as "Delay risk high"; "eta_request" as "ETA request". */
 export function humanize(id: string): string {
