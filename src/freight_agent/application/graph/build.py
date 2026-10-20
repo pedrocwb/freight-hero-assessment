@@ -25,8 +25,12 @@ The run deadline is the runtime's, around the whole stream. `load_context` and
 graph, because they are the run's two transactions: no unit of work may stay open while
 a model thinks. The graph itself never touches storage.
 
-`compile_graph` builds the graph from its services alone (`GraphDeps`), so another entry
-point (LangGraph Studio) can serve the same graph.
+`compile_graph` builds the graph from its services alone (`GraphDeps`). LangGraph Studio
+shows it inside the scenario graph of `freight_agent.studio`, whose `run` node calls the
+runtime: a graph streamed from another graph's node inherits that node's config, so the
+run graph becomes the node's subgraph, streamed and checkpointed under it. That is why
+`RunGraph.stream` names no thread: a thread id would make it a graph of its own again,
+and alone it has no checkpointer for a thread to address.
 """
 
 from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
@@ -140,7 +144,6 @@ class RunGraph:
         load = ctx.load
         config: dict[str, object] = {
             "run_name": "agent_run",
-            "configurable": {"thread_id": run_id},
             "metadata": {
                 "run_id": run_id,
                 "event_id": ctx.event.event_id,
@@ -164,6 +167,12 @@ class RunGraph:
             else:
                 continue
             yield state
+
+    @property
+    def compiled(self) -> object:
+        """The compiled LangGraph graph itself, for an entry point that draws it inside its
+        own graph (LangGraph Studio's scenario graph)."""
+        return self._compiled
 
     def mermaid(self) -> str:
         """The graph as LangGraph draws it, in Mermaid."""
