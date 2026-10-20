@@ -26,6 +26,8 @@ export interface EvalSummary {
   suite: string | null;
   mode: string | null;
   k: number | null;
+  /** The LangSmith experiment of a live run, when the API recorded one. */
+  langsmithUrl: string | null;
   total: number;
   passed: number;
   costUsd: number;
@@ -113,10 +115,12 @@ export function normalizeEvalSummary(raw: unknown): EvalSummary {
   const summed = scenarios.reduce((sum, s) => sum + s.costUsd, 0);
   // A top-level `passed` may be the suite verdict (a boolean) rather than a count.
   const count = (value: unknown) => (typeof value === "number" ? value : null);
+  const link = str(pick(top, ["langsmith_url", "experiment_url", "langsmith_experiment_url"]));
   return {
     suite: str(top.suite),
     mode: str(top.mode),
     k: num(top.k),
+    langsmithUrl: link && /^https?:\/\//.test(link) ? link : null,
     total: count(pick(top, ["total", "count"])) ?? scenarios.length,
     passed:
       count(pick(top, ["passed_count", "passed"])) ?? scenarios.filter((s) => s.passed).length,
