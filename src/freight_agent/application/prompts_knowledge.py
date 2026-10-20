@@ -67,6 +67,13 @@ requests; a new snake_case kind, such as pod, for something else), title, descri
 follow_up_minutes (the wait after each request), max_attempts (the most requests sent), and \
 on_exhausted (who takes over after the last request, in order: dispatcher_email, hero_task, \
 broker_slack). Propose eta_request only when the document's timing differs from the catalog's.
+
+Before you answer, check:
+1. Every intent you propose is listed in the intents of the section that handles it.
+2. Every obligation you propose has its follow-up intent (<kind>_follow_up_due) in the intents \
+of the section that says what to do when its wait ends.
+3. A section about a document the document check reads (a POD, a BOL) also lists \
+document_processed: the agent acts on a document when the check reports on it.
 """
 
 TRANSCRIBE_SYSTEM_PROMPT = """\
