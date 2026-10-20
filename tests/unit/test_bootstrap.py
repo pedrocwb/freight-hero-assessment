@@ -31,7 +31,7 @@ from freight_agent.adapters.observability.langsmith import LangSmithTracer
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
-from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.bootstrap import (
     BootstrapError,
@@ -292,7 +292,7 @@ def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
     assert isinstance(deps.knowledge, MemorySopIndex)
     assert deps.knowledge.content_version == FileSopRepository(SOPS).version()
     assert isinstance(deps.blobs, FsBlobStore)
-    assert isinstance(deps.documents, NullDocumentProcessor)
+    assert isinstance(deps.documents, DocumentPipeline)  # W3-DOC plugged in by name
     assert isinstance(deps.gateways, Gateways)
     assert type(deps.gateways.sms).__module__ == recording.__name__
     assert isinstance(deps.tracer, NullTracer)

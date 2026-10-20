@@ -16,7 +16,12 @@ from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.documents import DocumentPipeline
-from freight_agent.domain.broker import DocumentRequirement, ObligationDef, new_broker
+from freight_agent.domain.broker import (
+    DocumentRequirement,
+    ObligationDef,
+    new_broker,
+    with_follow_up_intents,
+)
 from freight_agent.domain.documents import (
     Document,
     DocumentStatus,
@@ -303,8 +308,11 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
         type_id="pod", at_stage=Stage.AT_DELIVERY, opens_obligation="pod"
     )
     broker = new_broker("northline", "Northline")
-    broker = broker.model_copy(
-        update={"obligations": (*broker.obligations, pod), "documents": (owes_pod,)}
+    obligations = (*broker.obligations, pod)
+    broker = broker.revised(  # validated: the store re-validates the broker it reads
+        obligations=obligations,
+        intents=with_follow_up_intents(broker.intents, obligations),
+        documents=(owes_pod,),
     )
     obligation = Obligation.open(
         obligation_id="obl_1", load_id=A, kind="pod", at=at(0), first_attempt=False

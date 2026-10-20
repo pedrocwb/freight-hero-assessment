@@ -509,7 +509,8 @@ async def test_two_workers_on_one_document_announce_it_once(world: World) -> Non
     )
 
     assert len(first) + len(second) == 1
-    assert len(world.model.calls) == 2  # both read it; one wrote it
+    # Both may read it (a wasted call) or the second may find it done; it is announced once.
+    assert 1 <= len(world.model.calls) <= 2
     assert (await world.document()).status is DocumentStatus.PROCESSED
     assert await world.queued() == ["doc:doc_1"]
 
