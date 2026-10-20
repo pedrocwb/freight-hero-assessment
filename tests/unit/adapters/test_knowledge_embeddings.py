@@ -12,8 +12,10 @@ from freight_agent.adapters.knowledge.embeddings import (
     DEFAULT_DIM,
     OpenRouterEmbedder,
     embedder_for,
+    embedding_config,
 )
 from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
+from freight_agent.adapters.llm.models_config import EmbeddingConfig
 from freight_agent.ports.knowledge import EmbeddingError
 from freight_agent.settings import Settings
 
@@ -46,10 +48,9 @@ def answering(
     return httpx.MockTransport(handle)
 
 
-def embedder(transport: httpx.MockTransport, **kwargs: Any) -> OpenRouterEmbedder:
-    return OpenRouterEmbedder(
-        KEY, model=MODEL, dim=kwargs.pop("dim", 3), transport=transport, **kwargs
-    )
+def embedder(transport: httpx.MockTransport, *, batch_size: int = 64) -> OpenRouterEmbedder:
+    config = EmbeddingConfig(model=MODEL, dim=3)
+    return OpenRouterEmbedder(config, KEY, transport=transport, batch_size=batch_size)
 
 
 async def test_texts_go_to_the_embeddings_endpoint_with_the_model_and_the_key() -> None:
@@ -127,7 +128,7 @@ async def test_a_network_failure_is_an_embedding_error_without_the_key() -> None
 
 def test_a_batch_holds_at_least_one_text() -> None:
     with pytest.raises(ValueError, match="batch_size"):
-        OpenRouterEmbedder(KEY, batch_size=0)
+        OpenRouterEmbedder(EmbeddingConfig(model=MODEL, dim=3), KEY, batch_size=0)
 
 
 def settings(**values: Any) -> Settings:
@@ -159,3 +160,10 @@ def test_without_a_models_file_the_defaults_apply(tmp_path: Path) -> None:
     found = embedder_for(settings(llm_mode="scripted", models_config=tmp_path / "none.yaml"))
 
     assert isinstance(found, FakeEmbedder) and found.dim == 1536
+
+
+def test_the_embedding_config_comes_from_the_models_file(tmp_path: Path) -> None:
+    assert embedding_config(ROOT / "config" / "models.yaml") == EmbeddingConfig(
+        model=MODEL, dim=1536
+    )
+    assert embedding_config(tmp_path / "none.yaml") == EmbeddingConfig(model=MODEL, dim=1536)

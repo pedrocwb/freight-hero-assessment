@@ -84,12 +84,16 @@ def sop_import(
 
 
 async def _import(settings: Settings, directory: Path, broker: str | None) -> "list[ImportedLayer]":
+    from freight_agent import bootstrap
     from freight_agent.adapters.clock import SystemClock
     from freight_agent.adapters.knowledge.embeddings import embedder_for
     from freight_agent.adapters.persistence.memory.store import MemoryStore
     from freight_agent.adapters.sop.importer import SopImporter
 
-    embedder = embedder_for(settings)
+    # The composition root's embedder (`bootstrap.build_embedder`, card W3-OPS); until it
+    # is on this branch, the same rule from `embedder_for`.
+    build = getattr(bootstrap, "build_embedder", None)
+    embedder = build(settings) if build is not None else embedder_for(settings)
     if settings.persistence != "postgres":
         importer = SopImporter(MemoryStore().unit_of_work, clock=SystemClock(), embedder=embedder)
         return await importer.import_tree(directory, broker=broker)

@@ -48,6 +48,14 @@ def test_live_mode_embeds_queries_on_openrouter() -> None:
     assert isinstance(index._embedder, OpenRouterEmbedder)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_the_composition_root_may_pass_its_own_embedder() -> None:
+    embedder = FakeEmbedder(dim=1536, model_id="root/embedder")
+
+    index = knowledge_index(settings(llm_mode="live"), embedder=embedder)
+
+    assert index._embedder is embedder  # pyright: ignore[reportPrivateUsage]
+
+
 def test_the_index_needs_the_database_url() -> None:
     with pytest.raises(MissingSetting, match="DATABASE_URL"):
         knowledge_index(settings(database_url=None))

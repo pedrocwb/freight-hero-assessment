@@ -22,6 +22,7 @@ from typing import Annotated, Final, cast
 
 from fastapi import APIRouter, File, Query, Request, UploadFile, status
 
+from freight_agent import bootstrap
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator
 from freight_agent.adapters.knowledge.embeddings import embedder_for
 from freight_agent.adapters.knowledge.pdf_pages import PdfPageReader
@@ -49,7 +50,7 @@ from freight_agent.bootstrap import build_llm
 from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import ResolvedSop, SopDraft, layer_owner
-from freight_agent.ports.knowledge import EmbeddingError
+from freight_agent.ports.knowledge import Embedder, EmbeddingError
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.settings import LlmMode, MissingSetting, Settings
 
@@ -121,8 +122,13 @@ async def search(
 # --- a broker's onboarding ---------------------------------------------------------------
 
 
-def _mode_settings(settings: Settings, mode: LlmMode) -> Settings:
-    return settings.model_copy(update={"llm_mode": mode})
+def _embedder(settings: Settings, mode: LlmMode) -> Embedder:
+    """The composition root's embedder for `mode` (`bootstrap.build_embedder`, card
+    W3-OPS); until it is on this branch, the same rule from `embedder_for`."""
+    build = getattr(bootstrap, "build_embedder", None)
+    if build is not None:
+        return build(settings, mode=mode)
+    return embedder_for(settings.model_copy(update={"llm_mode": mode}))
 
 
 async def _model(request: Request, service: Service, mode: LlmMode) -> LanguageModel:
@@ -144,7 +150,7 @@ async def _model(request: Request, service: Service, mode: LlmMode) -> LanguageM
 async def _ingestion(request: Request, service: Service) -> SopIngestion:
     mode = cast(LlmMode, (await service.state()).llm_mode)
     with _errors():
-        embedder = embedder_for(_mode_settings(service.settings, mode))
+        embedder = _embedder(service.settings, mode)
     return SopIngestion(
         uow_factory=service.uow_factory,
         clock=SystemClock(),

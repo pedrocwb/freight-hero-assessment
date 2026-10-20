@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from freight_agent import bootstrap
+from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
 from freight_agent.adapters.knowledge.memory import StoreSopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -266,3 +268,24 @@ async def test_a_run_on_an_acme_load_follows_the_published_acme_procedure(wired:
     assert run["sop_version"].endswith(f"+{version}")
     (decide,) = [c for c in wired.model.calls if c.role is DECIDE]
     assert "every 20 minutes, up to three times" in decide.request.user
+
+
+async def test_a_publish_embeds_with_the_composition_root_s_embedder(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes: list[str] = []
+
+    def build_embedder(settings: Settings, *, mode: str | None = None) -> FakeEmbedder:
+        modes.append(mode or settings.llm_mode)
+        return FakeEmbedder(dim=8)
+
+    monkeypatch.setattr(bootstrap, "build_embedder", build_embedder, raising=False)
+    api.model.push(COMPILE, acme_compiled())
+    await upload(api)
+    draft = await api.get("/api/brokers/acme/sops/draft")
+    await api.client.put("/api/brokers/acme/sops/draft", json=reviewed(draft))
+
+    published = await api.client.post("/api/brokers/acme/sops/publish", json={"percent": 100})
+
+    assert published.status_code == 200, published.text
+    assert modes and set(modes) == {"scripted"}

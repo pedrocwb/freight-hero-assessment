@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner, Result
 
-from freight_agent import cli
+from freight_agent import bootstrap, cli
+from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
+from freight_agent.settings import Settings
 
 pytestmark = pytest.mark.unit
 
@@ -86,3 +88,20 @@ def test_lint_still_checks_the_files() -> None:
     result = runner.invoke(cli.app, ["sop", "lint"], env={"SOPS_DIR": str(ROOT / "sops")})
 
     assert result.exit_code == 0, result.output
+
+
+def test_the_embedder_comes_from_the_composition_root_once_it_has_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[Settings] = []
+
+    def build_embedder(settings: Settings) -> FakeEmbedder:
+        built.append(settings)
+        return FakeEmbedder(dim=1536)
+
+    monkeypatch.setattr(bootstrap, "build_embedder", build_embedder, raising=False)
+
+    result = agent("sop", "import", str(ROOT / "sops"))
+
+    assert result.exit_code == 0, result.output
+    assert len(built) == 1

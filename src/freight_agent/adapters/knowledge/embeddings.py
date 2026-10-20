@@ -17,7 +17,7 @@ import httpx
 from pydantic import SecretStr
 
 from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.llm.models_config import load_models_config
+from freight_agent.adapters.llm.models_config import EmbeddingConfig, load_models_config
 from freight_agent.ports.knowledge import Embedder, EmbeddingError
 from freight_agent.settings import Settings
 
@@ -28,14 +28,14 @@ _MAX_DETAIL: Final = 200
 
 
 class OpenRouterEmbedder:
-    """Implements `ports.knowledge.Embedder` over OpenRouter's embeddings endpoint."""
+    """Implements `ports.knowledge.Embedder` over OpenRouter's embeddings endpoint, for
+    the model and width of `config` (`config/models.yaml` `embedding`)."""
 
     def __init__(
         self,
+        config: EmbeddingConfig,
         api_key: SecretStr,
         *,
-        model: str = DEFAULT_MODEL,
-        dim: int = DEFAULT_DIM,
         base_url: str = OPENROUTER_API,
         timeout_s: float = 30.0,
         batch_size: int = 64,
@@ -44,8 +44,8 @@ class OpenRouterEmbedder:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         self._key = api_key
-        self._model = model
-        self._dim = dim
+        self._model = config.model
+        self._dim = config.dim
         self._base_url = base_url
         self._timeout_s = timeout_s
         self._batch_size = batch_size
@@ -105,16 +105,13 @@ def embedder_for(settings: Settings) -> Embedder:
     """The embedder of `settings.llm_mode`: OpenRouter in live and record mode (the key
     is required), the deterministic fake otherwise. Both give `config/models.yaml`'s
     `embedding.dim` (1536 when the file has no `embedding`)."""
-    model, dim = _embedding_config(settings.models_config)
+    config = embedding_config(settings.models_config)
     if settings.llm_mode in ("live", "record"):
-        return OpenRouterEmbedder(settings.require_openrouter_key(), model=model, dim=dim)
-    return FakeEmbedder(dim=dim)
+        return OpenRouterEmbedder(config, settings.require_openrouter_key())
+    return FakeEmbedder(dim=config.dim)
 
 
-def _embedding_config(path: Path) -> tuple[str, int]:
-    if not path.is_file():
-        return DEFAULT_MODEL, DEFAULT_DIM
-    embedding = load_models_config(path).embedding
-    if embedding is None:
-        return DEFAULT_MODEL, DEFAULT_DIM
-    return embedding.model, embedding.dim
+def embedding_config(path: Path) -> EmbeddingConfig:
+    """The models file's `embedding`, or the defaults when it has none (or is missing)."""
+    embedding = load_models_config(path).embedding if path.is_file() else None
+    return embedding or EmbeddingConfig(model=DEFAULT_MODEL, dim=DEFAULT_DIM)

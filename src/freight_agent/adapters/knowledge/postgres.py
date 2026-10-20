@@ -231,11 +231,13 @@ def _hit(section: ResolvedSection, score: float) -> SearchHit:
     )
 
 
-def knowledge_index(settings: Settings) -> PostgresSopIndex:
+def knowledge_index(settings: Settings, *, embedder: Embedder | None = None) -> PostgresSopIndex:
     """The entry point `bootstrap` loads by name for `PERSISTENCE=postgres`: the index on
-    `DATABASE_URL`, embedding queries with the embedder of `LLM_MODE` (`embedder_for`)."""
+    `DATABASE_URL`, embedding queries with `embedder` (default: the one of `LLM_MODE`,
+    `embedder_for`; the composition root passes its own)."""
     return PostgresSopIndex(
-        settings.require_database_url().get_secret_value(), embedder=embedder_for(settings)
+        settings.require_database_url().get_secret_value(),
+        embedder=embedder_for(settings) if embedder is None else embedder,
     )
 
 
