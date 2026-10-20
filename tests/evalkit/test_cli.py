@@ -144,6 +144,7 @@ def test_help_lists_the_command_groups() -> None:
     assert result.exit_code == 0
     assert "eval" in result.output
     assert "sop" in result.output
+    assert "prompts" in result.output
 
 
 def test_importing_the_cli_loads_neither_the_harness_nor_langchain() -> None:

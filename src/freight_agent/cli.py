@@ -1,5 +1,5 @@
-"""Command line entry point: `agent eval run|list`, `agent sop ...` (in `cli_sop.py`)
-and `agent serve`.
+"""Command line entry point: `agent eval run|list`, `agent sop ...` (in `cli_sop.py`),
+`agent prompts ...` (in `cli_prompts.py`) and `agent serve`.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from freight_agent.cli_prompts import prompts_app
 from freight_agent.cli_sop import sop_app
 from freight_agent.settings import MissingSetting, Settings
 
@@ -31,6 +32,7 @@ eval_app = typer.Typer(
 )
 app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
+app.add_typer(prompts_app, name="prompts")
 
 # Exit codes of `agent eval run`.
 PASSED = 0
