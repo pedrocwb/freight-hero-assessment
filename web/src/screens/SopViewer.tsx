@@ -100,7 +100,7 @@ export function SopViewer() {
   return (
     <>
       <ScreenHead
-        title="SOP viewer"
+        title="SOPs"
         lede="The procedure the agent reads for a client, load type, event intent and stage. Standard sections apply until a client's own section replaces or extends them."
         actions={
           effective.data ? (

@@ -722,8 +722,6 @@ export function createApi(fetcher: Fetcher, base = "/api") {
   };
 }
 
-export type Api = ReturnType<typeof createApi>;
-
 export const api = createApi((input, init) => fetch(input, init));
 
 // --- derived values ----------------------------------------------------------------------
