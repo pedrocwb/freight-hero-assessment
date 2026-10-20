@@ -8,17 +8,32 @@ changes it" is enforced: a client only ever writes the sections it changes.
 
 Intents are string ids of the broker's catalog (`domain.broker`). The knowledge base
 models (documents uploaded, the draft an editor reviews, the versions published) live
-here too; `ports.knowledge` stores and indexes them.
+here too; `ports.knowledge` stores and indexes them. A layer belongs to a broker, or to
+nobody (`broker_id` None): the standard layer every broker inherits. The standard
+catalog's id (`STANDARD_BROKER_ID`) names that layer too, so it is read as None.
 """
 
-from collections.abc import Sequence
+import hashlib
+import json
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from enum import StrEnum
 
+from pydantic import field_validator
+
 from freight_agent.domain.base import DomainModel
-from freight_agent.domain.broker import DocumentRequirement, IntentDef, ObligationDef
+from freight_agent.domain.broker import (
+    STANDARD_BROKER_ID,
+    Broker,
+    DocumentRequirement,
+    IntentDef,
+    ObligationDef,
+    Rollout,
+)
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Stage
+
+VERSION_LENGTH = 12
 
 
 class SopLayer(StrEnum):
@@ -87,11 +102,33 @@ def effective_sections(
     SOP lint reports it earlier, but silently dropping an editor's text would hide
     the mistake at run time.
     """
-    merged: dict[str, ResolvedSection] = {}
+    merged = _merge(sections, client_id=client_id, load_types=load_types)
+    return tuple(merged[section_id][0] for section_id in sorted(merged))
+
+
+def contributors(
+    sections: Sequence[SopSection], *, client_id: str, load_types: Sequence[str]
+) -> dict[str, tuple[SopSection, ...]]:
+    """For each visible section id, the sections whose text the merged section holds,
+    least specific first: the objects given, so a caller can map them back to its rows.
+
+    A section a `replace` shadows is not among them: its text no longer applies.
+    """
+    merged = _merge(sections, client_id=client_id, load_types=load_types)
+    return {section_id: merged[section_id][1] for section_id in sorted(merged)}
+
+
+def _merge(
+    sections: Sequence[SopSection], *, client_id: str, load_types: Sequence[str]
+) -> dict[str, tuple[ResolvedSection, tuple[SopSection, ...]]]:
+    merged: dict[str, tuple[ResolvedSection, tuple[SopSection, ...]]] = {}
     for scope in _visible_scopes(sections, client_id=client_id, load_types=load_types):
         for section in scope:
-            merged[section.section_id] = _apply(merged.get(section.section_id), section)
-    return tuple(merged[section_id] for section_id in sorted(merged))
+            inherited = merged.get(section.section_id)
+            resolved = _apply(inherited[0] if inherited else None, section)
+            parts = (*inherited[1], section) if inherited and _extends(section) else (section,)
+            merged[section.section_id] = (resolved, parts)
+    return merged
 
 
 def resolve(
@@ -151,9 +188,12 @@ def _check_unique_ids(scope: Sequence[SopSection]) -> None:
             )
 
 
+def _extends(section: SopSection) -> bool:
+    return section.mode is MergeMode.EXTEND and section.layer is not SopLayer.STANDARD
+
+
 def _apply(inherited: ResolvedSection | None, section: SopSection) -> ResolvedSection:
-    extends = section.mode is MergeMode.EXTEND and section.layer is not SopLayer.STANDARD
-    if not extends:
+    if not _extends(section):
         return ResolvedSection(
             section_id=section.section_id,
             title=section.title,
@@ -195,6 +235,21 @@ def _applies(section: ResolvedSection, *, intent: str, stage: Stage) -> bool:
 # --- the knowledge base: retrieval, uploads, drafts and published versions ---------------
 
 
+def layer_owner(broker_id: str | None) -> str | None:
+    """The owner of a layer: a broker id, or None for the standard layer (which the
+    standard catalog's id also names)."""
+    return None if broker_id in (None, STANDARD_BROKER_ID) else broker_id
+
+
+class _LayerOwned(DomainModel):
+    broker_id: str | None
+
+    @field_validator("broker_id")
+    @classmethod
+    def _owner(cls, value: str | None) -> str | None:
+        return layer_owner(value)
+
+
 class SearchHit(DomainModel):
     """One section a search found, best first. `score` only orders hits of one search."""
 
@@ -204,14 +259,13 @@ class SearchHit(DomainModel):
     score: float
 
 
-class SopDocument(DomainModel):
+class SopDocument(_LayerOwned):
     """A file an editor uploaded (a broker's SOP PDF), kept as a blob.
 
     `broker_id` None is the standard layer, shared by every broker.
     """
 
     document_id: str
-    broker_id: str | None
     filename: str
     content_type: str
     blob_ref: str
@@ -259,15 +313,16 @@ class ProposedIntent(IntentDef):
     accepted: bool | None = None
 
 
-class SopDraft(DomainModel):
+class SopDraft(_LayerOwned):
     """The one draft of a broker's SOP (None: the standard layer), edited until published.
 
     Besides sections, the compile step proposes catalog changes the SOP implies: new
     intents, document requirements, and obligations (a new kind such as `pod`, or new
-    timing for `eta_request`). Publishing applies the accepted ones to the broker.
+    timing for `eta_request`). Publishing applies the accepted ones to the broker
+    (`with_proposals`): the intents an editor accepted, and every requirement and
+    obligation still in the draft (an editor removes the ones to drop).
     """
 
-    broker_id: str | None
     sections: tuple[DraftSection, ...] = ()
     proposed_intents: tuple[ProposedIntent, ...] = ()
     proposed_requirements: tuple[DocumentRequirement, ...] = ()
@@ -276,12 +331,104 @@ class SopDraft(DomainModel):
     updated_at: datetime
 
 
-class SopVersion(DomainModel):
-    """A published, immutable set of sections. `version` is its content hash."""
+class SopVersion(_LayerOwned):
+    """A published, immutable set of sections. `version` is its content hash
+    (`version_hash`), so the same sections always publish as the same version."""
 
-    broker_id: str | None
     version: str
     sections: tuple[SopSection, ...]
     published_at: datetime
     published_by: str
     lint: tuple[str, ...] = ()  # the warnings the publish accepted
+
+
+def version_hash(sections: Iterable[SopSection]) -> str:
+    """Short sha256 of the sections' content, in order: the id of a published version."""
+    dumped = [s.model_dump(mode="json") for s in sections]
+    text = json.dumps(dumped, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:VERSION_LENGTH]
+
+
+def search_text(section: SopSection) -> str:
+    """What the index embeds and searches for a section: its heading and its text."""
+    return f"{section.title}\n{section.description}\n\n{section.body}"
+
+
+def section_from_draft(section: DraftSection, broker_id: str | None, source: str) -> SopSection:
+    """The section a draft section publishes as. `source` says where its text came from
+    (an upload and its pages), for `ResolvedSection.sources`."""
+    standard = layer_owner(broker_id) is None or section.layer is SopLayer.STANDARD
+    return SopSection(
+        section_id=section.section_id,
+        layer=SopLayer.STANDARD if standard else section.layer,
+        client_id=None if standard else broker_id,
+        load_type=None if standard else section.load_type,
+        title=section.title,
+        description=section.description,
+        intents=section.intents,
+        stages=section.stages,
+        mode=MergeMode.REPLACE if standard else section.mode,
+        body=section.body,
+        source=source,
+    )
+
+
+def with_proposals(broker: Broker, draft: SopDraft) -> Broker:
+    """The broker's catalog once the draft is published.
+
+    Adds the intents the editor accepted (an id already in the catalog keeps its
+    definition), and puts in every obligation and requirement the draft proposes (one of
+    the same kind, or the same type and stage, is replaced). A new obligation kind also
+    gets its follow-up intent, a system intent, unless the catalog has it: its follow-up
+    timer produces that intent.
+    """
+    intents = list(broker.intents)
+    known = {i.intent_id for i in intents}
+    for proposed in draft.proposed_intents:
+        if proposed.accepted and proposed.intent_id not in known:
+            intents.append(IntentDef(**proposed.model_dump(exclude={"evidence", "accepted"})))
+            known.add(proposed.intent_id)
+    proposed_kinds = {o.kind: o for o in draft.proposed_obligations}
+    obligations = [proposed_kinds.pop(o.kind, o) for o in broker.obligations]
+    obligations.extend(proposed_kinds.values())
+    updated = broker.model_copy(
+        update={"intents": tuple(intents), "obligations": tuple(obligations)}
+    )
+    for obligation in draft.proposed_obligations:
+        follow_up = updated.follow_up_intent(obligation.kind)
+        if follow_up is not None and follow_up not in known:
+            intents.append(
+                IntentDef(
+                    intent_id=follow_up,
+                    title=f"{obligation.title} follow-up due",
+                    description=(
+                        f"The follow-up timer of an open {obligation.title} is due: its wait "
+                        "ended without an answer."
+                    ),
+                    system=True,
+                )
+            )
+            known.add(follow_up)
+    requirements = {(r.type_id, r.at_stage): r for r in broker.documents}
+    requirements.update({(r.type_id, r.at_stage): r for r in draft.proposed_requirements})
+    return updated.model_copy(
+        update={"intents": tuple(intents), "documents": tuple(requirements.values())}
+    )
+
+
+def adopt_sop(broker: Broker, sop_version: str, *, saved: bool, percent: int = 100) -> Broker:
+    """The broker's next configuration, running SOP `sop_version`.
+
+    A broker already saved gets a new `config_version`, and `percent` of its loads run
+    on it, the rest on the version it replaces (a canary; 0 is a rollback). A broker
+    saved for the first time keeps version 1, with no previous version to share with.
+    """
+    if not saved:
+        return broker.model_copy(update={"sop_version": sop_version, "rollout": Rollout()})
+    return broker.model_copy(
+        update={
+            "sop_version": sop_version,
+            "config_version": broker.config_version + 1,
+            "rollout": Rollout(percent=percent, previous_version=broker.config_version),
+        }
+    )

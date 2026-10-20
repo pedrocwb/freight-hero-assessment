@@ -11,9 +11,15 @@ Owner: card W3-KNW. Two ports, because they live in different phases of a run:
   Postgres; token overlap in memory).
 
 `broker_id` None is the standard layer, which every broker inherits.
+
+Embeddings are the index's business: a publish embeds each section's `search_text` and
+hands the vectors to `save_version`, in the order of the version's sections. A store that
+does not search by vector (memory) ignores them; Postgres keeps them next to the section,
+with the model that made them, and a search only compares vectors of its own model.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from freight_agent.domain.load import Stage
@@ -25,6 +31,18 @@ from freight_agent.domain.sop import (
     SopDraft,
     SopVersion,
 )
+
+
+class EmbeddingError(Exception):
+    """The embedding model failed or answered something unusable. Names the model."""
+
+
+@dataclass(frozen=True)
+class SectionEmbeddings:
+    """One vector per section of a version, in the order of `SopVersion.sections`."""
+
+    model: str
+    vectors: tuple[tuple[float, ...], ...]
 
 
 class SopStore(Protocol):
@@ -42,9 +60,15 @@ class SopStore(Protocol):
 
     async def get_draft(self, broker_id: str | None) -> SopDraft | None: ...
 
-    async def save_version(self, version: SopVersion) -> None:
-        """Store a published version. Versions are immutable: saving an existing
-        `(broker_id, version)` again changes nothing."""
+    async def save_version(
+        self, version: SopVersion, embeddings: SectionEmbeddings | None = None
+    ) -> None:
+        """Publish a version: it becomes the layer's published one.
+
+        A version's sections never change (its id is their hash). Saving a version that
+        exists publishes it again: it becomes the published one, with the new
+        `published_at`, `published_by` and `lint`, and new embeddings replace the old.
+        """
         ...
 
     async def get_version(self, broker_id: str | None, version: str) -> SopVersion | None: ...
@@ -54,7 +78,8 @@ class SopStore(Protocol):
         ...
 
     async def versions(self, broker_id: str | None) -> list[SopVersion]:
-        """Every published version, oldest first."""
+        """Every published version, in the order they were last published: the last one
+        is `published`."""
         ...
 
 
@@ -104,5 +129,5 @@ class Embedder(Protocol):
     def dim(self) -> int: ...
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """One vector of `dim` floats per text, in order."""
+        """One vector of `dim` floats per text, in order. Raises `EmbeddingError`."""
         ...
