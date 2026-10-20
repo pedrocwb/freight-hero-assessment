@@ -373,6 +373,16 @@ async def test_read_document_lists_the_valid_ids_for_an_unknown_one(load: Load) 
     answer = await call(ctx, "read_document", id="att_9")
 
     assert answer == 'Unknown id \'att_9\'. Valid id values: "att_1", "doc_1".'
+    assert (await call(ctx, "read_document")).startswith("Missing id. Valid id values:")
+
+
+async def test_read_document_understands_the_id_named_after_what_it_is(load: Load) -> None:
+    ctx = context(load, documents=(document(),))
+
+    by_id = await call(ctx, "read_document", id="doc_1")
+
+    assert await call(ctx, "read_document", document_id="doc_1") == by_id
+    assert await call(ctx, "read_document", attachment_id="att_1") == by_id
 
 
 async def test_list_document_requirements_shows_where_the_load_stands(load: Load) -> None:

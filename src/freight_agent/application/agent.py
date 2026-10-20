@@ -168,8 +168,9 @@ def stage_from_transcript(
     staged nothing). Read tool calls and unknown tools are trajectory steps with
     `accepted` None and the result the transcript holds (none in scripted mode, where
     tools never run); the answer (`finish`) is not a step. An action tool's recorded
-    answer is recomputed; one that differs from the recorded text (the rules changed
-    since a cassette was recorded) is logged.
+    answer is recomputed and the recomputed one is recorded; one that differs from the
+    recorded text is logged at info (a cassette recorded under other rules; scripted
+    results are free text, so they often differ).
     """
     staging = Staging(checks, rules, max_rejections)
     results = _tool_results(transcript)
@@ -187,7 +188,7 @@ def stage_from_transcript(
             if name in ACTION_TOOLS and name in offered:
                 text, accepted = staging.answer(name, args)
                 if recorded is not None and recorded != text:
-                    logger.warning(
+                    logger.info(
                         "the %s call %s was answered %r, the rules now answer %r",
                         name,
                         call_id,

@@ -274,9 +274,12 @@ def _readable_ids(ctx: RunContext) -> dict[str, Attachment | None]:
 
 def _read_document_tool(ctx: RunContext, readable: Mapping[str, Attachment | None]) -> ToolSpec:
     async def run(args: dict[str, Any]) -> str:
-        wanted = _text_arg(args, "id")
+        # `id` is the parameter; a model that names it after the id it holds is understood.
+        wanted = next(
+            (v for k in ("id", "document_id", "attachment_id") if (v := _text_arg(args, k))), ""
+        )
         if wanted not in readable:
-            return _unknown("id", args, readable)
+            return _unknown("id", {"id": wanted} if wanted else {}, readable)
         document = ctx.document(wanted)
         if document is not None:
             return render_document(document)

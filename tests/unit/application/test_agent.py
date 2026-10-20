@@ -492,7 +492,7 @@ def test_a_recorded_answer_that_the_rules_no_longer_give_is_logged(
 ) -> None:
     transcript = Transcript().round(("send_sms", REPLY_ARGS), results=("accepted as #9",)).build()
 
-    with caplog.at_level(logging.WARNING, logger="freight_agent.application.agent"):
+    with caplog.at_level(logging.INFO, logger="freight_agent.application.agent"):
         staged = fold(context(load), transcript)
 
     assert staged.trajectory[0].result == "accepted as action #1"
