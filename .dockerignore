@@ -18,6 +18,7 @@
 **/node_modules
 web/dist
 *.egg-info
+.langgraph_api
 
 # Caches
 **/__pycache__
