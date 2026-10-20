@@ -226,14 +226,23 @@ class SopIngestion:
     timeout_s: float = 120.0
 
     async def upload(self, broker_id: str, filename: str, content_type: str, data: bytes) -> Upload:
-        """Ingest a document and compile it into the broker's draft."""
+        """Ingest a document and compile it into the broker's draft.
+
+        The document is stored whatever the compile does: a model that fails, times out,
+        or has no recording of this request (replay mode) leaves it `stored`, with the
+        reason, and the editor compiles it again later (`compile_draft`).
+        """
         ingested = await self.ingest_document(broker_id, filename, content_type, data)
         if not ingested.readable:
             return Upload(ingested.document, "failed", error="the file could not be read")
+        document_id = ingested.document.document_id
         try:
-            draft = await self.compile_draft(broker_id, ingested.document.document_id)
-        except LlmError as exc:  # the editor may upload again: the document stays stored
-            logger.warning("compiling %s failed: %s", ingested.document.document_id, exc)
+            draft = await self.compile_draft(broker_id, document_id)
+        except LlmError as exc:
+            logger.warning("compiling %s failed: %s", document_id, exc)
+            return Upload(ingested.document, "stored", error=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # any model adapter's own failure, such as a missing cassette
+            logger.exception("compiling %s failed", document_id)
             return Upload(ingested.document, "stored", error=f"{type(exc).__name__}: {exc}")
         return Upload(ingested.document, "compiled", draft=draft)
 
@@ -644,8 +653,8 @@ def _coverage_problems(
     for types in ((), *((t,) for t in load_types)):
         try:
             merged = effective_sections(sections, client_id=owner, load_types=types)
-        except DomainError as exc:  # the section checks report what the merge refuses
-            return [str(exc)]  # pragma: no cover
+        except DomainError as exc:  # pragma: no cover - the section checks report it first
+            return [str(exc)]
         named = {intent for s in merged for intent in s.intents}
         loads = f"a {types[0]} load" if types else "a load"
         problems += [
