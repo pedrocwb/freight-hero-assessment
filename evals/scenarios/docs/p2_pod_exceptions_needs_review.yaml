@@ -23,8 +23,8 @@ description: >-
   values found, the POD request stays open, the stage stays at_delivery, and the driver
   is told nothing.
 load: fixtures/load_481207.json
-broker_file: brokers/acme.json
 load_overrides:
+  broker: {id: acme, name: Acme Freight}
   stage: to_delivery
 date: 2026-10-14
 start: "09:00"

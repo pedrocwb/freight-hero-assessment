@@ -24,7 +24,6 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError, computed_field
 
-from freight_agent.evalkit.brokers import BrokerExport
 from freight_agent.evalkit.graders import Budget, check_invariants, grade_step
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.observe import NullObserver, Observer
@@ -346,7 +345,6 @@ class SuiteRunner:
     `scripted` mode feeds each trial the scenario's own script; the other modes need a
     `model_factory`. `record` runs like `live` (the factory's model records as it goes).
     An `observer` (`evalkit.observe`) sees every trial and step, for experiment tracking.
-    `broker` (a broker export) plays every scenario on that broker.
     """
 
     def __init__(
@@ -360,7 +358,6 @@ class SuiteRunner:
         runtime_factory: RuntimeFactory | None = None,
         observer: Observer | None = None,
         trial_factory: TrialFactory | None = None,
-        broker: BrokerExport | None = None,
     ) -> None:
         if mode == "scripted" and model_factory is not None:
             raise ValueError("scripted mode feeds the scenario scripts; do not pass a model")
@@ -391,7 +388,6 @@ class SuiteRunner:
             model=trial_model,
             observer=self._observer,
             trial_factory=factory,
-            broker=broker,
         )
 
     async def run(

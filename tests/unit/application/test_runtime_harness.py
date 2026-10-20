@@ -24,6 +24,7 @@ from freight_agent.application.contracts import (
 )
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.actions import Action, Plan, Purpose, ScheduleTimer, SendSms
+from freight_agent.domain.broker import Broker
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
@@ -122,10 +123,13 @@ SECTIONS = (*STANDARD, *NORTHLINE)
 
 
 class FakeSop(MemorySopIndex):
-    """The SopIndex contract over a fixed list of sections, at version "test"."""
+    """The SopIndex contract over a fixed list of sections, at version "test", and the
+    catalogs given (a broker not given runs on the standard catalog)."""
 
-    def __init__(self, sections: Sequence[SopSection] = SECTIONS) -> None:
-        super().__init__(sections, version="test")
+    def __init__(
+        self, sections: Sequence[SopSection] = SECTIONS, *, brokers: Sequence[Broker] = ()
+    ) -> None:
+        super().__init__(sections, version="test", brokers=brokers)
 
 
 ASK_ETA = SendSms(

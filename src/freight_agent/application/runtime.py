@@ -361,6 +361,7 @@ class AgentRuntime:
                 ctx = await load_run_context(
                     uow,
                     event,
+                    knowledge=deps.knowledge,
                     now=attempt.started_at,
                     recent_limit=deps.config.recent_events_limit,
                     history_limit=deps.config.history_events_limit,
@@ -446,7 +447,6 @@ class AgentRuntime:
             error=verdict.error,
             intent=state.intent if state else None,
             broker_id=broker.broker_id if broker else None,
-            broker_config_version=broker.config_version if broker else None,
             trajectory=state.trajectory if state else (),
             sections_searched=state.sections_searched if state else (),
             rejections=state.rejections if state else 0,

@@ -12,7 +12,6 @@ from fastapi import APIRouter, Query
 from freight_agent.api.deps import Service
 from freight_agent.api.errors import BadRequest, Unprocessable
 from freight_agent.api.schemas import SearchHitView, SopView
-from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import ResolvedSop
 
@@ -39,8 +38,7 @@ async def preview(
 ) -> ResolvedSop:
     """What the resolver gives the agent for this event: the applying sections and the
     catalog of every section the client sees. `intent` is an id of the client's catalog."""
-    async with service.uow_factory() as uow:
-        broker = await uow.brokers.get(client_id) or standard_broker()
+    broker = await service.knowledge.broker(client_id)
     if broker.intent(intent) is None:
         known = ", ".join(i.intent_id for i in broker.intents)
         raise Unprocessable(f"unknown intent {intent!r} for {client_id}: use one of {known}")

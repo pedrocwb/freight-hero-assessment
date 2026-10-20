@@ -8,12 +8,13 @@ so the run reads exactly the sections the file repository gave it before wave 3.
 `search` ranks the visible sections by the query words they contain (title and
 description count twice); it needs no embedding, so it works offline.
 
-- `MemorySopIndex(sections)`: a fixed set of sections of every layer.
+- `MemorySopIndex(sections, brokers=...)`: a fixed set of sections of every layer, and
+  of catalogs (a broker not given runs on the standard catalog).
 - `MemorySopIndex.from_files(root)` keeps the pre-wave-3 behaviour of
   `FileSopRepository`: the tree is read on every call, so an edited file applies to the
   next run; a broken file fails the runs of the brokers that see it (`SopFormatError`),
   never the others, and never the start of the app; the version every run records is
-  the tree's content hash.
+  the tree's content hash. Each client's catalog is its `broker.yaml` in the tree.
 """
 
 import re
@@ -21,6 +22,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.domain.broker import Broker, standard_broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import (
     ResolvedSection,
@@ -65,15 +67,22 @@ def word_search(sections: Sequence[ResolvedSection], query: str, k: int) -> tupl
 
 class MemorySopIndex:
     """Implements `ports.knowledge.SopIndex` over a fixed set of sections of every layer,
-    merged by the domain. `version` defaults to a hash of the sections.
+    merged by the domain, and of catalogs. `version` defaults to a hash of the sections.
 
-    A subclass changes where the sections come from (`sections_for`) and what their
-    version is (`content_version`).
+    A subclass changes where the sections and the catalogs come from (`sections_for`,
+    `broker`) and what their version is (`content_version`).
     """
 
-    def __init__(self, sections: Iterable[SopSection], *, version: str | None = None) -> None:
+    def __init__(
+        self,
+        sections: Iterable[SopSection],
+        *,
+        version: str | None = None,
+        brokers: Iterable[Broker] = (),
+    ) -> None:
         self._sections = tuple(sections)
         self._version = version if version is not None else content_hash(self._sections)
+        self._brokers = {broker.broker_id: broker for broker in brokers}
 
     @classmethod
     def from_files(cls, root: Path) -> "MemorySopIndex":
@@ -91,6 +100,9 @@ class MemorySopIndex:
 
     async def version(self, broker_id: str) -> str | None:
         return self.content_version
+
+    async def broker(self, broker_id: str) -> Broker:
+        return self._brokers.get(broker_id) or standard_broker()
 
     async def by_applies(
         self, broker_id: str, load_types: Sequence[str], intent: str, stage: Stage
@@ -136,3 +148,6 @@ class _FileTreeIndex(MemorySopIndex):
 
     async def sections_for(self, broker_id: str) -> Sequence[SopSection]:
         return await self._files.sections_for_client(broker_id)
+
+    async def broker(self, broker_id: str) -> Broker:
+        return self._files.broker(broker_id)

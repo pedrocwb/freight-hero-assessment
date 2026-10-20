@@ -17,8 +17,11 @@ import pytest
 
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.sop.files import (
+    STANDARD_INTENTS,
     SopFile,
+    intent_ids,
     locate,
+    read_catalog,
     read_sop_file,
     sop_paths,
 )
@@ -45,11 +48,26 @@ CANONICAL: dict[str, frozenset[Intent]] = {
     "documents": frozenset({Intent.DOCUMENT, Intent.DOCUMENT_PROCESSED}),
 }
 
+# Acme Freight's own procedure (CO-07, revision 3): a broker onboarded with a catalog
+# (`clients/acme/broker.yaml`) and five sections of its own, two beyond the table.
+ACME_FILES: dict[str, MergeMode] = {
+    f"clients/acme/{section_id}.md": MergeMode.REPLACE
+    for section_id in (
+        "communication_rules",
+        "delay_risk_high",
+        "detention",
+        "driver_questions",
+        "proof_of_delivery",
+    )
+}
+ACME_ONLY = {"detention", "proof_of_delivery"}
+
 # Every file outside standard/, with the merge mode the table gives it.
 OVERRIDES: dict[str, MergeMode] = {
     "clients/northline/delay_risk_high.md": MergeMode.REPLACE,
     "clients/keystone/delay_risk_high.md": MergeMode.REPLACE,
     "clients/keystone/types/reefer/driver_departed.md": MergeMode.EXTEND,
+    **ACME_FILES,
 }
 
 # The validator escalates outbound text with these, so no example in a SOP may hold one.
@@ -74,11 +92,15 @@ def _sources() -> list[str]:
 
 
 def _files() -> dict[str, SopFile]:
+    """Every file, checked against the intents of its client's catalog."""
     files: dict[str, SopFile] = {}
     for source, path in sop_paths(SOPS):
         location = locate(source)
         assert location is not None, f"{source} is outside the layout"
-        files[source] = read_sop_file(path, location)
+        intents = STANDARD_INTENTS
+        if location.client_id is not None:
+            intents = intent_ids(read_catalog(SOPS, location.client_id))
+        files[source] = read_sop_file(path, location, intents=intents)
     return files
 
 
@@ -162,6 +184,24 @@ async def test_keystone_alerts_the_broker_slack_and_never_contacts_the_dispatche
     assert "second SMS" in section.body
     # Without the reefer load type, the departure procedure is the standard one.
     assert sections["driver_departed"].sources == (_standard("driver_departed"),)
+
+
+@pytest.mark.unit
+async def test_acme_follows_its_own_catalog_and_sections() -> None:
+    """Acme's catalog adds detention and the POD; its files replace four standard topics
+    and add two, and every other topic stays the standard one."""
+    sections = await _effective("acme")
+    broker = read_catalog(SOPS, "acme")
+
+    assert set(sections) == set(CANONICAL) | ACME_ONLY
+    for section_id, section in sections.items():
+        own = f"clients/acme/{section_id}.md"
+        assert section.sources == ((own,) if own in ACME_FILES else (_standard(section_id),))
+    assert set(sections["detention"].intents) == {"detention_request"}
+    assert "pod_follow_up_due" in sections["proof_of_delivery"].intents
+    assert broker.intent("detention_request") is not None
+    assert [r.opens_obligation for r in broker.requirements_at(Stage.AT_DELIVERY)] == ["pod"]
+    assert broker.validation_config().attempt_cap("eta_request") == 3
 
 
 @pytest.mark.unit

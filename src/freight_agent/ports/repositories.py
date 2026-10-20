@@ -12,7 +12,6 @@ from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.brokers import BrokerRepository
 from freight_agent.ports.documents import DocumentRepository
 
 
@@ -123,7 +122,6 @@ class UnitOfWork(Protocol):
     outbox: OutboxRepository
     runs: RunRepository
     queue: EventQueue
-    brokers: BrokerRepository
     documents: DocumentRepository
 
     async def __aenter__(self) -> Self: ...

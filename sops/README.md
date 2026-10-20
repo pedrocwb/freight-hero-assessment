@@ -20,8 +20,8 @@ and the most specific text wins.
 | Client and load type | `clients/<client id>/types/<load type>/` | One client's loads of one type, for example `clients/keystone/types/reefer/` |
 
 The client id is the broker id in the load details: `northline` is Northline Logistics
-(Client A) and `keystone` is Keystone Freight (Client B). The load type is one of the
-load's types, for example `reefer` for a refrigerated load.
+(Client A), `keystone` is Keystone Freight (Client B) and `acme` is Acme Freight. The load
+type is one of the load's types, for example `reefer` for a refrigerated load.
 
 A client folder holds only the topics that client changes. Everything else comes from
 `standard/`. A new client needs no folder at all until it asks for a change.
@@ -57,8 +57,9 @@ The lines between the two `---` lines are the header: one setting per line, writ
 | `stages` | The stages of the load when the topic applies, as a list in brackets (see below). Leave it out to apply at every stage. |
 | `mode` | Only in a client or load type folder: `replace` (the default) or `extend`. See the next part. |
 
-No other setting is allowed: the check reports an unknown one. In a value, do not write a
-colon followed by a space, and do not start the value with a quote mark.
+No other setting is allowed: the check reports an unknown one. A value with a colon
+followed by a space goes in double quotes, whole: `title: "Late truck: ask for the ETA"`.
+Otherwise do not start a value with a quote mark.
 
 Situations (`intents`):
 
@@ -107,6 +108,37 @@ standard text.
 
 An `extend` file needs a topic with the same id in a less specific folder (`standard/`,
 or the client's folder for a load type file). The check reports it when there is none.
+
+## A client's own situations and requests: `broker.yaml`
+
+Most clients follow the standard catalog: the situations above, the ETA request (30
+minutes between requests, two requests) and the standard documents. A client that needs
+more writes only what it changes in `clients/<client id>/broker.yaml`, next to its
+topics. For example `clients/acme/broker.yaml` adds the situation `detention_request`,
+asks for the ETA every 20 minutes up to 3 times, and requires a signed POD within 120
+minutes of the arrival at the delivery stop:
+
+```
+name: Acme Freight
+intents:
+  - intent_id: detention_request
+    title: Detention request
+    description: The driver reports a wait of more than 2 hours at a facility.
+obligations:
+  - kind: eta_request
+    ...
+documents:
+  - type_id: pod
+    at_stage: at_delivery
+    within_minutes: 120
+    opens_obligation: pod
+```
+
+An entry with a standard id (`eta_request`) replaces the standard one, whole; a new id is
+added. The client's topics may then name its own situations in `intents`. Topics in
+`standard/` name only the standard ones, since every client reads them. The check reports
+a catalog that cannot work: a missing title, a request with no follow-up situation, a
+requirement for an unknown document type.
 
 ## Writing so the agent follows the text
 

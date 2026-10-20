@@ -66,7 +66,6 @@ class RunRecord(DomainModel):
     # The run's reading of the event: the agent's catalog label, else the triage intent.
     intent: str | None = None
     broker_id: str | None = None  # the broker config the run used
-    broker_config_version: int | None = None  # its version (canary: pinned per run)
     trajectory: tuple[TrajectoryStep, ...] = ()  # the agent's tool calls, in order
     sections_searched: tuple[str, ...] = ()  # sections search_sop returned or the agent read
     rejections: int = 0  # action tool calls a rule refused

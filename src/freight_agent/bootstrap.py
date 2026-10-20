@@ -97,8 +97,8 @@ class LazyAdapter:
         return getattr(module, self.attribute, None)
 
 
-# `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, timeout_s=)` and
-# `PdfiumPageReader()` (card W3-DOC).
+# `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, knowledge=,
+# timeout_s=)` and `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
 LIVE_MODES: tuple[LlmMode, ...] = ("live", "record")
@@ -129,8 +129,8 @@ def build_llm(
     - `record`: per role, the primary model, its answers saved for `replay`.
 
     Every role in `config/models.yaml` gets a model, so the eval judge, the simulated
-    driver, the document extractor and the SOP compiler are served by the same router as
-    the gate and the agent.
+    driver and the document extractor are served by the same router as the gate and the
+    agent.
     """
     mode = mode or settings.llm_mode
     if mode == "scripted":
@@ -253,6 +253,7 @@ def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
         llm=deps.llm,
         blobs=deps.blobs,
         pages=pages(),
+        knowledge=deps.knowledge,
         timeout_s=deps.config.llm_timeout_s,
     )
 

@@ -310,3 +310,54 @@ def test_a_missing_folder_is_an_error(tmp_path: Path) -> None:
 
     assert issue.severity is Severity.ERROR
     assert "does not exist" in issue.message
+
+
+# --- a client's catalog -------------------------------------------------------------------
+
+DETENTION_FILE = (
+    "---\nid: detention\ntitle: Detention\ndescription: Truck held.\n"
+    "intents: [detention_request]\n---\n1. Write a TMS note.\n"
+)
+DETENTION_CATALOG = """\
+intents:
+  - intent_id: detention_request
+    title: Detention request
+    description: The truck waited more than 2 hours at a facility.
+"""
+
+
+@pytest.mark.unit
+def test_a_client_file_may_name_an_intent_of_its_catalog(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", DETENTION_CATALOG)
+    _write(root, "clients/acme/detention.md", DETENTION_FILE)
+
+    assert lint(root) == []
+
+
+@pytest.mark.unit
+def test_an_intent_of_another_client_s_catalog_is_an_error(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", DETENTION_CATALOG)
+    _write(root, "clients/beta/detention.md", DETENTION_FILE)
+
+    issue = _only(lint(root), "clients/beta/detention.md")
+
+    assert "'detention_request' in `intents` is not a known intent" in issue.message
+
+
+@pytest.mark.unit
+def test_a_broken_catalog_is_an_error_on_its_file(tmp_path: Path) -> None:
+    issue = _single_error(
+        tmp_path, "clients/acme/broker.yaml", "intents:\n  - intent_id: detention_request\n"
+    )
+
+    assert "the catalog is not valid" in issue.message
+    assert "intents.0.title: Field required" in issue.message
+
+
+@pytest.mark.unit
+def test_a_catalog_outside_a_client_folder_is_an_error(tmp_path: Path) -> None:
+    issue = _single_error(tmp_path, "standard/broker.yaml", DETENTION_CATALOG)
+
+    assert "Move it to clients/<client_id>/broker.yaml" in issue.message

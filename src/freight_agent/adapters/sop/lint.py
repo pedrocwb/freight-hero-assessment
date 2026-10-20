@@ -1,8 +1,9 @@
 """Checks SOP editors run before a change reaches the agent.
 
-Errors are what `FileSopRepository` would refuse to load, plus the rules that span files
-(an `extend` must have something to extend). The coverage warning keeps every section
-tied to at least one eval scenario, so a change to its text is tested.
+Errors are what `FileSopRepository` would refuse to load (a section or a client's
+catalog), plus the rules that span files (an `extend` must have something to extend). The
+coverage warning keeps every section tied to at least one eval scenario, so a change to
+its text is tested.
 """
 
 from collections.abc import Iterable, Sequence
@@ -11,12 +12,18 @@ from enum import StrEnum
 from pathlib import Path
 
 from freight_agent.adapters.sop.files import (
+    CATALOG_FILE,
+    STANDARD_INTENTS,
     SopFile,
     SopFormatError,
+    catalog_paths,
     duplicate_problem,
     duplicates,
+    intent_ids,
+    is_catalog,
     locate,
     outside_layout_problem,
+    read_catalog,
     read_sop_file,
     sop_paths,
 )
@@ -48,13 +55,17 @@ def lint(root: Path, scenario_tags: Iterable[str] | None = None) -> list[LintIss
     except SopFormatError as exc:
         return [_error(exc.source, exc.problem)]
     issues: list[LintIssue] = []
+    catalogs = _catalogs(root, issues)
     files: list[SopFile] = []
     for source, path in paths:
         location = locate(source)
         if location is None:
             issues.append(_error(source, outside_layout_problem()))
             continue
-        file = read_sop_file(path, location)
+        intents = STANDARD_INTENTS
+        if location.client_id is not None:
+            intents = catalogs.get(location.client_id, STANDARD_INTENTS)
+        file = read_sop_file(path, location, intents=intents)
         files.append(file)
         issues.extend(_error(source, problem) for problem in file.problems)
     issues.extend(duplicate_issues(files))
@@ -66,6 +77,28 @@ def lint(root: Path, scenario_tags: Iterable[str] | None = None) -> list[LintIss
 
 def _error(file: str, message: str) -> LintIssue:
     return LintIssue(Severity.ERROR, file, message)
+
+
+def _catalogs(root: Path, issues: list[LintIssue]) -> dict[str, tuple[str, ...]]:
+    """The intents of each client's catalog, by client id. A catalog that cannot be read
+    is an error, and its client's files are checked against the standard intents."""
+    found: dict[str, tuple[str, ...]] = {}
+    for source, _ in catalog_paths(root):
+        if not is_catalog(source):
+            issues.append(
+                _error(
+                    source,
+                    "this catalog is not in a folder the agent reads, so it is never used. "
+                    f"Move it to clients/<client_id>/{CATALOG_FILE}.",
+                )
+            )
+            continue
+        client_id = source.split("/")[1]
+        try:
+            found[client_id] = intent_ids(read_catalog(root, client_id))
+        except SopFormatError as exc:
+            issues.append(_error(exc.source, exc.problem))
+    return found
 
 
 def duplicate_issues(files: Sequence[SopFile]) -> list[LintIssue]:

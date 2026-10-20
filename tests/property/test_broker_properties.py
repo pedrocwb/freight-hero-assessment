@@ -1,119 +1,27 @@
-"""Properties of the broker canary and of catalogs over arbitrary inputs.
+"""Properties of broker catalogs over arbitrary inputs.
 
-Owner: card W3-BRK. The canary (`choose_version`) puts a load on the current version
-when the sha256 of its id falls in the first `percent` buckets of 100, so the choice
-depends on the load id and the percent alone. A catalog that passes the checks comes
-back equal from JSON (what Postgres stores and the API returns).
+Owner: card W3-BRK. A client's catalog built from generated overrides passes the checks
+and comes back equal from JSON (what the API returns); breaking it is always refused.
 """
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from freight_agent.domain.broker import (
     Broker,
+    CatalogOverrides,
     DocumentRequirement,
     EscalationTarget,
     IntentDef,
     ObligationDef,
-    Rollout,
     catalog_problems,
-    choose_version,
-    new_broker,
+    client_broker,
     standard_broker,
-    with_follow_up_intents,
 )
 from freight_agent.domain.load import Stage
 
 pytestmark = pytest.mark.property
-
-load_ids = st.text(min_size=1, max_size=40)
-percents = st.integers(min_value=0, max_value=100)
-SAMPLE = 4000  # loads per share check: the share's spread is under 0.8 points
-
-
-def _pair(percent: int, *, name: str = "Acme v2") -> tuple[Broker, Broker]:
-    previous = new_broker("acme", "Acme")
-    current = previous.revised(
-        name=name, config_version=2, rollout=Rollout(percent=percent, previous_version=1)
-    )
-    return current, previous
-
-
-def _on_current(percent: int, load_id: str) -> bool:
-    current, previous = _pair(percent)
-    return choose_version(current, previous, load_id) is current
-
-
-@given(percents, load_ids)
-def test_the_choice_is_one_of_the_two_versions_and_the_same_every_time(
-    percent: int, load_id: str
-) -> None:
-    current, previous = _pair(percent)
-
-    first = choose_version(current, previous, load_id)
-
-    assert first is current or first is previous
-    assert all(choose_version(current, previous, load_id) is first for _ in range(3))
-
-
-@given(percents, load_ids, st.lists(load_ids, max_size=10))
-def test_a_load_keeps_its_version_whatever_else_runs_or_changes(
-    percent: int, load_id: str, others: list[str]
-) -> None:
-    """Sticky: the side depends on the load id and the percent only, not on the order of
-    the runs nor on what the current version's config says."""
-    current, previous = _pair(percent)
-    renamed, _ = _pair(percent, name="Acme, renamed")
-    before = choose_version(current, previous, load_id) is current
-
-    for other in others:
-        choose_version(current, previous, other)
-
-    assert (choose_version(current, previous, load_id) is current) == before
-    assert (choose_version(renamed, previous, load_id) is renamed) == before
-
-
-@given(load_ids)
-def test_zero_percent_is_the_previous_version_and_a_hundred_the_current_one(
-    load_id: str,
-) -> None:
-    rolled_back, previous = _pair(0)
-    full, _ = _pair(100)
-
-    assert choose_version(rolled_back, previous, load_id) is previous
-    assert choose_version(full, previous, load_id) is full
-
-
-@given(percents, load_ids)
-def test_without_a_previous_version_every_load_runs_the_current_one(
-    percent: int, load_id: str
-) -> None:
-    current, _ = _pair(percent)
-
-    assert choose_version(current, None, load_id) is current
-
-
-@given(percents, percents, load_ids)
-def test_growing_a_canary_never_moves_a_load_back(low: int, high: int, load_id: str) -> None:
-    low, high = sorted((low, high))
-
-    if _on_current(low, load_id):
-        assert _on_current(high, load_id)
-
-
-@settings(max_examples=30, deadline=None)
-@given(percents, st.text(max_size=12))
-def test_the_share_on_the_current_version_is_close_to_the_percent(
-    percent: int, prefix: str
-) -> None:
-    current, previous = _pair(percent)
-
-    on_current = sum(
-        choose_version(current, previous, f"{prefix}{i}") is current for i in range(SAMPLE)
-    )
-
-    assert abs(on_current / SAMPLE - percent / 100) <= 0.04
 
 
 # --- catalogs ------------------------------------------------------------------------------
@@ -127,8 +35,8 @@ texts = st.text(min_size=1, max_size=30).filter(lambda s: bool(s.strip()))
 
 @st.composite
 def brokers(draw: st.DrawFn) -> Broker:
-    """The standard catalog plus a broker's own intents, obligations and requirements."""
-    standard = standard_broker()
+    """A client's catalog: the standard one plus its own intents, obligations (each with
+    its follow-up intent) and requirements."""
     intent_ids = draw(
         st.lists(
             snake_ids.filter(lambda s: s not in _TAKEN and not s.endswith(_FOLLOW_UP)),
@@ -184,14 +92,23 @@ def brokers(draw: st.DrawFn) -> Broker:
         )
         for kind, stage in zip(kinds, stages, strict=False)
     )
-    all_obligations = (*standard.obligations, *obligations)
-    return new_broker("acme", "Acme").revised(
-        intents=with_follow_up_intents((*standard.intents, *intents), all_obligations),
-        obligations=all_obligations,
+    follow_ups = tuple(
+        IntentDef(
+            intent_id=f"{kind}{_FOLLOW_UP}",
+            title=f"{kind} follow-up due",
+            description=f"The follow-up timer of an open {kind} obligation is due.",
+            system=True,
+        )
+        for kind in kinds
+    )
+    overrides = CatalogOverrides(
+        name="Acme",
+        intents=(*intents, *follow_ups),
+        obligations=obligations,
         documents=requirements,
         triage=draw(st.booleans()),
-        config_version=draw(st.integers(1, 1000)),
     )
+    return client_broker("acme", overrides)
 
 
 @given(brokers())

@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.domain.broker import new_broker
 from freight_agent.domain.documents import Document, DocumentStatus
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel
@@ -132,28 +131,8 @@ def test_virtual_clock_advances_real_time_across_the_fall_back() -> None:
     assert clock.now().astimezone(UTC) == datetime(2026, 11, 1, 9, 10, tzinfo=UTC)
 
 
-# --- the wave 3 repositories on the same transactions (C0; their cards' contract suites
-# pin them down) ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-async def test_brokers_keep_every_version_and_roll_back_with_the_unit_of_work() -> None:
-    store = MemoryStore()
-    first = new_broker("acme", "Acme")
-    second = first.model_copy(update={"config_version": 2, "name": "Acme Logistics"})
-    async with store.unit_of_work() as uow:
-        await uow.brokers.save(first)
-        await uow.brokers.save(second)
-        await uow.commit()
-    async with store.unit_of_work() as uow:
-        await uow.brokers.save(new_broker("beta", "Beta"))  # never committed
-
-    async with store.unit_of_work() as uow:
-        assert await uow.brokers.get("acme") == second
-        assert await uow.brokers.get_version("acme", 1) == first
-        assert await uow.brokers.versions("acme") == [first, second]
-        assert [b.broker_id for b in await uow.brokers.list()] == ["acme"]
-        assert await uow.brokers.get("beta") is None
+# --- the wave 3 document repository on the same transactions (C0; its card's contract
+# suite pins it down) ----------------------------------------------------------------------
 
 
 @pytest.mark.unit

@@ -1,0 +1,48 @@
+# Acme Freight's catalog: only what Acme changes in the standard one. Everything not
+# written here (the other intents, the document types, the limits) is the standard
+# catalog's (src/freight_agent/domain/broker.py, `standard_broker`). Taken from Acme's
+# procedure CO-07 In-Transit Communication, revision 3; the sections of this folder hold
+# its text.
+#
+# An intent, obligation or document type with a standard id replaces that one, whole; a
+# new id is added after the standard ones. `uv run agent sop lint` checks this file.
+name: Acme Freight
+
+intents:
+  # The driver's message about a long wait at a facility (section `detention`).
+  - intent_id: detention_request
+    title: Detention request
+    description: The driver reports that the truck has waited more than 2 hours at a shipper or a receiver, or asks us to start detention.
+    examples:
+      - Been at the dock since 7, still not unloaded
+      - We've been here 3 hours, can you start detention?
+    priority: 55
+  # What the `pod` obligation's follow-up timer emits (section `proof_of_delivery`).
+  - intent_id: pod_follow_up_due
+    title: POD follow-up due
+    description: "The follow-up timer of an open POD request is due: no POD arrived in time."
+    system: true
+
+obligations:
+  # Acme asks for the ETA every 20 minutes, up to 3 times (the standard: 30 and 2).
+  - kind: eta_request
+    title: ETA request
+    description: We asked the driver for the arrival time at the next stop and wait for it. Each request SMS is one attempt.
+    follow_up_minutes: 20
+    max_attempts: 3
+    follow_up_intent: eta_follow_up_due
+    on_exhausted: [dispatcher_email, hero_task]
+  # The signed POD, due 120 minutes after the truck arrives at the delivery stop.
+  - kind: pod
+    title: Proof of delivery
+    description: The signed POD is due 120 minutes after the arrival at the delivery stop. One reminder SMS, then a Hero task.
+    follow_up_minutes: 30
+    max_attempts: 1
+    on_exhausted: [hero_task]
+
+documents:
+  # Entering at_delivery opens the `pod` obligation, with its timer 120 minutes later.
+  - type_id: pod
+    at_stage: at_delivery
+    within_minutes: 120
+    opens_obligation: pod

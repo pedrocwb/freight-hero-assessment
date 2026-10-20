@@ -1,5 +1,5 @@
 """Wave 3 runner features: scripted transcripts, extraction scripts, attachments, the judge
-and broker exports.
+and a client's catalog.
 
 A probe runtime stands in for `AgentRuntime` (as `FakeRuntime` does in `test_runner.py`),
 so these pin what the runner gives the runtime and the model before the agent loop and
@@ -8,7 +8,6 @@ extraction model is asked, which bytes an attachment carries, which model the ju
 """
 
 import json
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,17 +28,13 @@ from freight_agent.application.contracts import (
 from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.domain.actions import AgentOutcome, SendSms
-from freight_agent.domain.broker import new_broker
 from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.load import Load
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import RunRecord, RunStatus, Usage
-from freight_agent.domain.sop import SopLayer, SopSection
 from freight_agent.evalkit import runner as runner_module
-from freight_agent.evalkit.brokers import BrokerExport, BrokerSopIndex
 from freight_agent.evalkit.runner import (
     SCRIPTED_TOOL_RESULT,
-    BrokerSeededRuntime,
     ScenarioRunner,
     TrialDeps,
     build_trial_runtime,
@@ -48,10 +43,8 @@ from freight_agent.evalkit.runner import (
     scripted_transcript,
 )
 from freight_agent.evalkit.spec import AgentTurn, Scenario, ScriptedToolCall
-from freight_agent.ports.clock import Clock
-from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, ModelRole, SchemaT
+from freight_agent.ports.llm import LlmRequest, LlmResponse, ModelRole, SchemaT
 
 ROOT = Path(__file__).resolve().parents[2]
 EVALS = ROOT / "evals"
@@ -195,8 +188,10 @@ def message(body: str = "what's the PO?", **extra: Any) -> dict[str, Any]:
     return {**step, **extra}
 
 
-def scripted(probes: Probes, evals: Path = EVALS, **kwargs: Any) -> ScenarioRunner:
-    return ScenarioRunner(evals, NO_SOP, "scripted", trial_factory=probes, **kwargs)
+def scripted(
+    probes: Probes, evals: Path = EVALS, knowledge: SopIndex = NO_SOP, **kwargs: Any
+) -> ScenarioRunner:
+    return ScenarioRunner(evals, knowledge, "scripted", trial_factory=probes, **kwargs)
 
 
 # --- scripted transcripts ---------------------------------------------------------------
@@ -424,98 +419,28 @@ async def test_in_replay_the_given_model_judges_and_its_cost_is_reported_apart()
     assert replay.model.remaining() == 0
 
 
-# --- broker exports ---------------------------------------------------------------------
-
-
-def acme_export() -> BrokerExport:
-    section = SopSection(
-        section_id="detention",
-        layer=SopLayer.CLIENT,
-        client_id="acme",
-        title="Detention",
-        description="Truck held over 2 hours.",
-        intents=("detention_request",),
-        body="Write a TMS note.",
-        source="acme",
-    )
-    return BrokerExport(broker=new_broker("acme", "Acme Freight"), sections=(section,))
-
-
-def evals_with_export(tmp_path: Path) -> Path:
-    evals = tmp_path / "evals"
-    (evals / "fixtures").mkdir(parents=True)
-    (evals / "brokers").mkdir()
-    shutil.copy(EVALS / "fixtures" / "load_481207.json", evals / "fixtures")
-    (evals / "brokers" / "acme.json").write_text(acme_export().to_json(), encoding="utf-8")
-    return evals
+# --- a client's catalog --------------------------------------------------------------------
 
 
 @pytest.mark.unit
-async def test_a_scenarios_broker_file_puts_the_load_on_the_broker_with_its_index(
-    tmp_path: Path,
-) -> None:
+async def test_a_load_on_acme_runs_on_the_catalog_and_sections_of_its_folder() -> None:
+    """The docs suite's setup: `load_overrides` puts the load on broker `acme`, and the
+    trial's index (the `sops/` tree) gives Acme's catalog and its own sections."""
     probes = Probes()
-    evals = evals_with_export(tmp_path)
+    acme = {"broker": {"id": "acme", "name": "Acme Freight"}}
+    runner = scripted(probes, knowledge=MemorySopIndex.from_files(ROOT / "sops"))
 
-    outcome = await scripted(probes, evals).run(
-        scenario({"at": "07:00"}, broker_file="brokers/acme.json")
-    )
+    outcome = await runner.run(scenario({"at": "07:00"}, load_overrides=acme))
 
     assert outcome.error is None
     runtime = probes.runtime
     assert runtime.load is not None
     assert (runtime.load.broker_id, runtime.load.broker_name) == ("acme", "Acme Freight")
-    assert runtime.deps.broker == acme_export().broker
-    assert isinstance(runtime.deps.knowledge, BrokerSopIndex)
-    visible = await runtime.deps.knowledge.visible("acme", ())
-    assert [s.section_id for s in visible] == ["detention"]
-
-
-@pytest.mark.unit
-async def test_the_runners_broker_wins_over_the_scenarios(tmp_path: Path) -> None:
-    probes = Probes()
-    other = BrokerExport(broker=new_broker("beta", "Beta"))
-    runner = scripted(probes, evals_with_export(tmp_path), broker=other)
-
-    await runner.run(scenario({"at": "07:00"}, broker_file="brokers/acme.json"))
-
-    assert probes.runtime.load is not None and probes.runtime.load.broker_id == "beta"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("content", "error"),
-    [(None, "broker file not found: brokers/acme.json"), ("{}", "is not a broker export")],
-)
-async def test_a_bad_broker_file_is_a_setup_error(
-    tmp_path: Path, content: str | None, error: str
-) -> None:
-    evals = evals_with_export(tmp_path)
-    path = evals / "brokers" / "acme.json"
-    if content is None:
-        path.unlink()
-    else:
-        path.write_text(content)
-
-    outcome = await scripted(Probes(), evals).run(
-        scenario({"at": "07:00"}, broker_file="brokers/acme.json")
-    )
-
-    assert outcome.error is not None and error in outcome.error
-
-
-@pytest.mark.unit
-async def test_a_pre_wave_3_runtime_factory_cannot_seed_a_broker(tmp_path: Path) -> None:
-    def legacy(
-        clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
-    ) -> ProbeRuntime:
-        raise AssertionError("never built")
-
-    runner = ScenarioRunner(evals_with_export(tmp_path), NO_SOP, "scripted", runtime_factory=legacy)
-
-    outcome = await runner.run(scenario({"at": "07:00"}, broker_file="brokers/acme.json"))
-
-    assert outcome.error is not None and "cannot be seeded" in outcome.error
+    broker = await runtime.deps.knowledge.broker("acme")
+    assert broker.intent("detention_request") is not None
+    assert [r.opens_obligation for r in broker.documents] == ["pod"]
+    visible = {s.section_id for s in await runtime.deps.knowledge.visible("acme", ())}
+    assert {"detention", "proof_of_delivery"} <= visible
 
 
 @pytest.mark.unit
@@ -566,24 +491,6 @@ def test_the_default_trial_runtime_is_the_product_runtime_with_the_trials_blobs(
 
 
 @pytest.mark.unit
-async def test_a_broker_is_saved_in_the_trials_store_before_the_load() -> None:
-    broker = new_broker("acme", "Acme Freight")
-
-    runtime = build_trial_runtime(trial_deps(broker=broker))
-    assert isinstance(runtime, BrokerSeededRuntime)
-    await runtime.register_load(fixture_load())
-
-    agent = runtime.inner
-    assert isinstance(agent, AgentRuntime)
-    async with agent._deps.uow_factory() as uow:  # pyright: ignore[reportPrivateUsage]
-        assert await uow.brokers.get("acme") == broker
-    snapshot = await runtime.snapshot(LOAD_ID)
-    assert snapshot.load.load_id == LOAD_ID
-    assert await runtime.next_timer_due_at() is None
-    assert await runtime.tick() == []
-
-
-@pytest.mark.unit
 def test_the_document_pipeline_is_used_once_its_card_provides_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -610,7 +517,17 @@ def test_the_document_pipeline_is_used_once_its_card_provides_it(
     assert built["blobs"] is deps.blobs
     assert built["llm"] is deps.model
     assert isinstance(built["pages"], Pages)
-    assert set(built) == {"uow_factory", "clock", "ids", "llm", "blobs", "pages", "timeout_s"}
+    assert built["knowledge"] is deps.knowledge  # the catalog the documents are read with
+    assert set(built) == {
+        "uow_factory",
+        "clock",
+        "ids",
+        "llm",
+        "blobs",
+        "pages",
+        "knowledge",
+        "timeout_s",
+    }
 
 
 @pytest.mark.unit

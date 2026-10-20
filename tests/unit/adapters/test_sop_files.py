@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.sop.files import FileSopRepository, SopFormatError
+from freight_agent.adapters.sop.files import FileSopRepository, SopFormatError, read_catalog
+from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
@@ -253,3 +254,119 @@ async def test_a_missing_folder_raises(tmp_path: Path) -> None:
         await repo.sections_for_client("acme")
     with pytest.raises(SopFormatError, match="does not exist"):
         repo.version()
+
+
+# --- a client's catalog (`clients/<id>/broker.yaml`) ----------------------------------------
+
+DETENTION_FILE = (
+    "---\nid: detention\ntitle: Detention\ndescription: Truck held.\n"
+    "intents: [detention_request]\n---\n1. Write a TMS note.\n"
+)
+ACME_CATALOG = """\
+name: Acme Freight
+intents:
+  - intent_id: detention_request
+    title: Detention request
+    description: The truck waited more than 2 hours at a facility.
+    priority: 55
+obligations:
+  - kind: eta_request
+    title: ETA request
+    description: Every 20 minutes, three times.
+    follow_up_minutes: 20
+    max_attempts: 3
+    follow_up_intent: eta_follow_up_due
+    on_exhausted: [dispatcher_email, hero_task]
+"""
+
+
+@pytest.mark.unit
+def test_a_client_without_a_catalog_runs_on_the_standard_one() -> None:
+    assert FileSopRepository(FIXTURES).broker("northline") == standard_broker()
+    assert read_catalog(FIXTURES, "a_new_client") == standard_broker()
+
+
+@pytest.mark.unit
+def test_a_client_s_catalog_is_the_standard_one_with_its_overrides(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG)
+
+    broker = FileSopRepository(root).broker("acme")
+
+    assert (broker.broker_id, broker.name) == ("acme", "Acme Freight")
+    assert broker.intent("detention_request") is not None
+    eta = broker.obligation("eta_request")
+    assert eta is not None and (eta.follow_up_minutes, eta.max_attempts) == (20, 3)
+    assert broker.document_types == standard_broker().document_types
+
+
+@pytest.mark.unit
+async def test_a_client_s_files_may_name_the_intents_of_its_catalog(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG)
+    _write(root, "clients/acme/detention.md", DETENTION_FILE)
+    _write(root, "clients/beta/detention.md", DETENTION_FILE)
+    repo = FileSopRepository(root)
+
+    acme = _by_source(await repo.sections_for_client("acme"))
+
+    assert acme["clients/acme/detention.md"].intents == ("detention_request",)
+    with pytest.raises(SopFormatError, match="'detention_request' in `intents` is not a known"):
+        await repo.sections_for_client("beta")  # beta's catalog is the standard one
+
+
+@pytest.mark.unit
+async def test_a_standard_file_names_only_standard_intents(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG)
+    _write(root, "standard/detention.md", DETENTION_FILE)
+
+    with pytest.raises(SopFormatError, match=r"standard/detention\.md"):
+        await FileSopRepository(root).sections_for_client("acme")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("name: [unclosed\n", "the catalog could not be read near line"),
+        ("- just a list\n", "the catalog must be a list of settings"),
+        ("nmae: Acme\n", "nmae: Extra inputs are not permitted"),
+        (
+            "obligations:\n  - kind: pod\n    title: POD\n    description: The signed POD.\n",
+            "pod_follow_up_due, which is not in the catalog",
+        ),
+    ],
+)
+def test_a_broken_catalog_raises_an_error_that_names_it(
+    tmp_path: Path, text: str, problem: str
+) -> None:
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", text)
+
+    with pytest.raises(SopFormatError, match=r"clients/acme/broker\.yaml") as raised:
+        read_catalog(root, "acme")
+
+    assert problem in raised.value.problem
+
+
+@pytest.mark.unit
+def test_the_version_changes_when_a_catalog_changes(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    before = FileSopRepository(root).version()
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG)
+    with_catalog = FileSopRepository(root).version()
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG.replace("55", "56"))
+
+    assert len({before, with_catalog, FileSopRepository(root).version()}) == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("client_id", ["../..", "..", "../acme", "clients/acme", ""])
+def test_an_id_that_is_no_folder_name_has_no_catalog(tmp_path: Path, client_id: str) -> None:
+    """The id comes from the load: it never reaches a file outside its own folder."""
+    root = _tree(tmp_path)
+    _write(root, "clients/acme/broker.yaml", ACME_CATALOG)
+    _write(tmp_path, "broker.yaml", ACME_CATALOG)  # sops/.. holds a catalog too
+
+    assert read_catalog(root, client_id) == standard_broker()

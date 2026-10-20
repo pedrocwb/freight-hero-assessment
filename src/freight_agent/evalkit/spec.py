@@ -35,12 +35,7 @@ Runner semantics (implemented in `evalkit.runner`):
    is built (a key in the override replaces the fixture's value), for example
    `{"broker": {"id": "keystone", "name": "Keystone Freight"}, "load_types": ["reefer"]}`.
 8. Tags of the form `sop:<section_id>` declare which SOP sections a scenario
-   covers; the SOP coverage lint reads them. Tags `intent:<id>` declare an intent the
-   scenario covers when no step says so (`agent eval lint`).
-9. `broker_file` names a broker export (`evals/brokers/*.json`, `evalkit.brokers`): the
-   trial's store gets the broker, its published sections join the SOP index, and the
-   load runs on it (the export's id and name replace the fixture's broker).
-   `agent eval run --broker-file` does the same for every scenario of a run.
+   covers; the SOP coverage lint reads them.
 """
 
 import re
@@ -269,10 +264,6 @@ class Scenario(_Spec):
     description: str = ""
     load: str = Field(description="Load metadata fixture, relative to the evals directory")
     load_overrides: dict[str, Any] = Field(default_factory=dict)
-    broker_file: str | None = Field(
-        default=None,
-        description="A broker export the load runs on, relative to the evals directory",
-    )
     timezone: str = "America/Los_Angeles"
     date: date
     start: str

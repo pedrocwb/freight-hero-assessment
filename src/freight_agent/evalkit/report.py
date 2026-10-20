@@ -366,7 +366,6 @@ def _metadata(meta: RunMetadata) -> str:
         ("Run at (UTC)", meta.created_at.isoformat()),
         ("Git commit", f"{meta.git_sha or 'unknown'}{dirty}"),
         ("SOP version", meta.sop_version or "unknown"),
-        ("Broker", meta.broker or "each load fixture's own"),
         ("Mode", meta.mode),
         ("Model set", meta.model_set),
         ("Models", models or "unknown"),

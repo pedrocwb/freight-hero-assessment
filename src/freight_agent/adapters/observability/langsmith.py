@@ -12,7 +12,7 @@ record has, and under the agent step one `tool` run per call of its trajectory (
 arguments, what the tool answered, whether a rule accepted or refused an action). The
 record keeps no per-step timestamps, so the child spans are laid end to end from each
 model call's latency, inside the run's own span, and the tool calls share the agent's
-span in order. The root carries the run's intent, broker version and refused calls.
+span in order. The root carries the run's intent, broker and refused calls.
 
 Opik would implement the same `Tracer` port the same way: an `OpikTracer` that builds
 one `opik.Opik().trace(...)` per run with a span per step (`trace.span(name=..., type=
@@ -383,8 +383,6 @@ def _root_metadata(
     broker_id = run.broker_id or broker_id
     if broker_id is not None:
         metadata["broker_id"] = broker_id
-    if run.broker_config_version is not None:
-        metadata["broker_config_version"] = run.broker_config_version
     if sop_version is not None:
         metadata["sop_version"] = sop_version
     return metadata

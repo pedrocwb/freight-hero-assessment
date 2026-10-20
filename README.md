@@ -63,7 +63,6 @@ uv run agent eval run --scenario a_client_a_high_risk
 | `core` (22 scenarios) | The assignment's sequence and the standard procedures, for Client A, Client B and a reefer load |
 | `agent` | The loop's guardrails: an outside email refused at the call, the refusal budget, a gap searched before it goes to a Hero |
 | `docs` | The document pipeline with real PDFs: a clean POD, a POD with exceptions, an overdue POD |
-| `<broker>` | A broker's own scenarios, run with its export (`--broker-file evals/brokers/<broker>.json`) |
 
 Graders check facts (actions, recipients, ledger, timers, statuses), the trajectory
 (`tools_used`, `sections_read`, `max_rejections`) and, with a rubric, the wording (an LLM
@@ -74,9 +73,6 @@ uv run agent eval run --suite agent --mode replay
 uv run agent eval run --mode live --k 3 --cost-cap-usd 1   # pass^3: a scenario passes only if all 3 trials pass
 uv run agent eval list                                    # scenarios and tags
 uv run agent eval report evals/results/<run>/results.json --compare evals/results/<baseline>/results.json
-uv run agent eval run --broker-file evals/brokers/<broker>.json   # a suite on an exported broker
-uv run agent eval draft --broker-file evals/brokers/<broker>.json # draft scenarios from its sections
-uv run agent eval lint --broker-file evals/brokers/<broker>.json  # an intent with no scenario is an error
 uv run agent sop lint                                     # SOP files + "is every section covered by a scenario?"
 ```
 
@@ -199,9 +195,10 @@ src/freight_agent/
                  console, inspector, evals, SSE)
   bootstrap.py   the composition root: the only place that wires adapters to ports
   cli.py         the `agent` command (`cli_sop.py`: `agent sop lint`)
-sops/            the seed SOPs: standard, client and client + load-type sections (Markdown)
-evals/           scenarios (core, agent, docs, per broker), broker exports, fixtures (the
-                 load, the Acme SOP, POD and BOL PDFs), cassettes, results (gitignored)
+sops/            the seed SOPs: standard, client and client + load-type sections (Markdown),
+                 and a client's catalog (`clients/<id>/broker.yaml`)
+evals/           scenarios (core, agent, docs), fixtures (the load, POD and BOL PDFs),
+                 cassettes, results (gitignored)
 config/          models per role and prices
 web/             React + Vite platform UI
 tests/           unit, contract, property, integration, evalkit

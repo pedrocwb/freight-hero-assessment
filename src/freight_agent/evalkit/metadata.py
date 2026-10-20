@@ -67,7 +67,6 @@ class RunMetadata(BaseModel):
     config_sha256: str | None = None  # the runtime and validation config
     python: str | None = None
     settings: dict[str, str] = {}  # `Settings.describe()`: secrets show only as set or unset
-    broker: str | None = None  # `acme@v2` when the run played a broker export
 
 
 def collect_metadata(
@@ -80,7 +79,6 @@ def collect_metadata(
     repo: Path,
     settings: Mapping[str, str] | None = None,
     git: GitRunner | None = None,
-    broker: str | None = None,
 ) -> RunMetadata:
     git = git or run_git
     sha, dirty = git_state(repo, git)
@@ -98,7 +96,6 @@ def collect_metadata(
         config_sha256=config_sha256(EVAL_RUNTIME_CONFIG),
         python=platform.python_version(),
         settings=dict(settings or {}),
-        broker=broker,
     )
 
 

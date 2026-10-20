@@ -22,7 +22,7 @@
   `pass_hat_k` on every trial of a scenario once its k trials ran (1 when all passed). The
   experiment itself gets the run's totals: pass^k and pass@k overall and per group, cost,
   exit code, refused tool calls per run and the mean judge score.
-- **Each step's outputs** carry its runs as the graders see them: intent, broker version,
+- **Each step's outputs** carry its runs as the graders see them: intent, broker,
   the trajectory (tool, arguments, accepted or refused), sections read, and the verdict.
 
 Live only (the CLI refuses the other modes): scripted and replay runs measure the code and
@@ -121,9 +121,8 @@ def dataset_name(suite: str) -> str:
 
 
 def example_inputs(scenario: Scenario) -> dict[str, Any]:
-    """What the agent is given. The script is left out: live runs ignore it. The broker
-    file is there only when the scenario names one, so older examples keep their hash."""
-    inputs: dict[str, Any] = {
+    """What the agent is given. The script is left out: live runs ignore it."""
+    return {
         "scenario_id": scenario.id,
         "title": scenario.title,
         "description": scenario.description,
@@ -134,9 +133,6 @@ def example_inputs(scenario: Scenario) -> dict[str, Any]:
         "start": scenario.start,
         "steps": [_step_input(step) for step in scenario.steps],
     }
-    if scenario.broker_file is not None:
-        inputs["broker_file"] = scenario.broker_file
-    return inputs
 
 
 def example_outputs(scenario: Scenario) -> dict[str, Any]:
@@ -608,7 +604,6 @@ def _run_summary(run: RunRecord) -> dict[str, Any]:
         "intent": run_intent(run),
         "gate_intent": None if run.gate is None else run.gate.intent,
         "broker_id": run.broker_id,
-        "broker_config_version": run.broker_config_version,
         "skip_reason": run.skip_reason,
         "sop_section_ids": list(run.sop_section_ids),
         "sections_read": sections_read([run]),

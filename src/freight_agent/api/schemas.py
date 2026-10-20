@@ -4,9 +4,9 @@ Domain objects (loads, snapshots, runs, outbox items, SOP sections) go out as th
 dumped with `model_dump(mode="json")`; the models here are the views the platform adds.
 Datetimes are ISO 8601 with their offset, in the simulation's timezone.
 
-The wave 3 bodies at the end (brokers, documents) were written with the contracts (C0),
-before their routes: the cards build their routes on them and the web UI its types, so
-they change only with every user of them.
+The wave 3 bodies at the end (documents) were written with the contracts (C0), before
+their routes: the cards build their routes on them and the web UI its types, so they
+change only with every user of them.
 """
 
 from datetime import datetime
@@ -15,15 +15,6 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from freight_agent.application.contracts import InboundMessage, LocationPing
-from freight_agent.domain.broker import (
-    Broker,
-    BrokerLimits,
-    DocumentRequirement,
-    DocumentTypeDef,
-    IntentDef,
-    ObligationDef,
-    Rollout,
-)
 from freight_agent.domain.documents import Document, DocumentStatus, FieldCheck
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Channel, DelayRisk, Stage
@@ -200,64 +191,6 @@ class SopView(_Body):
 
 class SearchHitView(SearchHit):
     """One result of `GET /api/sops/search?q=` (`broker_id`, `load_types` in the query)."""
-
-
-# --- brokers (card W3-BRK) -------------------------------------------------------------------
-
-
-class BrokerIn(_Body):
-    """Create a broker (`POST /api/brokers`: a copy of the standard catalog, then these
-    fields) or change one (`PUT /api/brokers/{broker_id}`, which saves a new
-    `config_version`). A field left out keeps its value."""
-
-    broker_id: str | None = Field(
-        default=None, description="Required to create; on update, the path's id or left out"
-    )
-    name: str | None = Field(default=None, description="Required to create")
-    triage: bool | None = None
-    intents: tuple[IntentDef, ...] | None = None
-    obligations: tuple[ObligationDef, ...] | None = None
-    document_types: tuple[DocumentTypeDef, ...] | None = None
-    documents: tuple[DocumentRequirement, ...] | None = None
-    limits: BrokerLimits | None = None
-
-
-class BrokerView(Broker):
-    """A broker's current version, as stored (`GET /api/brokers/{broker_id}`)."""
-
-
-class BrokerVersionView(_Body):
-    """One saved version of a broker (`GET /api/brokers/{broker_id}/versions`)."""
-
-    config_version: int
-    name: str
-    sop_version: str | None
-    rollout: Rollout
-    current: bool = Field(description="The version `GET /api/brokers/{broker_id}` returns")
-    intents: tuple[str, ...] = Field(description="The intent ids of the version's catalog")
-    obligations: tuple[str, ...] = Field(description="The obligation kinds of the version")
-
-    @classmethod
-    def of(cls, broker: Broker, *, current: bool) -> "BrokerVersionView":
-        return cls(
-            config_version=broker.config_version,
-            name=broker.name,
-            sop_version=broker.sop_version,
-            rollout=broker.rollout,
-            current=current,
-            intents=tuple(i.intent_id for i in broker.intents),
-            obligations=tuple(o.kind for o in broker.obligations),
-        )
-
-
-class RolloutIn(_Body):
-    """`POST /api/brokers/{broker_id}/rollout`: the share of loads on the current version.
-    0 is a rollback. 409 when `previous_version` names a version that was never saved."""
-
-    percent: int = Field(ge=0, le=100)
-    previous_version: int | None = Field(
-        default=None, description="Default: the rollout's current previous version"
-    )
 
 
 # --- documents (card W3-DOC) -----------------------------------------------------------------

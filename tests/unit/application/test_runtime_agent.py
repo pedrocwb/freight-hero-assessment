@@ -27,6 +27,7 @@ from tests.unit.application.test_runtime_harness import (
     DRIVER,
     FOLLOW_UP_IN_30,
     GATE,
+    FakeSop,
     World,
     at,
     decision,
@@ -39,11 +40,9 @@ pytestmark = pytest.mark.unit
 REPLY = SendSms(contact_id=DRIVER, text="The PO is 55821.", purpose=Purpose.REPLY)
 
 
-async def _with_broker(world: World, broker: Broker) -> World:
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(broker)
-        await uow.commit()
-    return world
+async def _with_broker(load: Load, broker: Broker) -> World:
+    """A started world whose knowledge index gives `broker` as its client's catalog."""
+    return await World(load, knowledge=FakeSop(brokers=[broker])).start()
 
 
 def _northline(**changes: Any) -> Broker:
@@ -53,7 +52,7 @@ def _northline(**changes: Any) -> Broker:
 async def test_the_validator_follows_the_limits_of_the_loads_broker(load: Load) -> None:
     """Northline allows one SMS per contact an hour: the reply at 07:13 is refused."""
     strict = _northline(limits=BrokerLimits(validation=ValidationConfig(sms_max_per_window=1)))
-    world = await _with_broker(await World(load).start(), strict)
+    world = await _with_broker(load, strict)
     await world.high_risk_at_seven()
     await world.message(at(7, 12), "What's the PO number?")
     world.model.push(GATE, decision(Intent.QUESTION))
@@ -63,7 +62,7 @@ async def test_the_validator_follows_the_limits_of_the_loads_broker(load: Load) 
 
     assert run.status is RunStatus.NOOP
     assert [v.rule for v in run.violations] == ["sms_rate_limit"]
-    assert (run.broker_id, run.broker_config_version) == ("northline", 1)
+    assert run.broker_id == "northline"
     assert len(world.sent("sms")) == 1
 
 
@@ -98,9 +97,7 @@ async def test_a_required_document_opens_with_the_stage_and_its_follow_up_asks_f
             ),
         ),
     )
-    world = await _with_broker(
-        await World(load.model_copy(update={"stage": Stage.TO_DELIVERY})).start(), acme
-    )
+    world = await _with_broker(load.model_copy(update={"stage": Stage.TO_DELIVERY}), acme)
     await world.message(at(9, 0), "at the receiver")
     world.model.push(GATE, decision(Intent.STATUS_UPDATE))
     world.model.push(DECIDE, plan(UpdateStage(stage=Stage.AT_DELIVERY)))

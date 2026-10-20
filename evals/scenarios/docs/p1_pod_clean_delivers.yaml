@@ -1,7 +1,7 @@
-# P1: a clean POD delivers the load. Acme (evals/brokers/acme.json) requires a signed POD
-# within 120 minutes of the arrival at the delivery stop: its `DocumentRequirement`
-# (pod at at_delivery, 120 min, opens the `pod` obligation) and section
-# `proof_of_delivery` (from acme_sop.md, section 3).
+# P1: a clean POD delivers the load. Acme (sops/clients/acme/) requires a signed POD
+# within 120 minutes of the arrival at the delivery stop: the `DocumentRequirement` of its
+# catalog (broker.yaml: pod at at_delivery, 120 min, opens the `pod` obligation) and its
+# section `proof_of_delivery`.
 #
 # Cards: W3-AGT (update_stage into a stage with a requirement opens its obligation and
 # timer; the agent loop folds the transcript) and W3-DOC (the document pipeline reads the
@@ -31,8 +31,8 @@ description: >-
   document pipeline, closes the request as satisfied, and its document_processed run
   sets the load to delivered with a TMS note.
 load: fixtures/load_481207.json
-broker_file: brokers/acme.json
 load_overrides:
+  broker: {id: acme, name: Acme Freight}
   stage: to_delivery
 date: 2026-10-14
 start: "09:00"

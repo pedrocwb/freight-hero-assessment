@@ -24,7 +24,7 @@ uv run --with pypdfium2 python evals/fixtures/docs/make_fixtures.py
 
 - `pdfmini.py` is a small PDF writer with no dependency: standard Helvetica fonts
   (WinAnsi), plain uncompressed content streams, FlateDecode RGB images and a correct
-  xref table. `../sops/make_fixtures.py` uses it too.
+  xref table.
 - pypdfium2 is needed only to render the clean POD to pixels for `pod_scanned.pdf`. It
   comes from `uv run --with pypdfium2` and is **not** added to the project. Without it,
   the script writes the three text PDFs and the four JSON files, and says it skipped the

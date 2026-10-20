@@ -7,14 +7,13 @@ two are built and tested on their own. The timing rules are the ones in the
 `evalkit.spec` docstring.
 
 Per trial the runner builds the runtime from `TrialDeps` (clock, counting model,
-gateways, SOP index, a blob store with the scenario's attachments and, for a broker
-export, the broker to seed). Two kinds of factory build it:
+gateways, SOP index and a blob store with the scenario's attachments). Two kinds of
+factory build it:
 
 - a `TrialFactory(deps)`: the default, `build_trial_runtime`, runs the product runtime
   on a fresh memory store with the document pipeline when card W3-DOC provides it;
 - a `RuntimeFactory(clock, model, gateways, knowledge)`, the pre-wave-3 contract, still
-  accepted (a test's fake runtime, another store): it gets no blob store and cannot seed
-  a broker, so a scenario that needs one is a setup error with it.
+  accepted (a test's fake runtime, another store): it gets no blob store.
 
 The judge (`evalkit.judge`) runs after a step that has a rubric, on the trial's inner
 model: its calls never pass through the counting wrapper, so `llm_calls` counts the
@@ -48,19 +47,11 @@ from freight_agent.application.contracts import (
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.actions import AgentOutcome
-from freight_agent.domain.broker import Broker
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Load
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.runs import RunRecord, Usage
-from freight_agent.evalkit.brokers import (
-    BrokerExport,
-    BrokerFileError,
-    broker_index,
-    load_metadata,
-    read_broker_export,
-)
 from freight_agent.evalkit.counting import CountingModel
 from freight_agent.evalkit.judge import Judge, JudgeResult, skipped
 from freight_agent.evalkit.observe import NullObserver, Observer
@@ -71,7 +62,6 @@ from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
-from freight_agent.ports.repositories import UnitOfWorkFactory
 
 Mode = Literal["scripted", "replay", "live"]
 
@@ -117,7 +107,6 @@ class TrialDeps:
     gateways: Gateways
     knowledge: SopIndex
     blobs: BlobStore  # holds the bytes of the scenario's attachments
-    broker: Broker | None = None  # a broker export's broker, saved before the load
 
 
 TrialFactory = Callable[[TrialDeps], RuntimeLike]
@@ -128,7 +117,7 @@ def build_trial_runtime(deps: TrialDeps) -> RuntimeLike:
     """The product runtime on a fresh memory store, with deterministic ids and no tracing.
 
     Documents are read by the product's pipeline once card W3-DOC provides it (until then
-    by nothing). A broker export's broker is saved in the store before the load.
+    by nothing).
     """
     uow_factory = MemoryStore().unit_of_work
     runtime_deps = RuntimeDeps(
@@ -145,10 +134,7 @@ def build_trial_runtime(deps: TrialDeps) -> RuntimeLike:
         config=RuntimeConfig(reraise_unexpected=True),
     )
     runtime_deps = replace(runtime_deps, documents=document_processor(runtime_deps))
-    runtime = AgentRuntime(runtime_deps)
-    if deps.broker is None:
-        return runtime
-    return BrokerSeededRuntime(runtime, uow_factory, deps.broker)
+    return AgentRuntime(runtime_deps)
 
 
 def build_runtime(
@@ -167,14 +153,9 @@ def build_runtime(
 
 
 def from_runtime_factory(factory: RuntimeFactory) -> TrialFactory:
-    """A `TrialFactory` over a pre-wave-3 `RuntimeFactory`, which cannot seed a broker."""
+    """A `TrialFactory` over a pre-wave-3 `RuntimeFactory`."""
 
     def build(deps: TrialDeps) -> RuntimeLike:
-        if deps.broker is not None:
-            raise ScenarioSetupError(
-                f"the broker {deps.broker.broker_id} cannot be seeded by this runtime "
-                "factory: pass a trial_factory (evalkit.runner.TrialFactory)"
-            )
         return factory(deps.clock, deps.model, deps.gateways, deps.knowledge)
 
     return build
@@ -191,6 +172,7 @@ def document_processor(deps: RuntimeDeps) -> DocumentProcessor:
         llm=deps.llm,
         blobs=deps.blobs,
         pages=pages(),
+        knowledge=deps.knowledge,
         timeout_s=deps.config.llm_timeout_s,
     )
 
@@ -205,38 +187,6 @@ def _adapter(module: str, attribute: str) -> Any | None:
             raise
         return None
     return getattr(found, attribute, None)
-
-
-class BrokerSeededRuntime:
-    """A runtime whose store gets a broker before the load: `register_load` saves it first.
-
-    The rest of the facade goes to the runtime unchanged."""
-
-    def __init__(self, inner: RuntimeLike, uow_factory: UnitOfWorkFactory, broker: Broker) -> None:
-        self.inner = inner
-        self._uow_factory = uow_factory
-        self.broker = broker
-
-    async def register_load(self, load: Load) -> None:
-        async with self._uow_factory() as uow:
-            await uow.brokers.save(self.broker)
-            await uow.commit()
-        await self.inner.register_load(load)
-
-    async def ingest_message(self, message: InboundMessage) -> IngestResult:
-        return await self.inner.ingest_message(message)
-
-    async def ingest_ping(self, ping: LocationPing) -> IngestResult:
-        return await self.inner.ingest_ping(ping)
-
-    async def tick(self) -> list[RunRecord]:
-        return await self.inner.tick()
-
-    async def next_timer_due_at(self) -> datetime | None:
-        return await self.inner.next_timer_due_at()
-
-    async def snapshot(self, load_id: str) -> LoadSnapshot:
-        return await self.inner.snapshot(load_id)
 
 
 # --- scripted answers --------------------------------------------------------------------
@@ -310,11 +260,7 @@ class ScenarioSetupError(Exception):
 
 
 class ScenarioRunner:
-    """Runs trials of scenarios. Every trial gets its own clock, storage and gateways.
-
-    `broker` (an export, `agent eval run --broker-file`) puts every scenario on that
-    broker; otherwise a scenario's own `broker_file` does.
-    """
+    """Runs trials of scenarios. Every trial gets its own clock, storage and gateways."""
 
     def __init__(
         self,
@@ -326,7 +272,6 @@ class ScenarioRunner:
         observer: Observer | None = None,
         *,
         trial_factory: TrialFactory | None = None,
-        broker: BrokerExport | None = None,
     ) -> None:
         if mode == "scripted" and model is not None:
             raise ValueError("scripted mode feeds its own ScriptedModel; do not pass a model")
@@ -344,17 +289,13 @@ class ScenarioRunner:
         else:
             self._factory = build_trial_runtime
         self._observer: Observer = observer or NullObserver()
-        self._broker = broker
-        self._exports: dict[str, BrokerExport] = {}
 
     async def run(self, scenario: Scenario, trial: int = 1) -> RunOutcome:
         try:
             tz = _timezone(scenario.timezone)
-            export = self._export(scenario)
-            load = self._read_load(scenario, export)
+            load = self._read_load(scenario)
             files = self._read_attachments(scenario)
-            knowledge = self._knowledge if export is None else broker_index(self._knowledge, export)
-        except (ScenarioSetupError, BrokerFileError) as exc:
+        except ScenarioSetupError as exc:
             return RunOutcome(scenario_id=scenario.id, trial=trial, error=str(exc))
 
         inner, script = self._trial_model()
@@ -365,9 +306,8 @@ class ScenarioRunner:
             clock=clock,
             model=model,
             gateways=RecordingGateways().as_gateways(),
-            knowledge=knowledge,
+            knowledge=self._knowledge,
             blobs=blobs,
-            broker=None if export is None else export.broker,
         )
         try:
             runtime = self._factory(deps)
@@ -405,20 +345,7 @@ class ScenarioRunner:
         script = ScriptedModel()
         return script, script
 
-    def _export(self, scenario: Scenario) -> BrokerExport | None:
-        if self._broker is not None:
-            return self._broker
-        name = scenario.broker_file
-        if name is None:
-            return None
-        if name not in self._exports:
-            path = self._evals_dir / name
-            if not path.is_file():
-                raise ScenarioSetupError(f"broker file not found: {name}")
-            self._exports[name] = read_broker_export(path)
-        return self._exports[name]
-
-    def _read_load(self, scenario: Scenario, export: BrokerExport | None) -> Load:
+    def _read_load(self, scenario: Scenario) -> Load:
         try:
             with (self._evals_dir / scenario.load).open(encoding="utf-8") as handle:
                 data: Any = json.load(handle)
@@ -429,8 +356,6 @@ class ScenarioRunner:
         if not isinstance(data, dict):
             raise ScenarioSetupError(f"load fixture {scenario.load} must be a JSON object")
         metadata = {**cast(dict[str, Any], data), **scenario.load_overrides}
-        if export is not None:
-            metadata.update(load_metadata(export))
         try:
             return Load.from_metadata(metadata)
         except DomainError as exc:

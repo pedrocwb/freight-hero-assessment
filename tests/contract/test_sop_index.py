@@ -2,8 +2,8 @@
 `sops/` tree (`MemorySopIndex.from_files`).
 
 The selection equals `domain.sop.resolve` on the merged layers of the whole tree, search
-finds the section that holds the words, the version is the tree's, and a broker never
-sees another broker's sections.
+finds the section that holds the words, the version is the tree's, a broker never sees
+another broker's sections, and each broker gets its own catalog.
 """
 
 from pathlib import Path
@@ -12,9 +12,10 @@ import pytest
 
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.sop.files import FileSopRepository, load_tree
+from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
-from freight_agent.domain.sop import SopLayer, SopSection, effective_sections, resolve
+from freight_agent.domain.sop import effective_sections, resolve
 from freight_agent.ports.knowledge import SopIndex
 
 pytestmark = pytest.mark.contract
@@ -81,9 +82,8 @@ async def test_the_version_is_the_tree_s_for_every_broker(index: SopIndex) -> No
     assert await index.version("keystone") == version
 
 
-async def test_a_broker_never_sees_another_broker_s_sections() -> None:
-    index = MemorySopIndex([*TREE, _detention()])
-
+async def test_a_broker_never_sees_another_broker_s_sections(index: SopIndex) -> None:
+    """Acme's `detention` (sops/clients/acme/) is Acme's alone."""
     assert "detention" in {s.section_id for s in await index.visible("acme", ())}
     assert "detention" not in {s.section_id for s in await index.visible("northline", ())}
     assert await index.read("northline", (), "detention") is None
@@ -95,15 +95,9 @@ async def test_a_broker_never_sees_another_broker_s_sections() -> None:
     assert "detention" not in {c.section_id for c in sop.catalog}
 
 
-def _detention(broker_id: str = "acme") -> SopSection:
-    return SopSection(
-        section_id="detention",
-        layer=SopLayer.CLIENT,
-        client_id=broker_id,
-        title="Detention",
-        description="The truck waited more than 2 hours at a facility.",
-        intents=("detention_request",),
-        stages=(Stage.AT_PICKUP, Stage.AT_DELIVERY),
-        body="1. Write a TMS note with the facility and the wait.",
-        source="clients/acme/detention.md",
-    )
+async def test_each_broker_gets_its_own_catalog(index: SopIndex) -> None:
+    acme = await index.broker("acme")
+
+    assert (acme.broker_id, acme.name) == ("acme", "Acme Freight")
+    assert acme.intent("detention_request") is not None
+    assert await index.broker("northline") == standard_broker()

@@ -23,8 +23,8 @@ description: >-
   the POD, then, 30 minutes later with still no POD, a Hero task and the request closed
   as exhausted.
 load: fixtures/load_481207.json
-broker_file: brokers/acme.json
 load_overrides:
+  broker: {id: acme, name: Acme Freight}
   stage: to_delivery
 date: 2026-10-14
 start: "09:00"

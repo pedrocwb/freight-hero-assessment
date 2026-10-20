@@ -1,14 +1,16 @@
-"""The knowledge base: the index the agent reads the SOP through.
+"""The knowledge base: the index the agent reads the SOP and its broker's catalog through.
 
-Owner: card W3-KNW. `SopIndex` is the read side the agent uses while it thinks, outside
-any transaction (`RuntimeDeps.knowledge`). `by_applies` keeps the deterministic
-selection (`domain.sop.resolve`); `search` is retrieval (word overlap, in memory). The
-sections come from the `sops/` tree (`adapters/knowledge/memory.py`).
+Owner: card W3-KNW. `SopIndex` is the read side of a client's SOP folder: the run reads
+the catalog when its context loads (`broker`) and the sections while it thinks
+(`RuntimeDeps.knowledge`). `by_applies` keeps the deterministic selection
+(`domain.sop.resolve`); `search` is retrieval (word overlap, in memory). Both come from
+the `sops/` tree (`adapters/knowledge/memory.py`).
 """
 
 from collections.abc import Sequence
 from typing import Protocol
 
+from freight_agent.domain.broker import Broker
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop, SearchHit
 
@@ -45,4 +47,10 @@ class SopIndex(Protocol):
 
     async def version(self, broker_id: str) -> str | None:
         """The content version of what the broker's runs read, recorded with every run."""
+        ...
+
+    async def broker(self, broker_id: str) -> Broker:
+        """The broker's catalog and limits: the standard catalog with the overrides of its
+        client folder (`sops/clients/<id>/broker.yaml`), or the standard catalog itself
+        when it has none."""
         ...

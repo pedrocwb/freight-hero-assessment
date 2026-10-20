@@ -482,7 +482,6 @@ def _loop_run(**overrides: Any) -> RunRecord:
         "rejections": 1,
         "sections_searched": ("escalation",),
         "broker_id": "acme",
-        "broker_config_version": 2,
     }
     return _run(**{**fields, **overrides})
 
@@ -514,7 +513,7 @@ async def test_each_tool_call_is_a_tool_run_under_the_agent_step_in_order() -> N
 
 
 @pytest.mark.unit
-async def test_the_root_carries_the_intent_broker_version_and_refusals() -> None:
+async def test_the_root_carries_the_intent_broker_and_refusals() -> None:
     client = FakeClient()
     await _tracer(client, broker_of=_broker).record_run(_loop_run())
     root = client.root
@@ -523,7 +522,8 @@ async def test_the_root_carries_the_intent_broker_version_and_refusals() -> None
     assert metadata["tools"] == ["search_sop", "send_email", "create_hero_task"]
     assert metadata["rejections"] == 1
     assert metadata["sections_searched"] == ["escalation"]
-    assert (metadata["broker_id"], metadata["broker_config_version"]) == ("acme", 2)
+    assert metadata["broker_id"] == "acme"
+    assert "broker_config_version" not in metadata
     assert (root["outputs"]["intent"], root["outputs"]["rejections"]) == ("other", 1)
     assert {"intent:other", "broker:acme", "refused"} <= set(root["tags"])
     assert "intent:delay_risk_high" not in root["tags"]

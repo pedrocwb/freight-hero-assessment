@@ -507,8 +507,18 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
 
     assert isinstance(deps.documents, Pipeline)
     (ports,) = built
-    assert set(ports) == {"uow_factory", "clock", "ids", "llm", "blobs", "pages", "timeout_s"}
+    assert set(ports) == {
+        "uow_factory",
+        "clock",
+        "ids",
+        "llm",
+        "blobs",
+        "pages",
+        "knowledge",
+        "timeout_s",
+    }
     assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
+    assert ports["knowledge"] is deps.knowledge
     assert isinstance(ports["pages"], Pages)
 
 

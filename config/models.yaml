@@ -87,15 +87,6 @@ roles:
     temperature: 0
     max_tokens: 4096
 
-  compile:
-    # Wave 3 (card W3-KNW): turns a broker's SOP document into a draft (sections, proposed
-    # intents and document requirements) and drafts eval scenarios. A person reviews every
-    # draft, and an upload that fails is retried by the editor, so no fallback.
-    model: openai/gpt-4.1-mini
-    fallbacks: []
-    temperature: 0
-    max_tokens: 8192
-
 # USD per 1M tokens and context length, as listed in the catalog on 2026-10-19.
 # cached_input: price of a prompt-cache read (omitted when the catalog lists none, then
 # cached tokens cost the input price). The billed price depends on the endpoint

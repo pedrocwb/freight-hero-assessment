@@ -1,5 +1,5 @@
 """Wave 3 in the report, the metadata and the suite: the agent loop section, the judge's
-cost, the broker, the prompt hash across the AGT module moves, and trial warnings."""
+cost, the prompt hash across the AGT module moves, and trial warnings."""
 
 import sys
 from datetime import UTC, datetime
@@ -25,7 +25,7 @@ from freight_agent.evalkit.suite import (
 )
 from tests.evalkit.test_graders import observe, run
 
-META = RunMetadata(created_at=datetime(2026, 10, 20, tzinfo=UTC), mode="live", broker="acme@v2")
+META = RunMetadata(created_at=datetime(2026, 10, 20, tzinfo=UTC), mode="live")
 READ = TrajectoryStep(
     tool="read_sop_section", args={"section_id": "escalation"}, result="b", accepted=None
 )
@@ -75,7 +75,6 @@ def test_the_agent_loop_section_lists_scores_calls_refusals_and_sections() -> No
     assert "| p3 | 0.40 min, 0.40 mean | 0 | 0 | - |" in section
     assert "plain" not in section
     assert "The judge's share: $0.0060." in text
-    assert "| Broker | acme@v2 |" in text
 
 
 @pytest.mark.unit

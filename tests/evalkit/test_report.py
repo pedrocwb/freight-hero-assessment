@@ -379,7 +379,7 @@ def test_metadata_records_the_sop_version_models_and_hashes() -> None:
     assert data.git_dirty is False
     assert data.sop_version == FileSopRepository(ROOT / "sops").version()
     assert data.models["gate"][0] == "openai/gpt-4.1-nano"
-    assert set(data.models) == {"gate", "agent", "judge", "driver_sim", "extract", "compile"}
+    assert set(data.models) == {"gate", "agent", "judge", "driver_sim", "extract"}
     assert data.models_config_sha256 is not None
     assert data.prompts_sha256 == prompts_sha256()
     assert data.config_sha256 == config_sha256(EVAL_RUNTIME_CONFIG)

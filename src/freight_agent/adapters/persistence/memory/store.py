@@ -3,9 +3,8 @@
 Transactions are serialized with a lock and rolled back by restoring a snapshot,
 so a failed run leaves no partial state, exactly like a database transaction.
 
-The wave 3 repositories (brokers, documents) live in their own modules
-(`brokers.py`, `documents.py`, one per card) over the fields of `_State`
-declared here once: their cards change those modules, never this file.
+The wave 3 document repository lives in its own module (`documents.py`), over the fields
+of `_State` declared here once: its card changes that module, never this file.
 """
 
 import asyncio
@@ -16,9 +15,7 @@ from datetime import datetime, timedelta
 from types import TracebackType
 from typing import Self
 
-from freight_agent.adapters.persistence.memory.brokers import MemoryBrokerRepository
 from freight_agent.adapters.persistence.memory.documents import MemoryDocumentRepository
-from freight_agent.domain.broker import Broker
 from freight_agent.domain.documents import Document
 from freight_agent.domain.events import Event
 from freight_agent.domain.load import Load
@@ -27,7 +24,6 @@ from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.brokers import BrokerRepository
 from freight_agent.ports.documents import DocumentRepository
 from freight_agent.ports.repositories import (
     EventLog,
@@ -65,9 +61,7 @@ class _State:
     claimed_at: dict[str, datetime] = field(default_factory=dict)  # in-flight event_id -> claim
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
-    # Wave 3 (`brokers.py`, `documents.py`).
-    brokers: dict[str, Broker] = field(default_factory=dict)  # current version
-    broker_versions: dict[tuple[str, int], Broker] = field(default_factory=dict)
+    # Wave 3 (`documents.py`).
     documents: dict[str, Document] = field(default_factory=dict)
 
 
@@ -302,7 +296,6 @@ class MemoryUnitOfWork:
         self.outbox: OutboxRepository = MemoryOutboxRepository(store)
         self.runs: RunRepository = MemoryRunRepository(store)
         self.queue: EventQueue = MemoryEventQueue(store)
-        self.brokers: BrokerRepository = MemoryBrokerRepository(store)
         self.documents: DocumentRepository = MemoryDocumentRepository(store)
 
     async def __aenter__(self) -> Self:

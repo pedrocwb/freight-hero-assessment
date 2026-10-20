@@ -45,7 +45,6 @@ def graded() -> ScenarioResult:
         trajectory=(SEARCH, READ, REFUSED, SEARCH),
         rejections=1,
         broker_id="acme",
-        broker_config_version=2,
     )
     first = judged(observe(runs=[agent_run]), 0.8, "polite")
     second = judged(observe(runs=[run(RunStatus.NOOP, run_id="run_2")], step_index=1), 0.4, "vague")
@@ -126,7 +125,7 @@ async def test_the_trial_outputs_show_the_trajectory_and_the_verdict(evals: Path
     first = outputs["steps"][0]
     (agent_run,) = first["runs"]
     assert (agent_run["intent"], agent_run["gate_intent"]) == ("other", "question")
-    assert (agent_run["broker_id"], agent_run["broker_config_version"]) == ("acme", 2)
+    assert agent_run["broker_id"] == "acme"
     assert [s["tool"] for s in agent_run["trajectory"]] == [
         "search_sop",
         "read_sop_section",
@@ -141,14 +140,12 @@ async def test_the_trial_outputs_show_the_trajectory_and_the_verdict(evals: Path
 
 
 @pytest.mark.unit
-def test_a_scenarios_broker_file_and_attachments_are_dataset_inputs() -> None:
+def test_a_scenarios_broker_and_attachments_are_dataset_inputs() -> None:
     root = Path(__file__).resolve().parents[2]
     (p1,) = [s for s in discover(root / "evals", "docs") if s.id == "p1_pod_clean_delivers"]
-    (core,) = [s for s in discover(root / "evals", "core") if s.id == "b_ack_with_nothing_open"]
 
     inputs = example_inputs(p1)
 
-    assert inputs["broker_file"] == "brokers/acme.json"
+    assert inputs["load_overrides"]["broker"] == {"id": "acme", "name": "Acme Freight"}
     (attachment,) = inputs["steps"][1]["message"]["attachments"]
     assert attachment["fixture"] == "fixtures/docs/pod_clean.pdf"
-    assert "broker_file" not in example_inputs(core)

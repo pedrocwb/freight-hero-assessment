@@ -18,15 +18,16 @@ import pytest
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
 from freight_agent.domain.broker import (
+    Broker,
     DocumentRequirement,
     DocumentTypeDef,
     FieldDef,
     ObligationDef,
-    Rollout,
     new_broker,
 )
 from freight_agent.domain.documents import (
@@ -60,10 +61,12 @@ def answer(name: str, **values: str | None) -> Extraction:
 
 
 class World:
-    """A memory store with load 481207, a blob store and the pipeline over them."""
+    """A memory store with load 481207, a blob store and the pipeline over them, and the
+    catalogs the knowledge index gives (`brokers`; none: the standard catalog)."""
 
     def __init__(self, load: Load) -> None:
         self.load = load
+        self.brokers: list[Broker] = []
         self.store = MemoryStore()
         self.clock = VirtualClock(AT)
         self.blobs = MemoryBlobStore()
@@ -79,6 +82,7 @@ class World:
             llm=self.model,
             blobs=self.blobs,
             pages=self.pages,
+            knowledge=MemorySopIndex([], brokers=self.brokers),
             timeout_s=12.0,
         )
 
@@ -162,9 +166,7 @@ class World:
                 "documents": (requirement, requirement),  # twice: closed once
             }
         )
-        async with self.store.unit_of_work() as uow:
-            await uow.brokers.save(broker)
-            await uow.commit()
+        self.brokers.append(broker)
         await self.save(
             Obligation.open(
                 obligation_id="obl_pod",
@@ -377,11 +379,9 @@ async def test_a_seal_reported_by_a_message_of_the_load_is_checked(world: World)
 async def test_a_broker_without_document_types_sends_every_document_to_review(
     world: World,
 ) -> None:
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(
-            new_broker("northline", "Northline").model_copy(update={"document_types": ()})
-        )
-        await uow.commit()
+    world.brokers.append(
+        new_broker("northline", "Northline").model_copy(update={"document_types": ()})
+    )
     await world.receive()
 
     (event,) = await world.pipeline().process_pending()
@@ -392,26 +392,15 @@ async def test_a_broker_without_document_types_sends_every_document_to_review(
     )
 
 
-async def test_the_broker_version_of_the_load_gives_the_types(world: World) -> None:
-    """In a canary at 0 percent the load runs on the previous version, without its new type."""
+async def test_the_catalog_of_the_load_s_broker_gives_the_types(world: World) -> None:
+    """On the standard catalog a lumper receipt has no type; the broker's catalog adds it."""
     lumper = DocumentTypeDef(
         type_id="lumper_receipt",
         title="Lumper receipt",
         description="Paid to unload.",
         fields=(FieldDef(name="amount", description="Paid", kind="number"),),
     )
-    first = new_broker("northline", "Northline")
-    second = first.model_copy(
-        update={
-            "document_types": (*first.document_types, lumper),
-            "config_version": 2,
-            "rollout": Rollout(percent=0, previous_version=1),
-        }
-    )
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(first)
-        await uow.brokers.save(second)
-        await uow.commit()
+    standard = new_broker("northline", "Northline")
     await world.receive(b"LUMPER RECEIPT $250")
     lumper_answer = Extraction(
         type_id="lumper_receipt",
@@ -424,11 +413,7 @@ async def test_the_broker_version_of_the_load_gives_the_types(world: World) -> N
 
     assert "lumper_receipt" not in world.model.calls[0].request.system
     assert event.data["status"] == "needs_review"
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(
-            second.model_copy(update={"rollout": Rollout(percent=100, previous_version=1)})
-        )
-        await uow.commit()
+    world.brokers.append(standard.revised(document_types=(*standard.document_types, lumper)))
     await world.receive(b"LUMPER RECEIPT $250")
     (event,) = await world.pipeline().process_pending()
     assert (event.data["type_id"], event.data["status"]) == ("lumper_receipt", "processed")
