@@ -5,27 +5,23 @@ in which layer, which intents they answer, how the client layers merge, and the
 high-risk procedure of each client. A change that breaks one of these is a change to
 the shared contract, so it fails here before it reaches a scenario.
 
-The merged sections are read the way a deployment reads them: the tree imported into a
-SOP store (`agent sop import`) and served by the index over that store.
+The merged sections are read the way the runs read them: through the index over the
+`sops/` tree (`MemorySopIndex.from_files`).
 """
 
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.clock import VirtualClock
-from freight_agent.adapters.knowledge.memory import StoreSopIndex
-from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.sop.files import (
     SopFile,
     locate,
     read_sop_file,
     sop_paths,
 )
-from freight_agent.adapters.sop.importer import SopImporter
 from freight_agent.adapters.sop.lint import Severity, lint
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
@@ -63,17 +59,8 @@ _EMAIL = re.compile(r"[\w.%+-]+@[\w-]+(?:\.[\w-]+)+")
 MIN_LINES, MAX_LINES = 10, 40
 
 
-async def _index() -> StoreSopIndex:
-    """The tree imported into a new store, and the index over it (no file fallback: the
-    index serves only what was imported)."""
-    store = MemoryStore()
-    clock = VirtualClock(datetime(2026, 10, 20, tzinfo=UTC))
-    await SopImporter(store.unit_of_work, clock=clock).import_tree(SOPS)
-    return StoreSopIndex(store.unit_of_work)
-
-
 async def _effective(client_id: str, load_types: Sequence[str] = ()) -> dict[str, ResolvedSection]:
-    merged = await (await _index()).visible(client_id, load_types)
+    merged = await MemorySopIndex.from_files(SOPS).visible(client_id, load_types)
     return {s.section_id: s for s in merged}
 
 
@@ -206,7 +193,7 @@ async def test_the_reefer_extension_does_not_leak_to_another_client() -> None:
 async def test_a_due_eta_follow_up_at_to_pickup_resolves_the_high_risk_procedure(
     client_id: str,
 ) -> None:
-    index = await _index()
+    index = MemorySopIndex.from_files(SOPS)
 
     sop = await index.by_applies(client_id, (), Intent.ETA_FOLLOW_UP_DUE, Stage.TO_PICKUP)
 

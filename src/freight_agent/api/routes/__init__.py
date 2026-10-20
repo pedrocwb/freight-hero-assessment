@@ -8,10 +8,10 @@ from freight_agent.api.routes import (
     evals,
     hero,
     ingress,
-    knowledge,
     loads,
     ops,
     sim,
+    sops,
 )
 
 ROUTERS: tuple[APIRouter, ...] = (
@@ -19,7 +19,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     loads.router,
     ingress.router,
     hero.router,
-    knowledge.router,
+    sops.router,
     evals.router,
     ops.router,
     brokers.router,

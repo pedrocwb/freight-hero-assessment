@@ -4,9 +4,9 @@ Domain objects (loads, snapshots, runs, outbox items, SOP sections) go out as th
 dumped with `model_dump(mode="json")`; the models here are the views the platform adds.
 Datetimes are ISO 8601 with their offset, in the simulation's timezone.
 
-The wave 3 bodies at the end (brokers, knowledge, documents, broker evals) were written
-with the contracts (C0), before their routes: the cards build their routes on them and
-the web UI its types, so they change only with every user of them.
+The wave 3 bodies at the end (brokers, documents) were written with the contracts (C0),
+before their routes: the cards build their routes on them and the web UI its types, so
+they change only with every user of them.
 """
 
 from datetime import datetime
@@ -29,14 +29,7 @@ from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Channel, DelayRisk, Stage
 from freight_agent.domain.outbox import OutboxStatus
 from freight_agent.domain.runs import RunRecord
-from freight_agent.domain.sop import (
-    DraftSection,
-    ProposedIntent,
-    ResolvedSection,
-    SearchHit,
-    SopDraft,
-    SopVersion,
-)
+from freight_agent.domain.sop import ResolvedSection, SearchHit
 from freight_agent.settings import LlmMode
 
 ConversationChannel = Literal["sms", "email", "slack"]
@@ -205,6 +198,10 @@ class SopView(_Body):
     sections: tuple[ResolvedSection, ...]
 
 
+class SearchHitView(SearchHit):
+    """One result of `GET /api/sops/search?q=` (`broker_id`, `load_types` in the query)."""
+
+
 # --- brokers (card W3-BRK) -------------------------------------------------------------------
 
 
@@ -261,71 +258,6 @@ class RolloutIn(_Body):
     previous_version: int | None = Field(
         default=None, description="Default: the rollout's current previous version"
     )
-
-
-# --- knowledge base (card W3-KNW) -------------------------------------------------------------
-
-
-class SopUploadResult(_Body):
-    """`POST /api/brokers/{broker_id}/sops` (multipart): the upload, stored and compiled."""
-
-    document_id: str
-    pages: int
-    status: str = Field(description="compiled (the draft has its sections), stored or failed")
-
-
-class SopDraftView(SopDraft):
-    """The broker's draft (`GET /api/brokers/{broker_id}/sops/draft`), with the lint
-    problems a publish would report now."""
-
-    lint: tuple[str, ...] = ()
-
-
-class SopDraftIn(_Body):
-    """`PUT /api/brokers/{broker_id}/sops/draft`: the edited draft, as a whole."""
-
-    sections: tuple[DraftSection, ...]
-    proposed_intents: tuple[ProposedIntent, ...] = ()
-    proposed_requirements: tuple[DocumentRequirement, ...] = ()
-    proposed_obligations: tuple[ObligationDef, ...] = ()
-
-
-class SopPublishIn(_Body):
-    """`POST /api/brokers/{broker_id}/sops/publish`: below 100 starts a canary."""
-
-    percent: int = Field(default=100, ge=0, le=100)
-
-
-class SopPublishResult(_Body):
-    version: str = Field(description="The published SOP version (content hash)")
-    config_version: int = Field(description="The broker's new config version")
-    lint: tuple[str, ...] = Field(description="Warnings the publish accepted")
-
-
-class SopVersionView(_Body):
-    """One published SOP version (`GET /api/brokers/{broker_id}/sops/versions`)."""
-
-    broker_id: str | None
-    version: str
-    published_at: datetime
-    published_by: str
-    section_ids: tuple[str, ...]
-    lint: tuple[str, ...] = ()
-
-    @classmethod
-    def of(cls, version: SopVersion) -> "SopVersionView":
-        return cls(
-            broker_id=version.broker_id,
-            version=version.version,
-            published_at=version.published_at,
-            published_by=version.published_by,
-            section_ids=tuple(s.section_id for s in version.sections),
-            lint=version.lint,
-        )
-
-
-class SearchHitView(SearchHit):
-    """One result of `GET /api/sops/search?q=` (`broker_id`, `load_types` in the query)."""
 
 
 # --- documents (card W3-DOC) -----------------------------------------------------------------

@@ -58,7 +58,7 @@ COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
 # them; it may only write eval results (`agent eval run`) and blobs: the uploaded
-# attachments and SOP files (BLOBS_DIR, a volume in docker-compose.yml).
+# attachments (BLOBS_DIR, a volume in docker-compose.yml).
 RUN useradd --system --user-group --no-log-init --create-home --uid 10001 app \
     && mkdir -p evals/results blobs \
     && chown app:app evals/results blobs

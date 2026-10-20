@@ -100,18 +100,9 @@ class ModelPricing(_Config):
         ) / _PER_MILLION
 
 
-class EmbeddingConfig(_Config):
-    """The embedding model of the SOP index (live and record only; offline runs use a
-    deterministic fake). `dim` must match the index's vector column."""
-
-    model: str = Field(min_length=1)  # OpenRouter model id, e.g. openai/text-embedding-3-small
-    dim: int = Field(ge=1)
-
-
 class ModelsConfig(_Config):
     roles: dict[ModelRole, RoleConfig]
     pricing: dict[str, ModelPricing]
-    embedding: EmbeddingConfig | None = None
 
     @model_validator(mode="after")
     def _complete(self) -> "ModelsConfig":
@@ -119,8 +110,6 @@ class ModelsConfig(_Config):
         if missing:
             raise ValueError(f"roles missing from the config: {', '.join(missing)}")
         used = [m for role in self.roles.values() for m in (role.model, *role.fallbacks)]
-        if self.embedding is not None:
-            used.append(self.embedding.model)
         unpriced = sorted({m for m in used if m not in self.pricing})
         if unpriced:
             raise ValueError(f"models with no pricing entry: {', '.join(unpriced)}")
@@ -141,7 +130,7 @@ def load_models_config(path: Path | str) -> ModelsConfig:
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(f"{path}: expected a mapping with roles, pricing and embedding")
+        raise ValueError(f"{path}: expected a mapping with roles and pricing")
     try:
         return ModelsConfig.model_validate(raw)
     except ValidationError as exc:

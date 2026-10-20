@@ -18,12 +18,9 @@ editing this file:
 |---|---|---|
 | Document pipeline (DOC) | `application.documents.DocumentPipeline` | always |
 | Page reader (DOC) | `adapters.documents.pdfium.PdfiumPageReader` | with the pipeline |
-| Embedder (KNW) | `adapters.knowledge.embeddings.OpenRouterEmbedder` | `LLM_MODE` live or record |
 
-Until one exists, the runtime behaves as before wave 3: it reads no document, and an
-embedder is a clear error in the live modes. Offline (`scripted`, `replay`) the embedder
-is `FakeEmbedder`, sized to the index's vectors: tools never run offline, so no real
-query needs a real vector. The runs read the SOP files of `SOPS_DIR`.
+Until one exists, the runtime behaves as before wave 3: it reads no document. The runs
+read the SOP files of `SOPS_DIR`.
 """
 
 import importlib
@@ -40,8 +37,7 @@ from pydantic import SecretStr
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
-from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.knowledge.memory import MemorySopIndex, StoreSopIndex
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.cassette import CassetteModel
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
 from freight_agent.adapters.llm.openrouter import models_for_role
@@ -57,7 +53,7 @@ from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, Runti
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.knowledge import Embedder, SopIndex
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
@@ -105,10 +101,6 @@ class LazyAdapter:
 # `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
-# `OpenRouterEmbedder(config: EmbeddingConfig, api_key: SecretStr)` (card W3-KNW).
-EMBEDDER_OPENROUTER = LazyAdapter(
-    "freight_agent.adapters.knowledge.embeddings", "OpenRouterEmbedder"
-)
 LIVE_MODES: tuple[LlmMode, ...] = ("live", "record")
 
 
@@ -237,54 +229,15 @@ def enable_native_tracing(settings: Settings) -> None:
 # --- knowledge, blobs and documents ----------------------------------------------
 
 
-def build_knowledge(
-    settings: Settings, *, uow_factory: UnitOfWorkFactory | None = None
-) -> SopIndex:
-    """The SOP index the runs read.
-
-    - Given the memory store's unit of work: `StoreSopIndex`, the versions published in
-      that store, with the `sops/` tree for every layer never published. A broker
-      onboarded through the API therefore reaches the runs of the same simulation.
-    - Otherwise the `sops/` tree (`MemorySopIndex.from_files`).
-    """
-    if uow_factory is not None:
-        return StoreSopIndex(uow_factory, files=settings.sops_dir)
+def build_knowledge(settings: Settings) -> SopIndex:
+    """The SOP index the runs read: the `sops/` tree (`MemorySopIndex.from_files`), read on
+    every call, so an edited file applies to the next run."""
     return MemorySopIndex.from_files(settings.sops_dir)
 
 
 def build_blobs(settings: Settings) -> BlobStore:
-    """Attachment and SOP file bytes, under `BLOBS_DIR` (created on the first upload)."""
+    """Attachment bytes, under `BLOBS_DIR` (created on the first upload)."""
     return FsBlobStore(settings.blobs_dir)
-
-
-def build_embedder(settings: Settings, *, mode: LlmMode | None = None) -> Embedder:
-    """What the SOP index embeds with: the sections of a version at publish, and a live
-    `search_sop` query. For `mode` (default: `settings.llm_mode`):
-
-    - `live` and `record`: OpenRouter's embeddings endpoint, with the model and the
-      dimensions of `embedding` in the models config (card W3-KNW). Needs the key. There
-      is no embedding cassette: a recording run embeds live.
-    - `scripted` and `replay`: `FakeEmbedder`, offline and deterministic, with the same
-      dimensions, so its vectors fit the index's column.
-    """
-    mode = mode or settings.llm_mode
-    embedding = _models_config(settings.models_config).embedding
-    if mode not in LIVE_MODES:
-        return FakeEmbedder() if embedding is None else FakeEmbedder(dim=embedding.dim)
-    if embedding is None:
-        raise BootstrapError(
-            f"LLM_MODE={mode} embeds SOP sections, but {settings.models_config} has no "
-            "`embedding` entry (model and dim): add it, or set LLM_MODE=replay"
-        )
-    key = settings.require_openrouter_key()
-    factory = EMBEDDER_OPENROUTER.load()
-    if factory is None:
-        raise BootstrapError(
-            f"LLM_MODE={mode}, but the OpenRouter embedder is not available yet "
-            f"({EMBEDDER_OPENROUTER.module}.{EMBEDDER_OPENROUTER.attribute}): "
-            "set LLM_MODE=replay"
-        )
-    return factory(embedding, key)
 
 
 def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
@@ -325,7 +278,7 @@ def build_runtime_deps(
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
     if knowledge is None:
-        knowledge = build_knowledge(settings, uow_factory=uow_factory)
+        knowledge = build_knowledge(settings)
     deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=clock,

@@ -136,20 +136,9 @@ pricing:
     output: 0.50
     cached_input: 0.01
     context_length: 1000000
-  # Wave 3. Not re-fetched from the catalog with C0: check both before the bake-off
-  # (card W3-BAKE). An embedding has no output tokens.
+  # Wave 3. Not re-fetched from the catalog with C0.
   google/gemini-2.5-flash:
     input: 0.30
     output: 2.50
     cached_input: 0.075
     context_length: 1048576
-  openai/text-embedding-3-small:
-    input: 0.02
-    output: 0
-    context_length: 8192
-
-# The SOP index's embedding model (live and record only; scripted, replay and CI use a
-# deterministic fake, adapters/knowledge/fake_embedder.py). dim is the vector column's.
-embedding:
-  model: openai/text-embedding-3-small
-  dim: 1536

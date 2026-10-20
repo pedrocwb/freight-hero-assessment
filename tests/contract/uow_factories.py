@@ -1,8 +1,8 @@
 """The `UnitOfWork` implementation the contract suites run on: the memory store.
 
 Every contract suite of this folder (`test_unit_of_work.py`, and the wave 3 suites of the
-broker, SOP store and document repositories) opens a fresh store per test through the
-`uow_factory` fixture of `conftest.py`.
+broker and document repositories) opens a fresh store per test through the `uow_factory`
+fixture of `conftest.py`.
 """
 
 from collections.abc import AsyncIterator

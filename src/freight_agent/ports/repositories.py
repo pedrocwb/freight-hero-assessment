@@ -14,7 +14,6 @@ from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer
 from freight_agent.ports.brokers import BrokerRepository
 from freight_agent.ports.documents import DocumentRepository
-from freight_agent.ports.knowledge import SopStore
 
 
 class LoadRepository(Protocol):
@@ -125,7 +124,6 @@ class UnitOfWork(Protocol):
     runs: RunRepository
     queue: EventQueue
     brokers: BrokerRepository
-    sops: SopStore
     documents: DocumentRepository
 
     async def __aenter__(self) -> Self: ...

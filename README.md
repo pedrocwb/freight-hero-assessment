@@ -156,53 +156,6 @@ To replay the assignment: create load 481207 from the fixture, send a `high` del
 ping, then from the driver's phone ask "What's the PO number?", advance the clock to 07:31
 and to 08:01, and watch the SMS, the email to the dispatcher and the Hero task appear.
 
-## Onboarding a broker without code
-
-The same steps from the UI (Brokers, then SOP Studio) or the API (`docs/api.md`). The
-example is Acme Freight, whose procedure is `evals/fixtures/sops/acme_sop.pdf`: a 3-page
-PDF in Acme's own layout, with a detention procedure and a POD rule that the standard
-catalog does not have. Compiling a new PDF needs a live model (`LLM_MODE=live uv run agent
-serve`, about $0.05); every other step works offline.
-
-```bash
-API=http://localhost:8000/api
-
-# 1. The broker: a copy of the standard catalog (12 intents, eta_request, 4 document types).
-curl -s -X POST $API/brokers -H 'content-type: application/json' \
-  -d '{"broker_id": "acme", "name": "Acme Freight"}'
-
-# 2. Its SOP, as it is: stored, read page by page, compiled into a draft.
-curl -s -X POST $API/brokers/acme/sops -F file=@evals/fixtures/sops/acme_sop.pdf
-
-# 3. Review: sections with Acme's own words, the proposed intent detention_request, the
-#    proposed requirement "pod at at_delivery within 120 minutes", and what a publish
-#    would refuse now. Accept or edit, then save the whole draft back.
-curl -s $API/brokers/acme/sops/draft > draft.json
-curl -s -X PUT $API/brokers/acme/sops/draft -H 'content-type: application/json' -d @draft.json
-
-# 4. Publish: lint, embeddings, an immutable version, config_version 2, rollout 100%
-#    with previous_version 1 (a percent below 100 starts a canary).
-curl -s -X POST $API/brokers/acme/sops/publish -H 'content-type: application/json' -d '{"percent": 100}'
-curl -s $API/brokers/acme/versions
-
-# 5. The suite on Acme's new version, before more loads get it.
-curl -s -X POST $API/brokers/acme/evals/run -H 'content-type: application/json' \
-  -d '{"suite": "core", "mode": "replay"}'
-
-# 6. Roll back if needed: every Acme load goes back to config version 1.
-curl -s -X POST $API/brokers/acme/rollout -H 'content-type: application/json' -d '{"percent": 0}'
-```
-
-Then a load with `broker.id = acme` runs on that catalog and SOP: a driver "at the
-receiver" moves the stage to `at_delivery`, which opens the `pod` obligation with its
-120-minute timer; a POD uploaded to `POST /api/loads/{id}/attachments` is read on the next
-tick, checked against the load, and its `document_processed` run moves the load to
-`delivered`. The inspector shows the intent, config version 2 and the trajectory.
-
-For the repository's own brokers, `sops/` is the seed: `uv run agent sop import sops/`
-publishes the standard, `northline` (Client A) and `keystone` (Client B) versions into
-the database, idempotently.
-
 ### Docker
 
 ```bash
@@ -212,7 +165,7 @@ docker compose run --rm app eval run --suite core --mode replay
 docker compose down                      # add -v to drop the blobs volume
 ```
 
-Ports are published on 127.0.0.1 only. Uploaded attachments and SOP files are kept in the
+Ports are published on 127.0.0.1 only. Uploaded attachments are kept in the
 `blobs` volume (`BLOBS_DIR=/app/blobs`); the image writes nowhere else but eval results.
 
 ## Configuration
@@ -221,11 +174,11 @@ Copy `.env.example` to `.env`. Every value is optional for the quick start.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | unset | live and record modes: model calls and SOP embeddings |
-| `LLM_MODE` | `replay` | `scripted`, `replay`, `live` or `record`; offline modes embed with a deterministic fake |
+| `OPENROUTER_API_KEY` | unset | live and record modes: model calls |
+| `LLM_MODE` | `replay` | `scripted`, `replay`, `live` or `record` |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | off | one trace per agent run; tracing never breaks a run. `LANGSMITH_API_KEY` also enables `agent eval run --langsmith` |
 | `MODELS_CONFIG`, `SOPS_DIR`, `EVALS_DIR`, `CASSETTES_DIR`, `WEB_DIST` | repo paths | where config, SOPs, evals, cassettes and the built UI live |
-| `BLOBS_DIR` | `blobs` | bytes of uploaded attachments and SOP files, created on the first upload |
+| `BLOBS_DIR` | `blobs` | bytes of uploaded attachments, created on the first upload |
 
 Secrets are read as secrets: they are never printed, logged or returned by the API.
 
@@ -235,23 +188,21 @@ Secrets are read as secrets: they are never printed, logged or returned by the A
 src/freight_agent/
   domain/        entities and rules (pure): brokers and their catalog, ledger, timers, ping
                  filter, SOP merge, documents, actions, validator rules, runs
-  ports/         interfaces: repositories (with brokers, SOP store, documents), SOP index,
-                 embedder, blobs, page reader, document processor, gateways, language
-                 model, clock, tracer
+  ports/         interfaces: repositories (with brokers, documents), SOP index, blobs, page
+                 reader, document processor, gateways, language model, clock, tracer
   application/   run context, prefilter, triage, the agent loop and its tools, executor,
-                 the LangGraph run graph, runtime, document pipeline, SOP ingestion
+                 the LangGraph run graph, runtime, document pipeline
   adapters/      the memory store, OpenRouter / cassette / scripted models, the SOP
-                 index (memory, pgvector) and embedders, SOP files, lint and importer, blobs
-                 and the PDF page reader, LangSmith
+                 index, SOP files and lint, blobs and the PDF page reader, LangSmith
   evalkit/       scenario spec, runner, graders, judge, scenario drafts, suites and reports
   api/           FastAPI platform (simulation, ingress, brokers, SOPs, documents, Hero
                  console, inspector, evals, SSE)
   bootstrap.py   the composition root: the only place that wires adapters to ports
-  cli.py         the `agent` command (`cli_sop.py`: `agent sop import|lint`)
+  cli.py         the `agent` command (`cli_sop.py`: `agent sop lint`)
 sops/            the seed SOPs: standard, client and client + load-type sections (Markdown)
 evals/           scenarios (core, agent, docs, per broker), broker exports, fixtures (the
                  load, the Acme SOP, POD and BOL PDFs), cassettes, results (gitignored)
-config/          models per role, prices, the embedding model
+config/          models per role and prices
 web/             React + Vite platform UI
 tests/           unit, contract, property, integration, evalkit
 ```

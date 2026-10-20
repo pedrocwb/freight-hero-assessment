@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     evals_dir: Path = Path("evals")
     cassettes_dir: Path = Path("evals/cassettes")
     web_dist: Path = Path("web/dist")  # the built UI the API serves, when it exists
-    blobs_dir: Path = Path("blobs")  # attachment and SOP file bytes (`FsBlobStore`)
+    blobs_dir: Path = Path("blobs")  # attachment bytes (`FsBlobStore`)
 
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "a live model")

@@ -13,7 +13,7 @@ from freight_agent.domain.events import Event
 
 
 class BlobStore(Protocol):
-    """Attachment and SOP file bytes. The filesystem now, an object store later."""
+    """Attachment bytes. The filesystem now, an object store later."""
 
     async def put(self, data: bytes, content_type: str, *, name: str = "") -> str:
         """Store `data` and return its reference. The same bytes give the same reference."""

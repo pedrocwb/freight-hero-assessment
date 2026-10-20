@@ -14,7 +14,6 @@ from freight_agent.domain.sop import (
     MergeMode,
     SopLayer,
     SopSection,
-    contributors,
     effective_sections,
     resolve,
 )
@@ -162,24 +161,3 @@ def test_resolve_picks_a_subset_and_catalogs_everything(
     assert list(sop.section_ids) == sorted(sop.section_ids)
     unrestricted = [s for s in visible if not s.intents and not s.stages]
     assert all(s in sop.sections for s in unrestricted)
-
-
-@pytest.mark.property
-@given(standard_tree, client_layers("northline"), client_layers("keystone"), load_type_lists)
-def test_the_contributors_are_the_sources_of_each_merged_section(
-    standard: list[SopSection],
-    northline: list[SopSection],
-    keystone: list[SopSection],
-    load_types: tuple[str, ...],
-) -> None:
-    sections = [*standard, *northline, *keystone]
-    merged = effective_sections(sections, client_id="northline", load_types=load_types)
-
-    found = contributors(sections, client_id="northline", load_types=load_types)
-
-    assert list(found) == [s.section_id for s in merged]
-    for resolved in merged:
-        parts = found[resolved.section_id]
-        assert tuple(p.source for p in parts) == resolved.sources
-        assert all(any(p is s for s in sections) for p in parts)  # the objects given
-        assert all(p.client_id in (None, "northline") for p in parts)

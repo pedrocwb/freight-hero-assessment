@@ -1,5 +1,5 @@
-"""`SopIndex` over sections held in memory, read from a `sops/` tree, or published in a
-`SopStore`: tests, evals and the local platform.
+"""`SopIndex` over sections held in memory or read from a `sops/` tree: the runtime,
+tests, evals and the local platform.
 
 Owner: card W3-KNW.
 
@@ -14,13 +14,6 @@ description count twice); it needs no embedding, so it works offline.
   next run; a broken file fails the runs of the brokers that see it (`SopFormatError`),
   never the others, and never the start of the app; the version every run records is
   the tree's content hash.
-- `StoreSopIndex(uow_factory, files=root)`: the versions published in a `SopStore`
-  (`agent sop import`, a broker's publish), read on every call through a short unit of
-  work of its own, so a publish applies to the next run. A layer never published comes
-  from the `sops/` tree when one is given.
-
-The version of what a broker reads is its layers' versions joined by `+`: the standard
-layer's, then the broker's own when it has one (`compose_version`).
 """
 
 import re
@@ -33,14 +26,11 @@ from freight_agent.domain.sop import (
     ResolvedSection,
     ResolvedSop,
     SearchHit,
-    SopLayer,
     SopSection,
     effective_sections,
-    layer_owner,
     resolve,
     version_hash,
 )
-from freight_agent.ports.repositories import UnitOfWorkFactory
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -52,13 +42,6 @@ def words(text: str) -> set[str]:
 def content_hash(sections: Iterable[SopSection]) -> str:
     """Short sha256 of the sections' content, in order (`domain.sop.version_hash`)."""
     return version_hash(sections)
-
-
-def compose_version(standard: str | None, own: str | None) -> str | None:
-    """The version of what a broker reads: the standard layer's version, then `+` and the
-    broker's own layer's when it has one. None when neither layer has a version."""
-    parts = [part for part in (standard, own) if part]
-    return "+".join(dict.fromkeys(parts)) or None
 
 
 def word_search(sections: Sequence[ResolvedSection], query: str, k: int) -> tuple[SearchHit, ...]:
@@ -80,16 +63,34 @@ def word_search(sections: Sequence[ResolvedSection], query: str, k: int) -> tupl
     )
 
 
-class SectionIndex:
-    """`ports.knowledge.SopIndex` over the sections `sections_for` gives, merged by the
-    domain. Subclasses say where the sections come from and what their version is."""
+class MemorySopIndex:
+    """Implements `ports.knowledge.SopIndex` over a fixed set of sections of every layer,
+    merged by the domain. `version` defaults to a hash of the sections.
+
+    A subclass changes where the sections come from (`sections_for`) and what their
+    version is (`content_version`).
+    """
+
+    def __init__(self, sections: Iterable[SopSection], *, version: str | None = None) -> None:
+        self._sections = tuple(sections)
+        self._version = version if version is not None else content_hash(self._sections)
+
+    @classmethod
+    def from_files(cls, root: Path) -> "MemorySopIndex":
+        """The sections of a `sops/` tree, read on every call (see the module docstring)."""
+        return _FileTreeIndex(root)
+
+    @property
+    def content_version(self) -> str:
+        """The version every broker's runs record (one set of sections, one version)."""
+        return self._version
 
     async def sections_for(self, broker_id: str) -> Sequence[SopSection]:
         """The sections a broker may see, every layer; `domain.sop` keeps the others out."""
-        raise NotImplementedError
+        return self._sections
 
     async def version(self, broker_id: str) -> str | None:
-        raise NotImplementedError
+        return self.content_version
 
     async def by_applies(
         self, broker_id: str, load_types: Sequence[str], intent: str, stage: Stage
@@ -121,33 +122,6 @@ class SectionIndex:
         return next((s for s in visible if s.section_id == section_id), None)
 
 
-class MemorySopIndex(SectionIndex):
-    """Implements `ports.knowledge.SopIndex` over a fixed set of sections of every layer.
-
-    `version` defaults to a hash of the sections.
-    """
-
-    def __init__(self, sections: Iterable[SopSection], *, version: str | None = None) -> None:
-        self._sections = tuple(sections)
-        self._version = version if version is not None else content_hash(self._sections)
-
-    @classmethod
-    def from_files(cls, root: Path) -> "MemorySopIndex":
-        """The sections of a `sops/` tree, read on every call (see the module docstring)."""
-        return _FileTreeIndex(root)
-
-    @property
-    def content_version(self) -> str:
-        """The version every broker's runs record (one set of sections, one version)."""
-        return self._version
-
-    async def sections_for(self, broker_id: str) -> Sequence[SopSection]:
-        return self._sections
-
-    async def version(self, broker_id: str) -> str | None:
-        return self.content_version
-
-
 class _FileTreeIndex(MemorySopIndex):
     """`MemorySopIndex` over a `sops/` tree that it reads on every call."""
 
@@ -162,50 +136,3 @@ class _FileTreeIndex(MemorySopIndex):
 
     async def sections_for(self, broker_id: str) -> Sequence[SopSection]:
         return await self._files.sections_for_client(broker_id)
-
-
-class StoreSopIndex(SectionIndex):
-    """Implements `ports.knowledge.SopIndex` over the versions published in a `SopStore`.
-
-    Each call opens a unit of work of its own, so never call it inside a unit of work of
-    the same memory store (its lock is not reentrant): the run thinks outside any (F8).
-    With `files`, a layer that was never published reads that `sops/` tree instead, and
-    the tree's hash stands for it in the version.
-    """
-
-    def __init__(self, uow_factory: UnitOfWorkFactory, *, files: Path | None = None) -> None:
-        self._uow = uow_factory
-        self._files = None if files is None else FileSopRepository(files)
-
-    async def sections_for(self, broker_id: str) -> Sequence[SopSection]:
-        standard, own = await self._published(broker_id)
-        from_files: list[SopSection] = []
-        if self._files is not None and (standard is None or own is None):
-            from_files = await self._files.sections_for_client(broker_id)
-        if standard is None:
-            standard = tuple(s for s in from_files if s.layer is SopLayer.STANDARD)
-        if own is None:
-            own = tuple(s for s in from_files if s.layer is not SopLayer.STANDARD)
-        return (*standard, *own)
-
-    async def version(self, broker_id: str) -> str | None:
-        async with self._uow() as uow:
-            standard = await uow.sops.published(None)
-            owner = layer_owner(broker_id)
-            own = None if owner is None else await uow.sops.published(owner)
-        tree = None if self._files is None else self._files.version()
-        return compose_version(standard.version if standard else tree, own.version if own else tree)
-
-    async def _published(
-        self, broker_id: str
-    ) -> tuple[tuple[SopSection, ...] | None, tuple[SopSection, ...] | None]:
-        """The sections of the published standard layer and of the broker's own layer,
-        each None while that layer was never published."""
-        async with self._uow() as uow:
-            standard = await uow.sops.published(None)
-            owner = layer_owner(broker_id)
-            own = None if owner is None else await uow.sops.published(owner)
-        return (
-            None if standard is None else standard.sections,
-            None if own is None else own.sections,
-        )

@@ -37,14 +37,13 @@ _GIT_TIMEOUT_S = 10
 
 # The modules whose source shapes what a model reads: the prompt templates and the code
 # that fills them, and the tool descriptions. Wave 3 moves the tools from `tools` to
-# `agent_tools` (card W3-AGT) and adds the document and knowledge prompts; a module that
-# does not exist (yet, or any more) is left out of the hash.
+# `agent_tools` (card W3-AGT) and adds the document prompts; a module that does not exist
+# (yet, or any more) is left out of the hash.
 PROMPT_MODULES = (
     "freight_agent.application.prompts",
     "freight_agent.application.tools",
     "freight_agent.application.agent_tools",
     "freight_agent.application.prompts_documents",
-    "freight_agent.application.prompts_knowledge",
 )
 
 # Runs a git command in a folder: its stdout, or None when git is missing or fails.

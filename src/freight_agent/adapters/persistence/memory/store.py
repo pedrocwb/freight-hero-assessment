@@ -3,8 +3,8 @@
 Transactions are serialized with a lock and rolled back by restoring a snapshot,
 so a failed run leaves no partial state, exactly like a database transaction.
 
-The wave 3 repositories (brokers, SOP store, documents) live in their own modules
-(`brokers.py`, `sops.py`, `documents.py`, one per card) over the fields of `_State`
+The wave 3 repositories (brokers, documents) live in their own modules
+(`brokers.py`, `documents.py`, one per card) over the fields of `_State`
 declared here once: their cards change those modules, never this file.
 """
 
@@ -18,7 +18,6 @@ from typing import Self
 
 from freight_agent.adapters.persistence.memory.brokers import MemoryBrokerRepository
 from freight_agent.adapters.persistence.memory.documents import MemoryDocumentRepository
-from freight_agent.adapters.persistence.memory.sops import MemorySopStore
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.documents import Document
 from freight_agent.domain.events import Event
@@ -27,11 +26,9 @@ from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
-from freight_agent.domain.sop import SopDocument, SopDraft, SopVersion
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.brokers import BrokerRepository
 from freight_agent.ports.documents import DocumentRepository
-from freight_agent.ports.knowledge import SopStore
 from freight_agent.ports.repositories import (
     EventLog,
     EventQueue,
@@ -68,12 +65,9 @@ class _State:
     claimed_at: dict[str, datetime] = field(default_factory=dict)  # in-flight event_id -> claim
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
-    # Wave 3 (`brokers.py`, `sops.py`, `documents.py`).
+    # Wave 3 (`brokers.py`, `documents.py`).
     brokers: dict[str, Broker] = field(default_factory=dict)  # current version
     broker_versions: dict[tuple[str, int], Broker] = field(default_factory=dict)
-    sop_documents: dict[str, SopDocument] = field(default_factory=dict)
-    sop_drafts: dict[str | None, SopDraft] = field(default_factory=dict)  # None: standard
-    sop_versions: dict[str | None, list[SopVersion]] = field(default_factory=dict)
     documents: dict[str, Document] = field(default_factory=dict)
 
 
@@ -309,7 +303,6 @@ class MemoryUnitOfWork:
         self.runs: RunRepository = MemoryRunRepository(store)
         self.queue: EventQueue = MemoryEventQueue(store)
         self.brokers: BrokerRepository = MemoryBrokerRepository(store)
-        self.sops: SopStore = MemorySopStore(store)
         self.documents: DocumentRepository = MemoryDocumentRepository(store)
 
     async def __aenter__(self) -> Self:

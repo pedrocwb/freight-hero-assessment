@@ -1,4 +1,5 @@
-"""The SOP viewer: effective sections per client and load type, and the resolver preview."""
+"""The SOP viewer: effective sections per client and load type, the resolver preview and
+search."""
 
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -74,3 +75,39 @@ async def test_a_broken_sop_file_is_reported_by_name(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert "standard/broken.md" in response.json()["detail"]
+
+
+async def test_search_ranks_the_reefer_section_first(api: Api) -> None:
+    hits = await api.get(
+        "/api/sops/search", q="trailer temperature seal", broker_id="keystone", load_types="reefer"
+    )
+    alias = await api.get(
+        "/api/sops/search", q="trailer temperature seal", client_id="keystone", load_types="reefer"
+    )
+
+    assert hits[0]["section_id"] == "driver_departed"
+    assert set(hits[0]) == {"section_id", "title", "description", "score"}
+    assert alias == hits
+    assert len(await api.get("/api/sops/search", q="driver", broker_id="northline", k=2)) == 2
+
+
+async def test_search_needs_a_broker_and_a_sane_k(api: Api) -> None:
+    missing = await api.client.get("/api/sops/search", params={"q": "eta"})
+    too_many = await api.client.get(
+        "/api/sops/search", params={"q": "eta", "broker_id": "acme", "k": 50}
+    )
+
+    assert missing.status_code == 400
+    assert too_many.status_code == 422
+
+
+async def test_the_preview_takes_an_intent_of_the_broker_s_catalog(api: Api) -> None:
+    resolved = await api.get(
+        "/api/sops/preview", client_id="northline", intent="document_processed", stage="at_delivery"
+    )
+
+    assert [s["section_id"] for s in resolved["sections"]] == [
+        "communication_rules",
+        "documents",
+        "escalation",
+    ]

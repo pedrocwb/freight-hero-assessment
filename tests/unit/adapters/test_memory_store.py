@@ -8,7 +8,6 @@ from freight_agent.domain.broker import new_broker
 from freight_agent.domain.documents import Document, DocumentStatus
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel
-from freight_agent.domain.sop import SopDocument, SopDraft, SopVersion
 
 LA = ZoneInfo("America/Los_Angeles")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
@@ -137,12 +136,6 @@ def test_virtual_clock_advances_real_time_across_the_fall_back() -> None:
 # pin them down) ---------------------------------------------------------------------------
 
 
-def _sop_version(version: str) -> SopVersion:
-    return SopVersion(
-        broker_id="acme", version=version, sections=(), published_at=T0, published_by="editor"
-    )
-
-
 @pytest.mark.unit
 async def test_brokers_keep_every_version_and_roll_back_with_the_unit_of_work() -> None:
     store = MemoryStore()
@@ -161,40 +154,6 @@ async def test_brokers_keep_every_version_and_roll_back_with_the_unit_of_work() 
         assert await uow.brokers.versions("acme") == [first, second]
         assert [b.broker_id for b in await uow.brokers.list()] == ["acme"]
         assert await uow.brokers.get("beta") is None
-
-
-@pytest.mark.unit
-async def test_the_sop_store_keeps_documents_one_draft_and_immutable_versions() -> None:
-    store = MemoryStore()
-    upload = SopDocument(
-        document_id="sopdoc_1",
-        broker_id="acme",
-        filename="acme.pdf",
-        content_type="application/pdf",
-        blob_ref="sha256:abc",
-        sha256="abc",
-        uploaded_at=T0,
-    )
-    draft = SopDraft(broker_id="acme", updated_at=T0)
-    async with store.unit_of_work() as uow:
-        await uow.sops.save_document(upload)
-        await uow.sops.save_draft(draft)
-        await uow.sops.save_version(_sop_version("v1"))
-        await uow.sops.save_version(_sop_version("v2"))
-        await uow.sops.save_version(_sop_version("v1"))  # already published: unchanged
-        await uow.commit()
-
-    async with store.unit_of_work() as uow:
-        assert await uow.sops.get_document("sopdoc_1") == upload
-        assert await uow.sops.list_documents("acme") == [upload]
-        assert await uow.sops.list_documents(None) == []
-        assert await uow.sops.get_draft("acme") == draft
-        assert await uow.sops.get_draft(None) is None
-        assert [v.version for v in await uow.sops.versions("acme")] == ["v1", "v2"]
-        published = await uow.sops.published("acme")
-        assert published is not None and published.version == "v2"
-        assert await uow.sops.get_version("acme", "v1") == _sop_version("v1")
-        assert await uow.sops.published(None) is None
 
 
 @pytest.mark.unit

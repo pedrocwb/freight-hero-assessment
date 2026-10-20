@@ -147,7 +147,7 @@ def open_session(
     gateways = RecordingGateways()
     blobs = MemoryBlobStore()
     try:
-        knowledge = build_knowledge(effective, uow_factory=persistence)
+        knowledge = build_knowledge(effective)
         runtime = build_runtime(
             effective,
             clock=clock,
@@ -193,7 +193,7 @@ class SimulationService:
         return self._settings
 
     # The current session's ports, for the routes the runtime facade does not cover
-    # (documents, knowledge). A reset replaces them: read them per request.
+    # (documents, the SOP viewer). A reset replaces them: read them per request.
 
     @property
     def uow_factory(self) -> UnitOfWorkFactory:
@@ -206,11 +206,6 @@ class SimulationService:
     @property
     def blobs(self) -> BlobStore:
         return self._session.blobs
-
-    @property
-    def llm(self) -> LanguageModel | None:
-        """The model `create_app` was given for every session (tests), or None."""
-        return self._llm
 
     def _open(self, request: ResetRequest) -> Session:
         timezone = zone(request.timezone or DEFAULT_TIMEZONE)

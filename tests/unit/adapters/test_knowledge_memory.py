@@ -1,32 +1,21 @@
-"""The in-memory SOP indexes (fixed sections, a `sops/` tree, a SOP store) and the fake
-embedder.
+"""The in-memory SOP index: fixed sections, or a `sops/` tree.
 
 Owner: card W3-KNW.
 """
 
-import math
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.knowledge.memory import (
-    MemorySopIndex,
-    StoreSopIndex,
-    compose_version,
-)
-from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.sop.files import FileSopRepository, SopFormatError
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import (
     SopLayer,
     SopSection,
-    SopVersion,
     effective_sections,
     resolve,
-    version_hash,
 )
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -120,124 +109,3 @@ async def test_the_version_is_a_content_hash_unless_one_is_given() -> None:
     assert await one.version("acme") == await same.version("acme")
     assert await one.version("acme") != await edited.version("acme")
     assert await MemorySopIndex([], version="v1").version("acme") == "v1"
-
-
-@pytest.mark.unit
-async def test_the_fake_embedder_is_deterministic_and_normalized() -> None:
-    embedder = FakeEmbedder(dim=16)
-
-    first, again, other, empty = await embedder.embed(
-        ["trailer temperature", "trailer temperature", "lumper receipt", ""]
-    )
-
-    assert first == again
-    assert len(first) == embedder.dim == 16
-    assert math.isclose(sum(v * v for v in first), 1.0)
-    assert first != other
-    assert empty == [0.0] * 16
-    assert embedder.model_id == "fake/token-hash"
-
-
-# --- the index over a SOP store ----------------------------------------------------------
-
-T0 = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
-
-
-async def publish(store: MemoryStore, broker_id: str | None, *sections: SopSection) -> str:
-    version = version_hash(sections)
-    async with store.unit_of_work() as uow:
-        await uow.sops.save_version(
-            SopVersion(
-                broker_id=broker_id,
-                version=version,
-                sections=sections,
-                published_at=T0,
-                published_by="test",
-            )
-        )
-        await uow.commit()
-    return version
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(("broker_id", "load_types"), CLIENTS)
-async def test_a_store_with_nothing_published_reads_the_files(
-    broker_id: str, load_types: tuple[str, ...]
-) -> None:
-    index = StoreSopIndex(MemoryStore().unit_of_work, files=SOPS)
-    files = MemorySopIndex.from_files(SOPS)
-    high, pickup = Intent.ETA_FOLLOW_UP_DUE, Stage.TO_PICKUP
-
-    assert await index.visible(broker_id, load_types) == await files.visible(broker_id, load_types)
-    assert await index.by_applies(broker_id, load_types, high, pickup) == await files.by_applies(
-        broker_id, load_types, high, pickup
-    )
-    assert await index.version(broker_id) == await files.version(broker_id)
-
-
-@pytest.mark.unit
-async def test_a_published_broker_layer_replaces_its_files_for_that_broker_only() -> None:
-    store = MemoryStore()
-    index = StoreSopIndex(store.unit_of_work, files=SOPS)
-    detention = _section("detention", "Pay after 2 h.", client_id="acme")
-    northline = _section("delay_risk_high", "Only call.", client_id="northline")
-
-    acme_version = await publish(store, "acme", detention)
-    northline_version = await publish(store, "northline", northline)
-
-    acme = {s.section_id: s for s in await index.visible("acme", ())}
-    assert acme["detention"].body == "Pay after 2 h."
-    assert acme["escalation"].sources == ("standard/escalation.md",)  # from the files
-    merged = {s.section_id: s for s in await index.visible("northline", ())}
-    assert merged["delay_risk_high"].body == "Only call."
-    assert "detention" not in merged
-    tree = FileSopRepository(SOPS).version()
-    assert await index.version("acme") == f"{tree}+{acme_version}"
-    assert await index.version("northline") == f"{tree}+{northline_version}"
-    assert await index.version("keystone") == tree
-
-
-@pytest.mark.unit
-async def test_a_published_standard_layer_replaces_the_standard_files() -> None:
-    store = MemoryStore()
-    index = StoreSopIndex(store.unit_of_work, files=SOPS)
-
-    standard = await publish(
-        store, None, _section("rules", "Be brief."), _section("driver_departed", "Note it.")
-    )
-
-    keystone = {s.section_id: s for s in await index.visible("keystone", ("reefer",))}
-    assert set(keystone) == {"rules", "driver_departed", "delay_risk_high"}
-    assert keystone["driver_departed"].body.startswith("Note it.")  # the files' extend on top
-    tree = FileSopRepository(SOPS).version()
-    assert await index.version("keystone") == f"{standard}+{tree}"
-
-
-@pytest.mark.unit
-async def test_without_files_only_what_was_published_is_read() -> None:
-    store = MemoryStore()
-    index = StoreSopIndex(store.unit_of_work)
-
-    assert await index.visible("acme", ()) == ()
-    assert await index.version("acme") is None
-    assert await index.search("acme", (), "brief") == ()
-    standard = await publish(store, None, _section("rules", "Be brief."))
-    acme = await publish(store, "acme", _section("detention", "Pay.", client_id="acme"))
-
-    assert [s.section_id for s in await index.visible("acme", ())] == ["detention", "rules"]
-    assert [s.section_id for s in await index.visible("standard", ())] == ["rules"]
-    assert await index.version("acme") == f"{standard}+{acme}"
-    assert await index.version("standard") == standard
-    hits = await index.search("acme", (), "brief")
-    assert [h.section_id for h in hits] == ["rules"]
-    found = await index.read("acme", (), "detention")
-    assert found is not None and found.body == "Pay."
-
-
-@pytest.mark.unit
-def test_a_version_joins_the_layers_that_have_one() -> None:
-    assert compose_version("s1", "b1") == "s1+b1"
-    assert compose_version("s1", None) == "s1"
-    assert compose_version(None, "b1") == "b1"
-    assert compose_version("t", "t") == "t"
-    assert compose_version(None, None) is None
