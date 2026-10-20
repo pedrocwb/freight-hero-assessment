@@ -45,7 +45,7 @@ from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.knowledge.memory import MemorySopIndex
+from freight_agent.adapters.knowledge.memory import MemorySopIndex, StoreSopIndex
 from freight_agent.adapters.llm.cassette import CassetteModel
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
 from freight_agent.adapters.llm.openrouter import models_for_role
@@ -265,18 +265,26 @@ def enable_native_tracing(settings: Settings) -> None:
 # --- knowledge, blobs and documents ----------------------------------------------
 
 
-def build_knowledge(settings: Settings) -> SopIndex:
+def build_knowledge(
+    settings: Settings, *, uow_factory: UnitOfWorkFactory | None = None
+) -> SopIndex:
     """The SOP index the runs read.
 
-    `PERSISTENCE=postgres`: the published sections in the database, once card W3-KNW
-    provides `knowledge_index`; until then, and in every other case, the `sops/` tree
-    (`MemorySopIndex.from_files`), loaded once.
+    - `PERSISTENCE=postgres`: the sections published in the database
+      (`adapters.knowledge.postgres.knowledge_index`), embedding a live `search_sop` query
+      with `build_embedder`; without that adapter, the `sops/` tree.
+    - The memory store, given its unit of work: `StoreSopIndex`, the versions published in
+      that store, with the `sops/` tree for every layer never published. A broker onboarded
+      through the API therefore reaches the runs of the same simulation.
+    - Otherwise the `sops/` tree (`MemorySopIndex.from_files`).
     """
     if settings.persistence == "postgres":
         factory = KNOWLEDGE_POSTGRES.load()
         if factory is not None:
-            return factory(settings)
-        logger.info("no Postgres SOP index yet: the runs read the SOP files in SOPS_DIR")
+            return factory(settings, embedder=build_embedder(settings))
+        logger.info("no Postgres SOP index: the runs read the SOP files in SOPS_DIR")
+    elif uow_factory is not None:
+        return StoreSopIndex(uow_factory, files=settings.sops_dir)
     return MemorySopIndex.from_files(settings.sops_dir)
 
 
@@ -351,12 +359,15 @@ def build_runtime_deps(
     deliveries are recorded, not sent.
     """
     clock = SystemClock() if clock is None else clock
+    uow_factory = build_uow_factory(settings) if persistence is None else persistence
+    if knowledge is None:
+        knowledge = build_knowledge(settings, uow_factory=uow_factory)
     deps = RuntimeDeps(
-        uow_factory=build_uow_factory(settings) if persistence is None else persistence,
+        uow_factory=uow_factory,
         clock=clock,
         ids=UuidIdGenerator(),
         llm=build_llm(settings, clock=clock) if llm is None else llm,
-        knowledge=build_knowledge(settings) if knowledge is None else knowledge,
+        knowledge=knowledge,
         gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
         tracer=build_tracer(settings, sop_version=FileSopRepository(settings.sops_dir).version),
         blobs=build_blobs(settings) if blobs is None else blobs,

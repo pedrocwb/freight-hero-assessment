@@ -10,7 +10,8 @@ The viewer and search read the SOP index the session's runs read
 (`SimulationService.knowledge`), so they show what the agent sees. Onboarding goes
 through `application.sop_ingestion.SopIngestion` on the session's store and blobs:
 the `compile` and `extract` roles of the session's model mode (a model given to
-`create_app` is not reachable here yet: tests set `app.state.knowledge_llm`), the
+`create_app`'s model when it was given one, as `SimulationService.llm`; tests may also set
+`app.state.knowledge_llm`), the
 embedder of that mode, and the standard layer from the index. The standard layer is
 published from `sops/standard/` with `agent sop import`, not uploaded.
 """
@@ -135,7 +136,7 @@ async def _model(request: Request, service: Service, mode: LlmMode) -> LanguageM
     """The session's model for the onboarding roles: `app.state.knowledge_llm` when set
     (tests), else one per model mode, built once."""
     state = request.app.state
-    given: LanguageModel | None = getattr(state, "knowledge_llm", None)
+    given: LanguageModel | None = getattr(state, "knowledge_llm", None) or service.llm
     if given is not None:
         return given
     if not hasattr(state, "knowledge_models"):

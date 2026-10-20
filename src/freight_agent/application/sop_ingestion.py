@@ -49,6 +49,7 @@ from freight_agent.domain.broker import (
     new_broker,
     standard_broker,
 )
+from freight_agent.domain.broker import catalog_problems as broker_catalog_problems
 from freight_agent.domain.documents import Page
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.intents import Intent
@@ -679,37 +680,6 @@ def _as_standard(section: ResolvedSection) -> SopSection:
 
 
 def catalog_problems(broker: Broker) -> tuple[str, ...]:
-    """What keeps the broker's catalog after a publish from working.
-
-    Card W3-BRK's `domain.broker.catalog_problems` checks the whole catalog; until both
-    cards are on one branch this checks what a draft can change: the new intents, the
-    obligations and the requirements. (`publish_draft` validates the broker in full.)
-    """
-    problems: list[str] = []
-    for intent in broker.intents:
-        if not _SNAKE_CASE.fullmatch(intent.intent_id):
-            problems.append(f"intent id {intent.intent_id!r} must be snake_case")
-        if not (intent.title.strip() and intent.description.strip()):
-            problems.append(f"intent {intent.intent_id} needs a title and a description")
-    kinds = {o.kind for o in broker.obligations}
-    for obligation in broker.obligations:
-        if not _SNAKE_CASE.fullmatch(obligation.kind):
-            problems.append(f"obligation kind {obligation.kind!r} must be snake_case")
-        if obligation.follow_up_minutes < 1 or obligation.max_attempts < 1:
-            problems.append(
-                f"obligation {obligation.kind}: follow_up_minutes and max_attempts must be "
-                "at least 1"
-            )
-        if not obligation.on_exhausted:
-            problems.append(f"obligation {obligation.kind}: on_exhausted names nobody")
-    types = {d.type_id for d in broker.document_types}
-    for requirement in broker.documents:
-        where = f"requirement {requirement.type_id} at {requirement.at_stage}"
-        if requirement.type_id not in types:
-            problems.append(f"{where}: unknown document type {requirement.type_id}")
-        opens = requirement.opens_obligation
-        if opens is not None and opens not in kinds:
-            problems.append(f"{where}: unknown obligation kind {opens}")
-        if requirement.within_minutes is not None and opens is None:
-            problems.append(f"{where}: within_minutes needs opens_obligation")
-    return tuple(problems)
+    """What keeps the broker's catalog after a publish from working: the whole catalog,
+    as card W3-BRK validates it (`domain.broker.catalog_problems`)."""
+    return broker_catalog_problems(broker)

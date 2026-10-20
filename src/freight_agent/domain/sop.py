@@ -23,13 +23,13 @@ from pydantic import field_validator
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.broker import (
-    FOLLOW_UP_SUFFIX,
     STANDARD_BROKER_ID,
     Broker,
     DocumentRequirement,
     IntentDef,
     ObligationDef,
     Rollout,
+    with_follow_up_intents,
 )
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Stage
@@ -408,39 +408,14 @@ def follow_up_intents(
     intents: Sequence[IntentDef], obligations: Sequence[ObligationDef]
 ) -> tuple[IntentDef, ...]:
     """`intents`, plus a system intent for each obligation whose follow-up intent is
-    missing (its timer emits it). Intents already there are kept as they are.
-
-    The same as card W3-BRK's `domain.broker.with_follow_up_intents`, which this mirrors
-    until both cards are on one branch; then this delegates to it.
-    """
-    found = list(intents)
-    known = {i.intent_id for i in found}
-    for obligation in obligations:
-        intent_id = obligation.follow_up_intent or f"{obligation.kind}{FOLLOW_UP_SUFFIX}"
-        if intent_id in known:
-            continue
-        known.add(intent_id)
-        found.append(
-            IntentDef(
-                intent_id=intent_id,
-                title=f"{obligation.title} follow-up due",
-                description=(
-                    f"The follow-up timer of an open {obligation.kind} obligation is due: its"
-                    " wait ended without an answer."
-                ),
-                system=True,
-            )
-        )
-    return tuple(found)
+    missing (its timer emits it): `domain.broker.with_follow_up_intents`."""
+    return with_follow_up_intents(intents, obligations)
 
 
 def revised_broker(broker: Broker, **changes: object) -> Broker:
-    """`broker` with `changes`, validated (`model_copy` skips validation).
-
-    The same as card W3-BRK's `Broker.revised`, which also checks the whole catalog;
-    this mirrors it until both cards are on one branch.
-    """
-    return Broker.model_validate({**broker.model_dump(), **changes})
+    """`broker` with `changes`, validated with the whole catalog (`Broker.revised`;
+    `model_copy` skips validation)."""
+    return broker.revised(**changes)
 
 
 def adopt_sop(broker: Broker, sop_version: str, *, saved: bool, percent: int = 100) -> Broker:

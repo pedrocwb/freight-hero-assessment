@@ -22,7 +22,7 @@ from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.knowledge.memory import MemorySopIndex
+from freight_agent.adapters.knowledge.memory import MemorySopIndex, StoreSopIndex
 from freight_agent.adapters.llm.cassette import CassetteMissing, CassetteModel, model_slug
 from freight_agent.adapters.llm.models_config import (
     EmbeddingConfig,
@@ -287,15 +287,15 @@ def test_a_missing_models_config_names_the_file_and_the_setting(
 
 
 @pytest.mark.unit
-def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
+async def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
     deps = build_runtime_deps(_settings(tmp_path))
 
     assert isinstance(deps.clock, SystemClock)
     assert isinstance(deps.ids, UuidIdGenerator)
     assert isinstance(deps.uow_factory(), MemoryUnitOfWork)
     assert isinstance(_router(deps.llm).model_for(ModelRole.GATE), CassetteModel)  # replay
-    assert isinstance(deps.knowledge, MemorySopIndex)
-    assert deps.knowledge.content_version == FileSopRepository(SOPS).version()
+    assert isinstance(deps.knowledge, StoreSopIndex)  # the store's published SOPs, else sops/
+    assert await deps.knowledge.version("northline") == FileSopRepository(SOPS).version()
     assert isinstance(deps.blobs, FsBlobStore)
     assert isinstance(deps.documents, DocumentPipeline)  # W3-DOC plugged in by name
     assert isinstance(deps.gateways, Gateways)
@@ -557,8 +557,11 @@ def test_postgres_uses_the_knowledge_index_once_it_exists(
     index = MemorySopIndex([], version="db")
     seen: list[Settings] = []
 
-    def knowledge_index(settings: Settings) -> MemorySopIndex:
+    embedders: list[object] = []
+
+    def knowledge_index(settings: Settings, *, embedder: object = None) -> MemorySopIndex:
         seen.append(settings)
+        embedders.append(embedder)
         return index
 
     _fake_module(monkeypatch, bootstrap.KNOWLEDGE_POSTGRES, knowledge_index)
@@ -566,6 +569,7 @@ def test_postgres_uses_the_knowledge_index_once_it_exists(
 
     assert bootstrap.build_knowledge(settings) is index
     assert seen == [settings]
+    assert isinstance(embedders[0], FakeEmbedder)  # replay: no live query embedding
 
 
 @pytest.mark.unit
@@ -741,4 +745,15 @@ def test_the_runtime_builds_without_an_embedder_in_live_mode(
 
     deps = build_runtime_deps(settings, llm=ScriptedModel())
 
-    assert isinstance(deps.knowledge, MemorySopIndex)
+    assert isinstance(deps.knowledge, StoreSopIndex)
+
+
+@pytest.mark.unit
+async def test_the_memory_store_index_serves_what_the_store_published(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    uow_factory = bootstrap.build_uow_factory(settings)
+
+    knowledge = bootstrap.build_knowledge(settings, uow_factory=uow_factory)
+
+    assert isinstance(knowledge, StoreSopIndex)
+    assert await knowledge.version("northline") == FileSopRepository(SOPS).version()

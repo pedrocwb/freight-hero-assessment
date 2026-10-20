@@ -16,9 +16,7 @@ import pytest
 from freight_agent import bootstrap
 from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
 from freight_agent.adapters.knowledge.memory import StoreSopIndex
-from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.adapters.sop.files import FileSopRepository
-from freight_agent.api import simulation
 from freight_agent.ports.llm import LlmError, ModelRole
 from freight_agent.settings import Settings
 from tests.integration.test_api_harness import (
@@ -210,18 +208,10 @@ async def test_the_preview_takes_an_intent_of_the_broker_s_catalog(api: Api) -> 
 @pytest.fixture
 async def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Api]:
     """The session reads the SOPs through its own store, with the files for what was
-    never published: `bootstrap.build_knowledge` as card W3-OPS is asked to wire it."""
-    store = MemoryStore()
-
-    def uow_factory(settings: Settings) -> Any:
-        return store.unit_of_work
-
-    def knowledge(settings: Settings) -> StoreSopIndex:
-        return StoreSopIndex(store.unit_of_work, files=settings.sops_dir)
-
-    monkeypatch.setattr(simulation, "build_uow_factory", uow_factory)
-    monkeypatch.setattr(simulation, "build_knowledge", knowledge)
+    never published: `bootstrap.build_knowledge` gives the memory session a
+    `StoreSopIndex` over the session's store."""
     async with open_api(tmp_path) as api:
+        assert isinstance(api.app.state.service.knowledge, StoreSopIndex)
         api.app.state.knowledge_llm = api.model
         yield api
 
