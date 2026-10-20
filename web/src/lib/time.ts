@@ -149,9 +149,21 @@ export function formatRelative(minutes: number): string {
   return minutes > 0 ? `in ${span}` : `${span} ago`;
 }
 
-/** Shift an ISO instant by whole minutes, keeping the offset form the API understands. */
-export function addMinutes(iso: string, minutes: number): string {
-  const date = parse(iso);
-  if (!date) return iso;
-  return new Date(date.getTime() + minutes * 60000).toISOString();
+
+export interface DayGroup<T> {
+  key: string;
+  label: string;
+  items: T[];
+}
+
+/** Consecutive entries grouped by their local day, for the day separators of a timeline. */
+export function groupByDay<T extends { at: string }>(items: readonly T[], timeZone: string): DayGroup<T>[] {
+  const groups: DayGroup<T>[] = [];
+  for (const item of items) {
+    const key = localDayKey(item.at, timeZone);
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.items.push(item);
+    else groups.push({ key, label: formatDay(item.at, timeZone), items: [item] });
+  }
+  return groups;
 }

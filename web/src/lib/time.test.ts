@@ -8,6 +8,7 @@ import {
   formatStamp,
   formatTime,
   formatWindow,
+  groupByDay,
   minutesBetween,
 } from "./time";
 
@@ -62,5 +63,22 @@ describe("durations", () => {
     expect(formatRelative(29)).toBe("in 29 min");
     expect(formatRelative(-3)).toBe("3 min ago");
     expect(formatRelative(0)).toBe("now");
+  });
+});
+
+describe("groupByDay", () => {
+  it("starts a group when the local day changes", () => {
+    const groups = groupByDay(
+      [
+        { at: "2026-10-13T23:50:00-07:00" },
+        { at: "2026-10-14T06:55:00Z" }, // still Oct 13 in Los Angeles
+        { at: "2026-10-14T08:00:00-07:00" },
+      ],
+      LA,
+    );
+    expect(groups.map((g) => [g.label, g.items.length])).toEqual([
+      ["Tue, Oct 13", 2],
+      ["Wed, Oct 14", 1],
+    ]);
   });
 });
