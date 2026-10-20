@@ -270,10 +270,16 @@ async def test_a_scenario_runs_on_the_imported_brokers_and_sections_as_on_the_so
     imported_index: SopIndex,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scenario = load_scenario(path)
+    if scenario.broker_file is not None:
+        pytest.skip(
+            "a broker export brings its own SOP sections instead of the imported ones; "
+            "the store-only variant runs this scenario on Postgres"
+        )
     memory = await _on_memory(path)
     _store_in(monkeypatch, seeded_store)
 
-    postgres = await ScenarioRunner(EVALS, imported_index, "scripted").run(load_scenario(path))
+    postgres = await ScenarioRunner(EVALS, imported_index, "scripted").run(scenario)
 
     await _ran_on(seeded_store, postgres)
     _assert_same(postgres, memory, drop=frozenset(PROVENANCE))

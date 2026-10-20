@@ -25,7 +25,7 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
-from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.intents import GateDecision, Intent
@@ -634,6 +634,6 @@ def test_the_default_factory_builds_the_real_runtime() -> None:
         knowledge,
     )
     assert isinstance(deps.blobs, MemoryBlobStore)
-    assert isinstance(deps.documents, NullDocumentProcessor)
+    assert isinstance(deps.documents, DocumentPipeline)  # W3-DOC, found by name
     assert isinstance(deps.ids, SequentialIdGenerator)
     assert isinstance(deps.tracer, NullTracer)

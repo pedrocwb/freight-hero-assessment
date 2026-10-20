@@ -26,7 +26,7 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
-from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.domain.actions import AgentOutcome, SendSms
 from freight_agent.domain.broker import new_broker
@@ -561,7 +561,7 @@ def test_the_default_trial_runtime_is_the_product_runtime_with_the_trials_blobs(
     assert isinstance(runtime, AgentRuntime)
     inner = runtime._deps  # pyright: ignore[reportPrivateUsage]
     assert inner.blobs is deps.blobs
-    assert isinstance(inner.documents, NullDocumentProcessor)  # until card W3-DOC
+    assert isinstance(inner.documents, DocumentPipeline)  # W3-DOC, found by name
     assert inner.config.reraise_unexpected
 
 
