@@ -15,13 +15,11 @@ services:
     build: .
     image: freight-agent:local
     # Optional: the app starts with the defaults when there is no .env. A key in .env
-    # (OPENROUTER_API_KEY for LLM_MODE=live) reaches the container here, never the image.
+    # (OPENROUTER_API_KEY, the live model) reaches the container here, never the image.
     env_file:
       - path: .env
         required: false
     environment:
-      # replay unless the shell or .env says otherwise: `LLM_MODE=live docker compose up`.
-      LLM_MODE: ${LLM_MODE:-replay}
       # Bytes of uploaded attachments, kept across restarts.
       BLOBS_DIR: /app/blobs
     volumes:

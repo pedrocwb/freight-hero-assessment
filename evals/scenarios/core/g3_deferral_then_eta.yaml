@@ -26,15 +26,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -47,13 +38,6 @@ steps:
   - at: "07:30"
     note: The driver defers; the 07:31 timer becomes stale.
     message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
-    script:
-      gate:
-        - {intent: eta_deferred, act: true, reason: The driver promises the ETA in 5 minutes.}
-      decide:
-        - actions:
-            - {type: defer_obligation, kind: eta_request, minutes: 5}
-          rationale: eta_deferred, first wait for this request, so defer it by the 5 minutes promised and send nothing; code moves the follow-up.
     expect:
       no_actions: true
       obligations:
@@ -64,14 +48,6 @@ steps:
   - at: "07:34"
     note: The driver keeps the promise; the run at 07:35 closes the request.
     message: {channel: sms, sender: drv_20931, body: "ok be there at 9:15"}
-    script:
-      gate:
-        - {intent: eta_provided, act: true, reason: The driver gives the arrival time he promised.}
-      decide:
-        - actions:
-            - {type: close_obligation, kind: eta_request, status: satisfied}
-            - {type: write_tms_note, text: "ETA 09:15 at the Riverbend plant pickup (driver, by SMS at 07:34)."}
-          rationale: eta_received, close the ETA request as satisfied, record the ETA in the TMS and send no reply.
     expect:
       actions:
         - {kind: tms_note, contains: ["9:15"], count: 1}

@@ -71,16 +71,3 @@ steps:
       timers: {pending: 1, due_at: "07:51"}
       run_status: [acted]
       llm_calls: 1
-    script:
-      decide:
-        - rationale: >-
-            delay_risk_high (Northline), first step: text the driver for the ETA and follow
-            up in 30 minutes.
-          actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: "Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?"
-            - type: schedule_timer
-              kind: eta_request
-              due_in_minutes: 30

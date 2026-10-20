@@ -7,12 +7,9 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Recorded cassettes and eval results are kept byte for byte as written.
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
-        exclude: ^evals/(cassettes|results)/
       - id: end-of-file-fixer
-        exclude: ^evals/(cassettes|results)/
       - id: check-yaml
       - id: check-added-large-files
 

@@ -1,6 +1,7 @@
 # What t1 checks, judged on the outcome only, so it measures a live model too: a request no
-# SOP covers reaches a person with the driver's words, and nothing is promised. t1 checks
-# the scripted path (search, read, no procedure); a live model may hand the case over
+# SOP covers reaches a person with the driver's words, and nothing is promised. A graph test
+# (tests/unit/application/test_graph_guardrails.py) checks the path (search, read, no
+# procedure); a live model may hand the case over
 # directly, because the escalation section is always shown in full (it names no intent).
 id: t2_gap_hero_without_promise
 title: A request no SOP covers reaches a Hero with the driver's words and no promise
@@ -22,27 +23,6 @@ steps:
       channel: sms
       sender: drv_20931
       body: "im out of hours after this leg. can you book me a hotel near reno tonight?"
-    script:
-      gate:
-        - {intent: other, act: true, reason: "A hotel booking request; no intent covers it."}
-      agent:
-        - rationale: >-
-            No section covers booking hotels. The escalation section says to create a Hero
-            task when no procedure covers a request, and not to improvise.
-          actions:
-            - type: create_hero_task
-              title: "Driver asks for a hotel near Reno tonight"
-              description: >-
-                Load 481207: the driver (drv_20931) is out of hours after this leg and asks
-                us to book a hotel near Reno tonight. No procedure covers hotel bookings, so
-                the agent did not reply or book anything. Please handle it with the driver.
-              urgent: false
-      judge:
-        - reasons:
-            - "The task quotes the driver's request for a hotel near Reno tonight."
-            - "It says the agent did not reply or book anything and asks a person to handle it."
-            - "No message went to the driver, so nothing was promised."
-          score: 0.9
     expect:
       actions:
         - {kind: hero_task, contains: ["hotel"], count: 1}

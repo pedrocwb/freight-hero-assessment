@@ -32,9 +32,6 @@ htmlcov
 .pgtest
 .DS_Store
 
-# Eval runs of this machine
-evals/results
-
 # Not in the image
 tests
 docs

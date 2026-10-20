@@ -27,16 +27,6 @@ steps:
       sender: drv_20931
       body: What's the PO number?
       message_id: e3-sms-7731
-    script:
-      gate:
-        - {intent: question, act: true, reason: The driver asks for the PO number.}
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: reply
-              text: The PO number is 55821. You will need it at the gate.
-          rationale: driver_questions, the PO number is in the load instructions, so answer it.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: reply, contains: ["55821"], count: 1}

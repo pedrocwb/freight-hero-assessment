@@ -25,15 +25,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -46,14 +37,6 @@ steps:
   - at: "07:20"
     note: The driver answers with a duration; the run happens at 07:21.
     message: {channel: sms, sender: drv_20931, body: "30 mins"}
-    script:
-      gate:
-        - {intent: eta_provided, act: true, reason: The driver gives a duration until arrival in reply to our ETA request.}
-      decide:
-        - actions:
-            - {type: close_obligation, kind: eta_request, status: satisfied}
-            - {type: write_tms_note, text: "ETA 07:50 at the Riverbend plant pickup (driver, by SMS at 07:20: 30 mins)."}
-          rationale: eta_received, a duration counts from the message time, 07:20 plus 30 minutes is 07:50; close the request and send no reply.
     expect:
       actions:
         - {kind: tms_note, regex: '\b0?7:50\b', count: 1}

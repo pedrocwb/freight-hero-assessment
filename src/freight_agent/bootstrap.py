@@ -5,11 +5,13 @@ The API, the worker, the CLI and the eval harness all build the agent here, from
 Nothing else imports adapters into the core, and `application`, `domain` and `ports`
 never import this module (the import-linter contracts forbid it).
 
-Local mode is the default and needs no secret and no network: in-memory storage,
-recording gateways (there are no real integrations), recorded model answers (`replay`)
-and no tracing. Each outside system is switched on by its setting. Tracing that is
-switched on without its key falls back to no tracing, with a warning that names no
-secret.
+The model is always the live one on OpenRouter, per role (`config/models.yaml`), behind
+the fallback chain and its circuit breakers. Storage is in memory and the gateways record
+what they would send (there are no real integrations). Tracing is LangGraph's own, on
+LangSmith, when `LANGSMITH_TRACING` is on and its key is set; switched on without its
+key it falls back to no tracing, with a warning that names no secret. Without
+`OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run that needs the
+model escalates to a Hero, saying the key is missing.
 
 Wave 3 adapters are found by name, through `LazyAdapter`, so a card plugs in without
 editing this file:
@@ -38,16 +40,14 @@ from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.llm.cassette import CassetteModel
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
 from freight_agent.adapters.llm.openrouter import models_for_role
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
-from freight_agent.adapters.llm.scripted import ScriptedModel
-from freight_agent.adapters.observability.langsmith import LangSmithTracer, langsmith_client_factory
+from freight_agent.adapters.llm.unavailable import UnavailableModel
+from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.ports.clock import Clock
@@ -57,7 +57,7 @@ from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
-from freight_agent.settings import LlmMode, Settings, is_set
+from freight_agent.settings import MissingSetting, Settings, is_set
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,6 @@ class LazyAdapter:
 # timeout_s=)` and `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
-LIVE_MODES: tuple[LlmMode, ...] = ("live", "record")
 
 
 # --- language model ------------------------------------------------------------
@@ -115,61 +114,31 @@ def openrouter_chain(
 
 
 def build_llm(
-    settings: Settings,
-    *,
-    mode: LlmMode | None = None,
-    clock: Clock,
-    live_chain: LiveChain = openrouter_chain,
+    settings: Settings, *, clock: Clock, live_chain: LiveChain = openrouter_chain
 ) -> LanguageModel:
-    """The model the runtime calls, for `mode` (default: `settings.llm_mode`).
-
-    - `scripted`: a `ScriptedModel`; tests and the scripted eval path push its outputs.
-    - `replay`: per role, the recorded answers of the role's primary model. No key.
-    - `live`: per role, the fallback chain behind circuit breakers on `clock`.
-    - `record`: per role, the primary model, its answers saved for `replay`.
+    """The model the runtime calls: per role, the fallback chain behind circuit breakers
+    on `clock`. Raises `MissingSetting` without `OPENROUTER_API_KEY`.
 
     Every role in `config/models.yaml` gets a model, so the eval judge, the simulated
     driver and the document extractor are served by the same router as the gate and the
     agent.
     """
-    mode = mode or settings.llm_mode
-    if mode == "scripted":
-        return ScriptedModel()
     config = _models_config(settings.models_config)
-    roles = tuple(config.roles)
-    if mode == "replay":
-        return RoleRouter(
-            {
-                role: CassetteModel(settings.cassettes_dir, config.role(role).model, "replay")
-                for role in roles
-            }
-        )
-    if mode not in LIVE_MODES:
-        raise ValueError(f"unknown llm mode {mode!r}: use scripted, replay, live or record")
     key = settings.require_openrouter_key()
-    if mode == "live":
-        return RoleRouter(
-            {role: ResilientModel(live_chain(config, role, key), clock) for role in roles}
-        )
     return RoleRouter(
-        {
-            role: CassetteModel(
-                settings.cassettes_dir,
-                config.role(role).model,
-                "record",
-                inner=_primary(live_chain(config, role, key)),
-            )
-            for role in roles
-        }
+        {role: ResilientModel(live_chain(config, role, key), clock) for role in config.roles}
     )
 
 
-def _primary(chain: Sequence[tuple[str, LanguageModel]]) -> LanguageModel:
-    """Record from the primary alone. Cassettes are filed under the primary's id and
-    replayed as its answers, so a fallback's answer must never be recorded there: a
-    failed primary call fails the recording run, and the next run records it again."""
-    (_, model), *_ = chain
-    return model
+def platform_llm(
+    settings: Settings, *, clock: Clock, live_chain: LiveChain = openrouter_chain
+) -> LanguageModel:
+    """`build_llm`, or without the key a model whose every call fails saying so: the
+    platform starts anyway, and each run that needs the model escalates to a Hero."""
+    try:
+        return build_llm(settings, clock=clock, live_chain=live_chain)
+    except MissingSetting as exc:
+        return UnavailableModel(str(exc))
 
 
 def _models_config(path: Path) -> ModelsConfig:
@@ -193,11 +162,12 @@ def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
 # --- tracing -------------------------------------------------------------------
 
 
-def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = None) -> Tracer:
-    """LangSmith when `LANGSMITH_TRACING` is on and its key is set, otherwise no tracing.
+def build_tracer(settings: Settings) -> Tracer:
+    """Trace links on LangSmith when `LANGSMITH_TRACING` is on and its key is set (and
+    LangGraph's native tracing switched on), otherwise no tracing.
 
-    Tracing is optional and must never stop the agent, so a missing key or a missing
-    adapter falls back to `NullTracer` with a warning (which names no secret).
+    Tracing is optional and must never stop the agent, so a missing key falls back to
+    `NullTracer` with a warning (which names no secret).
     """
     if not settings.langsmith_tracing:
         return NullTracer()
@@ -206,10 +176,9 @@ def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = 
         logger.warning("LANGSMITH_TRACING is on but LANGSMITH_API_KEY is not set: no tracing")
         return NullTracer()
     enable_native_tracing(settings)
-    return LangSmithTracer(
-        langsmith_client_factory(key.get_secret_value()),
+    return LangSmithLinks(
+        langsmith_client_factory(key.get_secret_value(), os.environ.get("LANGSMITH_ENDPOINT")),
         project_name=settings.langsmith_project,
-        sop_version=sop_version,
     )
 
 
@@ -270,6 +239,7 @@ def build_runtime_deps(
     persistence: UnitOfWorkFactory | None = None,
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
+    tracer: Tracer | None = None,
 ) -> RuntimeDeps:
     """Every port of the runtime, from the settings; what the caller passes wins.
 
@@ -284,10 +254,10 @@ def build_runtime_deps(
         uow_factory=uow_factory,
         clock=clock,
         ids=UuidIdGenerator(),
-        llm=build_llm(settings, clock=clock) if llm is None else llm,
+        llm=platform_llm(settings, clock=clock) if llm is None else llm,
         knowledge=knowledge,
         gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
-        tracer=build_tracer(settings, sop_version=FileSopRepository(settings.sops_dir).version),
+        tracer=build_tracer(settings) if tracer is None else tracer,
         blobs=build_blobs(settings) if blobs is None else blobs,
         config=RuntimeConfig(),
     )
@@ -303,6 +273,7 @@ def build_runtime(
     persistence: UnitOfWorkFactory | None = None,
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
+    tracer: Tracer | None = None,
 ) -> AgentRuntime:
     """The agent, wired from the settings (see `build_runtime_deps`)."""
     return AgentRuntime(
@@ -314,6 +285,7 @@ def build_runtime(
             persistence=persistence,
             knowledge=knowledge,
             blobs=blobs,
+            tracer=tracer,
         )
     )
 
@@ -332,7 +304,7 @@ def build_simulation(
     settings: Settings, start: datetime, *, llm: LanguageModel | None = None
 ) -> Simulation:
     """A simulation starting at `start` (timezone-aware). Storage and model come from the
-    settings, as for the product; `llm` replaces the model (a scripted one, in tests)."""
+    settings, as for the product; `llm` replaces the model (a fake one, in tests)."""
     clock = VirtualClock(start)
     gateways = RecordingGateways()
     runtime = build_runtime(settings, clock=clock, gateways=gateways.as_gateways(), llm=llm)

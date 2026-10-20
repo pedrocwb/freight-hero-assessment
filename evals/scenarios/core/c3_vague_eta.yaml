@@ -26,15 +26,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -47,12 +38,6 @@ steps:
   - at: "07:20"
     note: A vague reply. Not an ETA; send nothing and write nothing.
     message: {channel: sms, sender: drv_20931, body: "on my way, there soon"}
-    script:
-      gate:
-        - {intent: eta_provided, act: true, reason: A vague reply to our ETA request; the ETA procedure judges it.}
-      decide:
-        - actions: []
-          rationale: eta_received, "soon" gives no time, so it is not an ETA; send nothing, write nothing and keep the request open for the 07:31 follow-up.
     expect:
       no_actions: true
       obligations:
@@ -61,15 +46,6 @@ steps:
 
   - at: "07:31"
     note: The follow-up timer fires as planned; second ETA request.
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Following up from Northline Logistics. What time will you arrive at the Riverbend plant pickup?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), after 1 ETA request and no ETA, SMS the driver again and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}

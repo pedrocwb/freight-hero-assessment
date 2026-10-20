@@ -34,18 +34,6 @@ steps:
   - at: "09:05"
     note: The driver leaves the shipper; the run at 09:06 moves the stage and asks for the reefer values.
     message: {channel: sms, sender: drv_20931, body: "loaded, leaving the shipper now"}
-    script:
-      gate:
-        - {intent: driver_departed, act: true, reason: The driver is leaving the pickup loaded.}
-      decide:
-        - actions:
-            - {type: update_stage, stage: to_delivery}
-            - {type: write_tms_note, text: "Driver left the Riverbend plant pickup loaded at 09:05, heading to Valley DC."}
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: reply
-              text: Thanks! Please send the trailer temperature and the seal number.
-          rationale: driver_departed (standard, extended for Keystone reefer), set the stage to to_delivery, note the departure and ask for the temperature and the seal number in one SMS.
     expect:
       actions:
         - {kind: stage_update, stage: to_delivery, count: 1}
@@ -62,13 +50,6 @@ steps:
   - at: "09:12"
     note: The driver sends the values; they go to the TMS and nothing is sent.
     message: {channel: sms, sender: drv_20931, body: "34F, seal 4471902"}
-    script:
-      gate:
-        - {intent: status_update, act: true, reason: The driver reports the trailer temperature and the seal number we asked for.}
-      decide:
-        - actions:
-            - {type: write_tms_note, text: "Reefer check after pickup: trailer at 34 F, seal number 4471902 (driver, by SMS at 09:12)."}
-          rationale: status_updates, a trailer temperature and a seal number matter, so record them in the TMS and send no reply.
     expect:
       actions:
         - {kind: tms_note, contains: ["4471902"], count: 1}

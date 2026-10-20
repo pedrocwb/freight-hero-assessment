@@ -32,13 +32,6 @@ steps:
   - at: "09:10"
     note: "Arrival at Valley DC: the POD becomes due at 11:11"
     message: {channel: sms, sender: drv_20931, body: "checked in at valley dc, they are unloading us now"}
-    script:
-      gate:
-        - {intent: status_update, act: true, reason: "The driver reports the arrival at the receiver."}
-      agent:
-        - rationale: proof_of_delivery, step 1, set the load to at_delivery and wait for the POD.
-          actions:
-            - {type: update_stage, stage: at_delivery}
     expect:
       obligations:
         pod: {status: open, attempts: 0}
@@ -46,30 +39,6 @@ steps:
 
   - at: "11:11"
     note: "120 minutes and no POD: one reminder SMS and a 30-minute follow-up"
-    script:
-      agent:
-        - rationale: >-
-            proof_of_delivery, step 2: no POD 120 minutes after the arrival, so one SMS that
-            asks for a photo of the signed POD, and wait 30 minutes.
-          intent: pod_follow_up_due
-          tool_calls:
-            - name: get_ledger
-              result: "pod: open, attempts 0 of 1"
-            - name: send_sms
-              args:
-                contact_id: drv_20931
-                text: "Hi, Acme dispatch here. Please send a photo of the signed POD for this load."
-                requests: pod
-              result: "accepted as action #1"
-            - name: schedule_timer
-              args: {kind: pod, due_in_minutes: 30}
-              result: "accepted as action #2"
-      judge:
-        - reasons:
-            - "The SMS is polite and signed as Acme dispatch."
-            - "It asks for a photo of the signed POD."
-            - "It is one sentence under 160 characters and mentions no internal team."
-          score: 0.9
     expect:
       intent: pod_follow_up_due
       tools_used: [send_sms, schedule_timer]
@@ -93,21 +62,6 @@ steps:
 
   - at: "11:41"
     note: "Still no POD after the reminder: a Hero task, and the request closes"
-    script:
-      agent:
-        - rationale: >-
-            proof_of_delivery, step 3: no POD 30 minutes after the only reminder, so do not
-            text again; a Hero task to get the POD from the carrier, then close the request.
-          intent: pod_follow_up_due
-          actions:
-            - type: create_hero_task
-              title: Get the signed POD of load 481207 from the carrier
-              description: >-
-                Load 481207, delivered at Valley DC (Reno); the truck arrived at 09:10. The
-                POD was due at 11:11; the driver was asked for a photo of it at 11:11 and
-                sent none. Get the signed POD from Prairie Haul and attach it to the load.
-              urgent: false
-            - {type: close_obligation, kind: pod, status: exhausted}
     expect:
       intent: pod_follow_up_due
       actions:

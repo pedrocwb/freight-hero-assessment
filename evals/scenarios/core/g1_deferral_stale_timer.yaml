@@ -37,15 +37,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -58,13 +49,6 @@ steps:
   - at: "07:30"
     note: The driver defers. The message run and the old timer's run both happen on the 07:31 tick.
     message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
-    script:
-      gate:
-        - {intent: eta_deferred, act: true, reason: The driver promises the ETA in 5 minutes.}
-      decide:
-        - actions:
-            - {type: defer_obligation, kind: eta_request, minutes: 5}
-          rationale: eta_deferred, first wait for this request, so defer it by the 5 minutes promised and send nothing; code moves the follow-up.
     expect:
       no_actions: true
       obligations:

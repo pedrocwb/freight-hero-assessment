@@ -38,6 +38,3 @@ steps:
       timers: {pending: 0}
       run_status: [noop]
       llm_calls: 1
-    script:
-      gate:
-        - {intent: acknowledgement, act: false, reason: "The driver only says ok and nothing was asked."}

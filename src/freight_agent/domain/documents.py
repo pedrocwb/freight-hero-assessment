@@ -106,7 +106,7 @@ class ExtractedValue(BaseModel):
     @field_validator("value", mode="before")
     @classmethod
     def _as_text(cls, value: object) -> object:
-        """A scripted answer (YAML) may give `true` or `38000`: the same as the text."""
+        """A model may answer `true` or `38000` for a text field: the same as the text."""
         if isinstance(value, bool):
             return "true" if value else "false"
         if isinstance(value, int | float):

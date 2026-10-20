@@ -1,16 +1,17 @@
-"""The composition root, with a fake in place of OpenRouter: no network, and a key only
-where a test sets a fake one."""
+"""The composition root, with fakes in place of OpenRouter and LangSmith: no network, and a
+key only where a test sets a fake one."""
 
 import json
 import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -22,15 +23,12 @@ from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.llm.cassette import CassetteMissing, CassetteModel, model_slug
-from freight_agent.adapters.llm.models_config import (
-    ModelsConfig,
-    load_models_config,
-)
-from freight_agent.adapters.llm.resilient import ResilientModel
+from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
+from freight_agent.adapters.llm.openrouter import OpenRouterModel
+from freight_agent.adapters.llm.resilient import BreakerState, ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
-from freight_agent.adapters.llm.scripted import ScriptedModel
-from freight_agent.adapters.observability.langsmith import LangSmithTracer
+from freight_agent.adapters.llm.unavailable import UnavailableModel
+from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -45,21 +43,31 @@ from freight_agent.bootstrap import (
     build_runtime_deps,
     build_simulation,
     build_tracer,
+    enable_native_tracing,
+    openrouter_chain,
+    platform_llm,
 )
+from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Load
 from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
 from freight_agent.settings import MissingSetting, Settings
+from tests.fakes import FakeModel
+
+pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS_YAML = ROOT / "config" / "models.yaml"
 SOPS = ROOT / "sops"
 KEY = "sk-or-v1-bootstrap-test-secret"
 LANGSMITH_KEY = "lsv2_pt_bootstrap-test-secret"
+TRACING_VARIABLES = ("LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT")
 T0 = datetime(2026, 10, 13, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
-GATE = LlmRequest(role=ModelRole.GATE, system="classify", user="driver: ok", max_tool_rounds=0)
+GATE = LlmRequest(role=ModelRole.GATE, system="classify", user="driver: ok")
+ROUND = ChatRequest(role=ModelRole.AGENT, system="follow the SOP", user="driver: ok")
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
+DONE = AgentOutcome(rationale="nothing to do")
 
 
 @pytest.fixture(autouse=True)
@@ -80,29 +88,29 @@ def clock() -> VirtualClock:
     return VirtualClock(T0)
 
 
-def _settings(tmp_path: Path, **values: Any) -> Settings:
-    """The shipped models and SOPs, cassettes in a temporary folder, no `.env`."""
-    paths = {"models_config": MODELS_YAML, "sops_dir": SOPS, "cassettes_dir": tmp_path / "tapes"}
+def _settings(**values: Any) -> Settings:
+    """The shipped models and SOPs, no `.env`."""
+    paths = {"models_config": MODELS_YAML, "sops_dir": SOPS}
     options: dict[str, Any] = {"_env_file": None, **paths, **values}
     return Settings(**options)
 
 
 @dataclass
 class FakeOpenRouter:
-    """Stands in for `models_for_role`: one scripted model per entry of a role's chain.
+    """Stands in for `openrouter_chain`: one fake model per entry of a role's chain.
 
     A model id serves several roles in the shipped config, so each id gets one shared
     model, as one OpenRouter model would be."""
 
-    keys: list[str] = field(default_factory=list)
-    models: dict[str, ScriptedModel] = field(default_factory=dict)
+    keys: list[str] = field(default_factory=list[str])
+    models: dict[str, FakeModel] = field(default_factory=dict[str, FakeModel])
 
     def __call__(
         self, config: ModelsConfig, role: ModelRole, key: SecretStr
     ) -> Sequence[tuple[str, LanguageModel]]:
         self.keys.append(key.get_secret_value())
         return [
-            (entry.model, self.models.setdefault(entry.model, ScriptedModel(entry.model)))
+            (entry.model, self.models.setdefault(entry.model, FakeModel(entry.model)))
             for entry in config.role(role).chain()
         ]
 
@@ -123,47 +131,19 @@ def _absent(monkeypatch: pytest.MonkeyPatch, adapter: LazyAdapter) -> None:
     monkeypatch.setitem(sys.modules, adapter.module, None)
 
 
-# --- build_llm: replay ---------------------------------------------------------
+# --- build_llm -----------------------------------------------------------------
 
 
-@pytest.mark.unit
-async def test_replay_serves_each_role_from_the_cassettes_of_its_primary_model(
-    tmp_path: Path, config: ModelsConfig, clock: VirtualClock
-) -> None:
-    router = _router(build_llm(_settings(tmp_path), clock=clock))
-
-    assert router.roles == frozenset(config.roles)
-    for role in config.roles:
-        model = router.model_for(role)
-        assert isinstance(model, CassetteModel)
-        folder = model.path_for(GATE, GateDecision).parent
-        assert folder == tmp_path / "tapes" / model_slug(config.role(role).model)
-    with pytest.raises(CassetteMissing):  # replays only: nothing recorded, nothing called
-        await router.generate(GATE, GateDecision)
-
-
-@pytest.mark.unit
-def test_replay_needs_no_key_and_builds_no_live_model(tmp_path: Path, clock: VirtualClock) -> None:
-    openrouter = FakeOpenRouter()
-
-    build_llm(_settings(tmp_path, llm_mode="replay"), clock=clock, live_chain=openrouter)
-
-    assert openrouter.keys == []
-
-
-# --- build_llm: live -----------------------------------------------------------
-
-
-@pytest.mark.unit
-async def test_live_puts_each_roles_fallback_chain_behind_a_resilient_model(
-    tmp_path: Path, config: ModelsConfig, clock: VirtualClock
+async def test_each_roles_fallback_chain_sits_behind_a_resilient_model(
+    config: ModelsConfig, clock: VirtualClock
 ) -> None:
     openrouter = FakeOpenRouter()
-    settings = _settings(tmp_path, llm_mode="live", openrouter_api_key=KEY)
 
-    router = _router(build_llm(settings, clock=clock, live_chain=openrouter))
+    router = _router(
+        build_llm(_settings(openrouter_api_key=KEY), clock=clock, live_chain=openrouter)
+    )
 
-    assert router.roles == frozenset(config.roles)
+    assert router.roles == frozenset(config.roles) == frozenset(ModelRole)
     for role in config.roles:
         model = router.model_for(role)
         assert isinstance(model, ResilientModel)
@@ -172,13 +152,11 @@ async def test_live_puts_each_roles_fallback_chain_behind_a_resilient_model(
     assert set(openrouter.keys) == {KEY}
 
 
-@pytest.mark.unit
-async def test_a_live_gate_call_reaches_the_gates_primary_model(
-    tmp_path: Path, config: ModelsConfig, clock: VirtualClock
+async def test_a_gate_call_reaches_the_gates_primary_model(
+    config: ModelsConfig, clock: VirtualClock
 ) -> None:
     openrouter = FakeOpenRouter()
-    settings = _settings(tmp_path, llm_mode="live", openrouter_api_key=KEY)
-    llm = build_llm(settings, clock=clock, live_chain=openrouter)
+    llm = build_llm(_settings(openrouter_api_key=KEY), clock=clock, live_chain=openrouter)
     primary = config.role(ModelRole.GATE).model
     openrouter.models[primary].push(ModelRole.GATE, ACK)
 
@@ -187,109 +165,123 @@ async def test_a_live_gate_call_reaches_the_gates_primary_model(
     assert (response.parsed, response.usage.model) == (ACK, primary)
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("mode", ["live", "record"])
-def test_a_mode_that_calls_openrouter_fails_clearly_without_the_key(
-    tmp_path: Path, clock: VirtualClock, capsys: pytest.CaptureFixture[str], mode: str
+async def test_an_agent_round_reaches_the_agents_primary_model(
+    config: ModelsConfig, clock: VirtualClock
+) -> None:
+    openrouter = FakeOpenRouter()
+    llm = build_llm(_settings(openrouter_api_key=KEY), clock=clock, live_chain=openrouter)
+    primary = config.role(ModelRole.AGENT).model
+    openrouter.models[primary].push(ModelRole.AGENT, DONE)
+
+    reply = await llm.chat(ROUND, AgentOutcome)
+
+    assert (reply.answer, reply.usage.model) == (DONE, primary)
+
+
+async def test_the_breakers_run_on_the_given_clock(
+    config: ModelsConfig, clock: VirtualClock
+) -> None:
+    """A virtual clock drives the cooldowns in the simulation and the evals."""
+    openrouter = FakeOpenRouter()
+    llm = _router(build_llm(_settings(openrouter_api_key=KEY), clock=clock, live_chain=openrouter))
+    primary = config.role(ModelRole.GATE).model
+    fallback = config.role(ModelRole.GATE).chain()[1].model
+    openrouter.models[primary].push(ModelRole.GATE, *[LlmError("down")] * 3)
+    openrouter.models[fallback].push(ModelRole.GATE, *[ACK] * 3)
+    for _ in range(3):
+        await llm.generate(GATE, GateDecision)
+
+    gate = llm.model_for(ModelRole.GATE)
+    assert isinstance(gate, ResilientModel)
+    assert gate.status()[0].state is BreakerState.OPEN
+
+    clock.advance(timedelta(seconds=60))
+
+    assert gate.status()[0].state is BreakerState.HALF_OPEN
+
+
+def test_without_the_key_it_fails_clearly_and_builds_no_model(
+    clock: VirtualClock, capsys: pytest.CaptureFixture[str]
 ) -> None:
     openrouter = FakeOpenRouter()
 
-    with pytest.raises(MissingSetting, match="OPENROUTER_API_KEY"):
-        build_llm(_settings(tmp_path, llm_mode=mode), clock=clock, live_chain=openrouter)
+    with pytest.raises(MissingSetting, match="OPENROUTER_API_KEY") as raised:
+        build_llm(_settings(), clock=clock, live_chain=openrouter)
 
+    assert raised.value.variable == "OPENROUTER_API_KEY"
     assert openrouter.keys == []
     assert capsys.readouterr() == ("", "")
 
 
-# --- build_llm: record ---------------------------------------------------------
+def test_a_blank_key_counts_as_missing(clock: VirtualClock) -> None:
+    with pytest.raises(MissingSetting, match="OPENROUTER_API_KEY"):
+        build_llm(_settings(openrouter_api_key="  "), clock=clock, live_chain=FakeOpenRouter())
 
 
-@pytest.mark.unit
-async def test_record_saves_the_primary_models_answers_for_replay(
-    tmp_path: Path, config: ModelsConfig, clock: VirtualClock
-) -> None:
-    openrouter = FakeOpenRouter()
-    settings = _settings(tmp_path, llm_mode="record", openrouter_api_key=KEY)
-    recorder = _router(build_llm(settings, clock=clock, live_chain=openrouter))
-    primary = config.role(ModelRole.GATE).model
-    openrouter.models[primary].push(ModelRole.GATE, ACK)
-
-    recorded = await recorder.generate(GATE, GateDecision)
-    replayed = await build_llm(settings, mode="replay", clock=clock).generate(GATE, GateDecision)
-
-    assert recorded.parsed == replayed.parsed == ACK
-    cassette = recorder.model_for(ModelRole.GATE)
-    assert isinstance(cassette, CassetteModel)
-    assert cassette.path_for(GATE, GateDecision).parent == tmp_path / "tapes" / model_slug(primary)
-
-
-@pytest.mark.unit
-async def test_record_never_files_a_fallbacks_answer_under_the_primary_model(
-    tmp_path: Path, config: ModelsConfig, clock: VirtualClock
-) -> None:
-    """A cassette folder holds one model's answers; a failed primary call is re-recorded."""
-    openrouter = FakeOpenRouter()
-    settings = _settings(tmp_path, llm_mode="record", openrouter_api_key=KEY)
-    recorder = _router(build_llm(settings, clock=clock, live_chain=openrouter))
-    primary, fallback = (entry.model for entry in config.role(ModelRole.GATE).chain()[:2])
-    openrouter.models[primary].push(ModelRole.GATE, LlmError("rate limited"))
-    openrouter.models[fallback].push(ModelRole.GATE, ACK)
-
-    with pytest.raises(LlmError, match="rate limited"):
-        await recorder.generate(GATE, GateDecision)
-
-    assert openrouter.models[fallback].calls == []
-    cassette = recorder.model_for(ModelRole.GATE)
-    assert isinstance(cassette, CassetteModel)
-    assert not cassette.path_for(GATE, GateDecision).exists()
-
-
-# --- build_llm: scripted and the mode ------------------------------------------
-
-
-@pytest.mark.unit
-async def test_scripted_mode_returns_a_model_that_tests_feed(
-    tmp_path: Path, clock: VirtualClock
-) -> None:
-    llm = build_llm(_settings(tmp_path, llm_mode="scripted"), clock=clock)
-
-    assert isinstance(llm, ScriptedModel)
-    llm.push(ModelRole.GATE, ACK)
-    assert (await llm.generate(GATE, GateDecision)).parsed == ACK
-
-
-@pytest.mark.unit
-def test_the_mode_argument_wins_over_the_settings(tmp_path: Path, clock: VirtualClock) -> None:
-    settings = _settings(tmp_path, llm_mode="live")  # live, and no key: would fail
-
-    llm = build_llm(settings, mode="replay", clock=clock)
-
-    assert isinstance(_router(llm).model_for(ModelRole.AGENT), CassetteModel)
-
-
-@pytest.mark.unit
 def test_a_missing_models_config_names_the_file_and_the_setting(
     tmp_path: Path, clock: VirtualClock
 ) -> None:
     missing = tmp_path / "nope.yaml"
+    settings = _settings(models_config=missing, openrouter_api_key=KEY)
 
     with pytest.raises(BootstrapError, match="MODELS_CONFIG") as raised:
-        build_llm(_settings(tmp_path, models_config=missing), clock=clock)
+        build_llm(settings, clock=clock, live_chain=FakeOpenRouter())
 
     assert str(missing) in str(raised.value)
+
+
+def test_the_production_chain_is_one_openrouter_model_per_entry(config: ModelsConfig) -> None:
+    """Built only: an OpenRouter model sends nothing until it is called."""
+    chain = openrouter_chain(config, ModelRole.AGENT, SecretStr(KEY))
+
+    assert [name for name, _ in chain] == [e.model for e in config.role(ModelRole.AGENT).chain()]
+    for name, model in chain:
+        assert isinstance(model, OpenRouterModel)
+        assert model.model_id == name
+
+
+# --- platform_llm --------------------------------------------------------------
+
+
+def test_the_platform_gets_the_live_router_when_the_key_is_set(clock: VirtualClock) -> None:
+    openrouter = FakeOpenRouter()
+
+    llm = platform_llm(_settings(openrouter_api_key=KEY), clock=clock, live_chain=openrouter)
+
+    assert _router(llm).roles == frozenset(ModelRole)
+    assert set(openrouter.keys) == {KEY}
+
+
+async def test_without_the_key_the_platform_gets_a_model_that_says_so(
+    clock: VirtualClock,
+) -> None:
+    llm = platform_llm(_settings(), clock=clock, live_chain=FakeOpenRouter())
+
+    assert isinstance(llm, UnavailableModel)
+    with pytest.raises(LlmError, match="OPENROUTER_API_KEY is not set"):
+        await llm.generate(GATE, GateDecision)
+    with pytest.raises(LlmError, match="OPENROUTER_API_KEY is not set"):
+        await llm.chat(ROUND, AgentOutcome)
+
+
+def test_a_missing_models_config_still_stops_the_platform(
+    tmp_path: Path, clock: VirtualClock
+) -> None:
+    """A missing key is expected on the platform; a missing models file is a mistake."""
+    with pytest.raises(BootstrapError, match="MODELS_CONFIG"):
+        platform_llm(_settings(models_config=tmp_path / "nope.yaml"), clock=clock)
 
 
 # --- build_runtime -------------------------------------------------------------
 
 
-@pytest.mark.unit
-async def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
-    deps = build_runtime_deps(_settings(tmp_path))
+async def test_the_default_runtime_is_local_and_untraced() -> None:
+    deps = build_runtime_deps(_settings())
 
     assert isinstance(deps.clock, SystemClock)
     assert isinstance(deps.ids, UuidIdGenerator)
     assert isinstance(deps.uow_factory(), MemoryUnitOfWork)
-    assert isinstance(_router(deps.llm).model_for(ModelRole.GATE), CassetteModel)  # replay
+    assert isinstance(deps.llm, UnavailableModel)  # no key: each run escalates, saying so
     assert isinstance(deps.knowledge, MemorySopIndex)  # the sops/ tree
     assert await deps.knowledge.version("northline") == FileSopRepository(SOPS).version()
     assert isinstance(deps.blobs, FsBlobStore)
@@ -300,78 +292,115 @@ async def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
     assert deps.config == RuntimeConfig()
 
 
-@pytest.mark.unit
-def test_build_runtime_returns_the_agent_runtime(tmp_path: Path) -> None:
-    assert isinstance(build_runtime(_settings(tmp_path)), AgentRuntime)
+def test_with_the_key_the_runtime_calls_the_live_router() -> None:
+    """Built only: nothing is sent until a run calls the model."""
+    deps = build_runtime_deps(_settings(openrouter_api_key=KEY))
+
+    assert _router(deps.llm).roles == frozenset(ModelRole)
 
 
-@pytest.mark.unit
-async def test_every_unit_of_work_of_a_runtime_shares_one_store(tmp_path: Path, load: Load) -> None:
-    deps = build_runtime_deps(_settings(tmp_path))
+def test_build_runtime_returns_the_agent_runtime() -> None:
+    assert isinstance(build_runtime(_settings(), llm=FakeModel()), AgentRuntime)
+
+
+async def test_every_unit_of_work_of_a_runtime_shares_one_store(load: Load) -> None:
+    deps = build_runtime_deps(_settings(), llm=FakeModel())
     async with deps.uow_factory() as uow:
         await uow.loads.save(load)
         await uow.commit()
 
     async with deps.uow_factory() as uow:
         assert await uow.loads.get(load.load_id) == load
-    other = build_runtime_deps(_settings(tmp_path))
+    other = build_runtime_deps(_settings(), llm=FakeModel())
     async with other.uow_factory() as uow:
         assert await uow.loads.get(load.load_id) is None
 
 
-@pytest.mark.unit
-def test_what_the_caller_passes_replaces_the_default(tmp_path: Path, clock: VirtualClock) -> None:
+def test_what_the_caller_passes_replaces_the_default(clock: VirtualClock) -> None:
     gateways = RecordingGateways().as_gateways()
-    llm = ScriptedModel()
+    llm = FakeModel()
     persistence = MemoryStore().unit_of_work
-    settings = _settings(tmp_path, llm_mode="live")  # no key: building the llm would fail
+    tracer = NullTracer()
+    settings = _settings(langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY)
 
     deps = build_runtime_deps(
-        settings, clock=clock, gateways=gateways, llm=llm, persistence=persistence
+        settings, clock=clock, gateways=gateways, llm=llm, persistence=persistence, tracer=tracer
     )
 
-    assert (deps.clock, deps.gateways, deps.llm, deps.uow_factory) == (
+    assert (deps.clock, deps.gateways, deps.llm, deps.uow_factory, deps.tracer) == (
         clock,
         gateways,
         llm,
         persistence,
+        tracer,
     )
+
+
+@dataclass
+class RuntimeSpy:
+    deps: RuntimeDeps
+
+
+def test_build_runtime_passes_the_model_and_the_tracer_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "AgentRuntime", RuntimeSpy)
+    llm, tracer = FakeModel(), NullTracer()
+
+    runtime = build_runtime(_settings(), llm=llm, tracer=tracer)
+
+    assert isinstance(runtime, RuntimeSpy)
+    assert (runtime.deps.llm, runtime.deps.tracer) == (llm, tracer)
 
 
 # --- tracer --------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_tracing_is_off_by_default(tmp_path: Path) -> None:
-    assert isinstance(
-        build_tracer(_settings(tmp_path, langsmith_api_key=LANGSMITH_KEY)), NullTracer
-    )
+@pytest.fixture
+def tracing_env() -> Iterator[None]:
+    """`enable_native_tracing` writes the LangSmith variables to the process environment.
+    `clean_env` unset them, and `monkeypatch` does not undo a variable it never saw set,
+    so they are removed here: a later test must not trace to LangSmith."""
+    yield
+    for name in TRACING_VARIABLES:
+        os.environ.pop(name, None)
 
 
-@pytest.mark.unit
-def test_langsmith_traces_when_tracing_is_on_and_the_key_is_set(tmp_path: Path) -> None:
-    settings = _settings(
-        tmp_path,
-        langsmith_tracing=True,
-        langsmith_api_key=LANGSMITH_KEY,
-        langsmith_project="freight-evals",
-    )
-
-    tracer = build_runtime_deps(settings).tracer
-
-    # Building it reaches no network: the SDK client is created on the first export.
-    assert isinstance(tracer, LangSmithTracer)
-    assert tracer._project == "freight-evals"  # pyright: ignore[reportPrivateUsage]
+@pytest.mark.usefixtures("tracing_env")
+def test_tracing_is_off_by_default() -> None:
+    assert isinstance(build_tracer(_settings(langsmith_api_key=LANGSMITH_KEY)), NullTracer)
+    assert "LANGSMITH_TRACING" not in os.environ
 
 
-@pytest.mark.unit
-def test_tracing_on_also_switches_on_langgraph_and_langchain_tracing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.usefixtures("tracing_env")
+def test_tracing_on_without_a_key_falls_back_to_no_tracing(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    for name in ("LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT"):
-        monkeypatch.delenv(name, raising=False)
+    with caplog.at_level(logging.WARNING):
+        tracer = build_tracer(_settings(langsmith_tracing=True, langsmith_api_key=" "))
+
+    assert isinstance(tracer, NullTracer)
+    assert "LANGSMITH_API_KEY" in caplog.text
+    assert "LANGSMITH_TRACING" not in os.environ
+
+
+@pytest.mark.usefixtures("tracing_env")
+def test_tracing_on_with_a_key_links_runs_to_langsmith() -> None:
     settings = _settings(
-        tmp_path, langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY, langsmith_project="p"
+        langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY, langsmith_project="freight-evals"
+    )
+
+    tracer = build_runtime_deps(settings, llm=FakeModel()).tracer
+
+    # Building it reaches no network: the SDK client is created on the first link.
+    assert isinstance(tracer, LangSmithLinks)
+    assert tracer.project_name == "freight-evals"
+
+
+@pytest.mark.usefixtures("tracing_env")
+def test_tracing_on_switches_on_langgraph_and_langchain_tracing() -> None:
+    settings = _settings(
+        langsmith_tracing=True, langsmith_api_key=LANGSMITH_KEY, langsmith_project="p"
     )
 
     build_tracer(settings)
@@ -381,39 +410,39 @@ def test_tracing_on_also_switches_on_langgraph_and_langchain_tracing(
     assert os.environ["LANGSMITH_PROJECT"] == "p"
 
 
-@pytest.mark.unit
-def test_tracing_off_leaves_the_environment_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.usefixtures("tracing_env")
+def test_a_tracing_variable_already_in_the_environment_wins(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+    monkeypatch.setenv("LANGSMITH_PROJECT", "from-the-shell")
 
-    build_tracer(_settings(tmp_path, langsmith_api_key=LANGSMITH_KEY))
+    enable_native_tracing(_settings(langsmith_api_key=LANGSMITH_KEY, langsmith_project="p"))
 
-    assert "LANGSMITH_TRACING" not in os.environ
+    assert os.environ["LANGSMITH_PROJECT"] == "from-the-shell"
+    assert os.environ["LANGSMITH_TRACING"] == "true"
 
 
-@pytest.mark.unit
-def test_tracing_on_without_a_key_falls_back_to_no_tracing(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    with caplog.at_level(logging.WARNING):
-        tracer = build_tracer(_settings(tmp_path, langsmith_tracing=True))
+@pytest.mark.usefixtures("tracing_env")
+def test_native_tracing_without_a_key_leaves_the_environment_alone() -> None:
+    enable_native_tracing(_settings())
 
-    assert isinstance(tracer, NullTracer)
-    assert "LANGSMITH_API_KEY" in caplog.text
+    assert not any(name in os.environ for name in TRACING_VARIABLES)
+
+
+@pytest.mark.usefixtures("tracing_env")
+async def test_the_null_tracer_links_no_run() -> None:
+    assert await build_tracer(_settings()).trace_url(uuid4()) is None
 
 
 # --- lazy adapters -------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_a_lazy_adapter_is_none_while_its_module_or_attribute_is_missing() -> None:
     assert LazyAdapter("freight_agent.no_such_module", "Anything").load() is None
     assert LazyAdapter("json", "no_such_attribute").load() is None
     assert LazyAdapter("json", "dumps").load() is json.dumps
 
 
-@pytest.mark.unit
 def test_a_lazy_adapter_that_lacks_one_of_its_own_dependencies_is_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,65 +457,67 @@ def test_a_lazy_adapter_that_lacks_one_of_its_own_dependencies_is_an_error(
 # --- simulation ----------------------------------------------------------------
 
 
-@dataclass
-class RuntimeSpy:
-    deps: RuntimeDeps
-
-
-@pytest.mark.unit
 async def test_the_simulation_runs_on_its_virtual_clock_and_records_deliveries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(bootstrap, "AgentRuntime", RuntimeSpy)
+    llm = FakeModel()
 
-    simulation = build_simulation(_settings(tmp_path), T0)
+    simulation = build_simulation(_settings(), T0, llm=llm)
 
     assert isinstance(simulation, Simulation)
     assert isinstance(simulation.runtime, RuntimeSpy)
     deps = simulation.runtime.deps
     assert simulation.clock.now() == T0
     assert deps.clock is simulation.clock
+    assert deps.llm is llm
     await deps.gateways.sms.send(load_id="481207", contact_id="drv", text="hi", idempotency_key="k")
     assert [d.channel for d in simulation.gateways.log.deliveries] == ["sms"]
 
 
-@pytest.mark.unit
-def test_the_simulation_builds_the_agent_runtime(tmp_path: Path) -> None:
-    simulation = build_simulation(_settings(tmp_path), T0)
+def test_the_simulation_builds_the_agent_runtime() -> None:
+    simulation = build_simulation(_settings(), T0, llm=FakeModel())
 
     assert isinstance(simulation.runtime, AgentRuntime)
     assert isinstance(simulation.clock, VirtualClock)
     assert isinstance(simulation.gateways, RecordingGateways)
 
 
-@pytest.mark.unit
-def test_the_simulation_needs_a_timezone_aware_start(tmp_path: Path) -> None:
+def test_without_a_model_the_simulation_takes_the_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bootstrap, "AgentRuntime", RuntimeSpy)
+
+    simulation = build_simulation(_settings(), T0)
+
+    assert isinstance(simulation.runtime, RuntimeSpy)
+    assert isinstance(simulation.runtime.deps.llm, UnavailableModel)  # no key in the settings
+
+
+def test_the_simulation_needs_a_timezone_aware_start() -> None:
     with pytest.raises(ValueError, match="timezone"):
-        build_simulation(_settings(tmp_path), datetime(2026, 10, 13, 7, 0))
+        build_simulation(_settings(), datetime(2026, 10, 13, 7, 0), llm=FakeModel())
 
 
 # --- knowledge, blobs and documents (wave 3) -------------------------------------
 
 
-@pytest.mark.unit
-async def test_the_local_runtime_reads_the_sop_files(tmp_path: Path) -> None:
-    knowledge = bootstrap.build_knowledge(_settings(tmp_path))
+async def test_the_local_runtime_reads_the_sop_files() -> None:
+    knowledge = bootstrap.build_knowledge(_settings())
 
     assert isinstance(knowledge, MemorySopIndex)
     assert await knowledge.version("northline") == FileSopRepository(SOPS).version()
 
 
-@pytest.mark.unit
 def test_blobs_go_under_blobs_dir_and_nothing_is_written_up_front(tmp_path: Path) -> None:
-    blobs = bootstrap.build_blobs(_settings(tmp_path, blobs_dir=tmp_path / "files"))
+    blobs = bootstrap.build_blobs(_settings(blobs_dir=tmp_path / "files"))
 
     assert isinstance(blobs, FsBlobStore)
     assert not (tmp_path / "files").exists()
 
 
-@pytest.mark.unit
 def test_the_document_pipeline_is_built_once_its_card_provides_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     built: list[dict[str, Any]] = []
 
@@ -503,7 +534,7 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
     _fake_module(monkeypatch, bootstrap.DOCUMENT_PIPELINE, Pipeline)
     _fake_module(monkeypatch, bootstrap.PAGE_READER, Pages)
 
-    deps = build_runtime_deps(_settings(tmp_path))
+    deps = build_runtime_deps(_settings(), llm=FakeModel())
 
     assert isinstance(deps.documents, Pipeline)
     (ports,) = built
@@ -519,13 +550,13 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
     }
     assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
     assert ports["knowledge"] is deps.knowledge
+    assert ports["llm"] is deps.llm
     assert isinstance(ports["pages"], Pages)
 
 
-@pytest.mark.unit
 @pytest.mark.parametrize("missing", ["pipeline", "pages"])
 def test_no_document_is_read_until_both_document_adapters_exist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+    monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
     present, absent = (
         (bootstrap.PAGE_READER, bootstrap.DOCUMENT_PIPELINE)
@@ -535,4 +566,6 @@ def test_no_document_is_read_until_both_document_adapters_exist(
     _fake_module(monkeypatch, present, object)
     _absent(monkeypatch, absent)
 
-    assert isinstance(build_runtime_deps(_settings(tmp_path)).documents, NullDocumentProcessor)
+    deps = build_runtime_deps(_settings(), llm=FakeModel())
+
+    assert isinstance(deps.documents, NullDocumentProcessor)

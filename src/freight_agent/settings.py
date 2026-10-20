@@ -5,27 +5,25 @@ the composition root (`freight_agent.bootstrap`), which is the only code that tu
 into adapters. Nothing below the root reads the environment.
 
 Secrets are `SecretStr`: a repr, a JSON dump or a validation error never shows them, and
-`describe()` reports each one only as set or unset. They are optional, so the offline
-modes (scripted, replay) start with none; the code that needs one asks for it with a
-`require_*` method, which names the variable when it is missing.
+`describe()` reports each one only as set or unset. They are optional, so the platform
+and the tests start with none; the code that needs one asks for it with a `require_*`
+method, which names the variable when it is missing.
 
-Each field is read from the variable of the same name in capitals (`llm_mode` from
-`LLM_MODE`). The environment wins over `.env`, and an empty value counts as unset, so a
+Each field is read from the variable of the same name in capitals (`sops_dir` from
+`SOPS_DIR`). The environment wins over `.env`, and an empty value counts as unset, so a
 plain copy of `.env.example` loads with the defaults. Relative paths resolve against the
 working directory, which is the repository root for `uv run agent` and the API.
 """
 
 from pathlib import Path
-from typing import Literal, TypeGuard
+from typing import TypeGuard
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-LlmMode = Literal["scripted", "replay", "live", "record"]
-
 
 class MissingSetting(ValueError):
-    """A setting the chosen mode needs is not set. Names the variable, never a value."""
+    """A setting the code needs is not set. Names the variable, never a value."""
 
     def __init__(self, variable: str, needed_for: str) -> None:
         super().__init__(f"{variable} is not set (environment or .env); {needed_for} needs it")
@@ -55,19 +53,23 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = False
     langsmith_project: str = "freight-agent"
 
-    # Adapters
-    llm_mode: LlmMode = "replay"  # offline and deterministic: no key, no network
-
     # Paths
     models_config: Path = Path("config/models.yaml")
     sops_dir: Path = Path("sops")
     evals_dir: Path = Path("evals")
-    cassettes_dir: Path = Path("evals/cassettes")
     web_dist: Path = Path("web/dist")  # the built UI the API serves, when it exists
     blobs_dir: Path = Path("blobs")  # attachment bytes (`FsBlobStore`)
 
     def require_openrouter_key(self) -> SecretStr:
-        return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "a live model")
+        return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "the agent's model")
+
+    def require_langsmith_key(self) -> SecretStr:
+        return _required(self.langsmith_api_key, "LANGSMITH_API_KEY", "a LangSmith experiment")
+
+    @property
+    def model_ready(self) -> bool:
+        """Whether the model can be called: the OpenRouter key is set."""
+        return is_set(self.openrouter_api_key)
 
     def describe(self) -> dict[str, str]:
         """Every setting by its variable name, safe to print or log: a secret shows only
