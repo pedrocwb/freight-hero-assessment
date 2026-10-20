@@ -20,6 +20,8 @@ from freight_agent import bootstrap
 from freight_agent.adapters.channels.fakes import recording
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.documents.fs_blobs import FsBlobStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.cassette import CassetteMissing, CassetteModel, model_slug
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
 from freight_agent.adapters.llm.resilient import ResilientModel
@@ -29,6 +31,7 @@ from freight_agent.adapters.observability.langsmith import LangSmithTracer
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.bootstrap import (
     BootstrapError,
@@ -260,7 +263,7 @@ def test_the_mode_argument_wins_over_the_settings(tmp_path: Path, clock: Virtual
 
     llm = build_llm(settings, mode="replay", clock=clock)
 
-    assert isinstance(_router(llm).model_for(ModelRole.DECIDE), CassetteModel)
+    assert isinstance(_router(llm).model_for(ModelRole.AGENT), CassetteModel)
 
 
 @pytest.mark.unit
@@ -286,8 +289,10 @@ def test_the_default_runtime_is_local_and_offline(tmp_path: Path) -> None:
     assert isinstance(deps.ids, UuidIdGenerator)
     assert isinstance(deps.uow_factory(), MemoryUnitOfWork)
     assert isinstance(_router(deps.llm).model_for(ModelRole.GATE), CassetteModel)  # replay
-    assert isinstance(deps.sop, FileSopRepository)
-    assert deps.sop.version() == FileSopRepository(SOPS).version()
+    assert isinstance(deps.knowledge, MemorySopIndex)
+    assert deps.knowledge.content_version == FileSopRepository(SOPS).version()
+    assert isinstance(deps.blobs, FsBlobStore)
+    assert isinstance(deps.documents, NullDocumentProcessor)
     assert isinstance(deps.gateways, Gateways)
     assert type(deps.gateways.sms).__module__ == recording.__name__
     assert isinstance(deps.tracer, NullTracer)

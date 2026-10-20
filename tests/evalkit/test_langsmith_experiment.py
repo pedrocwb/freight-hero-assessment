@@ -18,7 +18,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
-from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import Usage
@@ -39,7 +39,7 @@ from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, Sche
 from freight_agent.settings import LlmMode
 
 ROOT = Path(__file__).resolve().parents[2]
-SOPS = FileSopRepository(ROOT / "sops")
+SOPS = MemorySopIndex.from_files(ROOT / "sops")
 
 ACK = """\
 id: {id}
@@ -251,7 +251,7 @@ async def run(
     )
     experiment.start()
     runner = SuiteRunner(
-        evals_dir=evals, sop=SOPS, mode=mode, model_factory=models, observer=experiment
+        evals_dir=evals, knowledge=SOPS, mode=mode, model_factory=models, observer=experiment
     )
     result = await runner.run(scenarios, suite="core", k=k, metadata=metadata(mode))
     experiment.finish(result)

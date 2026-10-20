@@ -2,6 +2,10 @@
 
 The model only proposes. It has read-only tools (`read_sop_section`,
 `read_document`); the validator and the executor act, in code.
+
+Wave 3: the call runs on the `agent` role with the `AgentOutcome` schema (a plan plus
+the agent's reading of the event). Card W3-AGT replaces this module with the agent loop
+(`application/agent.py`).
 """
 
 from collections.abc import Sequence
@@ -12,7 +16,7 @@ from freight_agent.application.context import RunContext
 from freight_agent.application.gate import follow_up_intent
 from freight_agent.application.prompts import DECIDE_SYSTEM_PROMPT, render_decide_prompt
 from freight_agent.application.tools import decide_tools
-from freight_agent.domain.actions import Plan
+from freight_agent.domain.actions import AgentOutcome, Plan
 from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.runs import Usage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
@@ -21,9 +25,11 @@ from freight_agent.ports.llm import LanguageModel, LlmRequest, ModelRole
 
 @dataclass(frozen=True)
 class DecideResult:
-    plan: Plan
+    plan: Plan  # the outcome's rationale and actions, as a plain plan
     usage: tuple[Usage, ...]
     transcript: tuple[dict[str, Any], ...] = ()
+    intent: str | None = None  # the outcome's label for the event, when it gave one
+    no_procedure: bool = False
 
 
 class Decider:
@@ -48,16 +54,23 @@ class Decider:
         """
         in_progress = sections_in_progress(ctx, sop, visible_sections)
         request = LlmRequest(
-            role=ModelRole.DECIDE,
+            role=ModelRole.AGENT,
             system=DECIDE_SYSTEM_PROMPT,
             user=render_decide_prompt(ctx, gate, sop, in_progress),
             tools=decide_tools(ctx, visible_sections),
             max_tool_rounds=self._max_tool_rounds,
             timeout_s=self._timeout_s,
         )
-        response = await self._llm.generate(request, Plan)
+        response = await self._llm.generate(request, AgentOutcome)
+        outcome = response.parsed
         return DecideResult(
-            plan=response.parsed, usage=(response.usage,), transcript=response.transcript
+            # A plain Plan: the run record stores a Plan, and a subclass would not compare
+            # equal to the same plan read back from the database.
+            plan=Plan(rationale=outcome.rationale, actions=outcome.actions),
+            usage=(response.usage,),
+            transcript=response.transcript,
+            intent=outcome.intent,
+            no_procedure=outcome.no_procedure,
         )
 
 
@@ -73,7 +86,9 @@ def sections_in_progress(
     to the intent its timer produces, and the section's own intents and stages.
     """
     intents = {
-        intent for o in ctx.open_obligations if (intent := follow_up_intent(o.kind)) is not None
+        intent
+        for o in ctx.open_obligations
+        if (intent := follow_up_intent(o.kind, ctx.broker)) is not None
     }
     shown = set(sop.section_ids)
     stage = ctx.load.stage

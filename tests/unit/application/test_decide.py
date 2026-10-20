@@ -2,7 +2,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import BaseModel
 
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.context import RunContext
@@ -114,8 +113,7 @@ class TranscriptModel:
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
         self.requests.append(request)
-        parsed: BaseModel = REPLY
-        assert isinstance(parsed, schema)
+        parsed = schema.model_validate(REPLY.model_dump())
         transcript = ({"tool": "read_sop_section", "args": {"section_id": "escalation"}},)
         usage = Usage(role=request.role.value, model="m", input_tokens=900, output_tokens=60)
         return LlmResponse(parsed=parsed, usage=usage, transcript=transcript)
@@ -124,7 +122,7 @@ class TranscriptModel:
 @pytest.mark.unit
 async def test_decide_sends_one_decide_request_with_tools_limits_and_timeout(load: Load) -> None:
     model = ScriptedModel("cheap-decider")
-    model.push(ModelRole.DECIDE, REPLY)
+    model.push(ModelRole.AGENT, REPLY)
     decider = Decider(model, max_tool_rounds=3, timeout_s=45.0)
 
     result = await decider.decide(context(load), QUESTION, resolved(QUESTIONS), VISIBLE)
@@ -133,7 +131,7 @@ async def test_decide_sends_one_decide_request_with_tools_limits_and_timeout(loa
     assert [u.model for u in result.usage] == ["cheap-decider"]
     assert len(model.calls) == 1
     call = model.calls[0]
-    assert (call.role, call.schema) == (ModelRole.DECIDE, "Plan")
+    assert (call.role, call.schema) == (ModelRole.AGENT, "AgentOutcome")
     assert call.request.max_tool_rounds == 3
     assert call.request.timeout_s == 45.0
     assert [t.name for t in call.request.tools] == ["read_sop_section"]
@@ -155,7 +153,7 @@ async def test_decide_returns_usage_and_the_tool_transcript(load: Load) -> None:
 @pytest.mark.unit
 async def test_read_document_is_offered_when_the_event_has_an_attachment(load: Load) -> None:
     model = ScriptedModel()
-    model.push(ModelRole.DECIDE, Plan())
+    model.push(ModelRole.AGENT, Plan())
     bol = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
 
     await Decider(model).decide(
@@ -168,7 +166,7 @@ async def test_read_document_is_offered_when_the_event_has_an_attachment(load: L
 @pytest.mark.unit
 async def test_the_procedure_of_an_open_obligation_is_in_the_prompt(load: Load) -> None:
     model = ScriptedModel()
-    model.push(ModelRole.DECIDE, REPLY)
+    model.push(ModelRole.AGENT, REPLY)
 
     await Decider(model).decide(
         context(load, obligations=(eta_request(),)), QUESTION, resolved(QUESTIONS), VISIBLE
@@ -180,7 +178,7 @@ async def test_the_procedure_of_an_open_obligation_is_in_the_prompt(load: Load) 
 @pytest.mark.unit
 async def test_model_failure_propagates(load: Load) -> None:
     model = ScriptedModel()
-    model.push(ModelRole.DECIDE, LlmError("schema mismatch"))
+    model.push(ModelRole.AGENT, LlmError("schema mismatch"))
 
     with pytest.raises(LlmError, match="schema mismatch"):
         await Decider(model).decide(context(load), QUESTION, resolved(QUESTIONS), VISIBLE)

@@ -212,7 +212,7 @@ def render_gate_prompt(ctx: RunContext) -> str:
         f"Times are local to the current stop ({view.zone_name}).",
         "",
         "Open obligations:",
-        *_or_none([f"- {o.kind.value}: attempts {o.attempts}" for o in ctx.open_obligations]),
+        *_or_none([f"- {o.kind}: attempts {o.attempts}" for o in ctx.open_obligations]),
         "",
         "Recent events, oldest first:",
         *_or_none([_event_line(view, e, GATE_TEXT_LIMIT) for e in earlier[-GATE_RECENT_EVENTS:]]),
@@ -247,7 +247,7 @@ def render_decide_prompt(
         _transcript_block(view),
         f"## Now\n{view.now_line()}",
         _event_block(view),
-        f"## Gate\nintent: {gate.intent.value}\nreason: {_quote(gate.reason)}",
+        f"## Gate\nintent: {gate.intent}\nreason: {_quote(gate.reason)}",
         _TASK,
     ]
     return "\n\n".join(blocks) + "\n"
@@ -388,7 +388,7 @@ def _ledger_block(view: _View) -> str:
         "Recently closed:",
         *_or_none(
             [
-                f"- {o.kind.value}: {o.status.value}; attempts {o.attempts}; "
+                f"- {o.kind}: {o.status.value}; attempts {o.attempts}; "
                 f"opened {view.clock(o.opened_at)}"
                 for o in closed
             ]
@@ -401,7 +401,7 @@ def _open_obligation(view: _View, obligation: Obligation) -> str:
     last = obligation.last_action_at
     deferred = obligation.deferred_until
     return (
-        f"- {obligation.kind.value}: attempts {obligation.attempts}; "
+        f"- {obligation.kind}: attempts {obligation.attempts}; "
         f"opened {view.clock(obligation.opened_at)}; "
         f"last action {view.when(last) if last is not None else 'none'}; "
         f"deferred until {view.when(deferred) if deferred is not None else 'none'}, "
@@ -440,7 +440,7 @@ def _timers_block(view: _View) -> str:
 
 def _timer_line(view: _View, timer: Timer) -> str:
     obligation = view.ctx.obligation(timer.obligation_id)
-    target = obligation.kind.value if obligation is not None else "an unknown obligation"
+    target = obligation.kind if obligation is not None else "an unknown obligation"
     reason = f" ({timer.reason})" if timer.reason else ""
     return f"- due {view.when(timer.due_at)}: follow-up for {target}{reason}"
 
@@ -474,6 +474,8 @@ def _event_block(view: _View) -> str:
             lines.append(f"action: {_describe(view, event, None)}")
         case EventType.HERO_UPDATE:
             lines.append(f"text: {_quote(event.body)}")
+        case EventType.DOCUMENT_PROCESSED:
+            lines.append(f"document: {_document_processed(event)}")
         case EventType.INBOUND_MESSAGE | EventType.ATTACHMENT_RECEIVED:
             lines.append(f"from: {view.person(event.sender_contact_id)}")
             lines.append(f"text: {_quote(event.body)}")
@@ -510,6 +512,8 @@ def _describe(view: _View, event: Event, limit: int | None) -> str:
             return f"system: follow-up timer due for {_kind_of(event)}"
         case EventType.HERO_UPDATE:
             return f"in hero update: {_quote(event.body, limit)}"
+        case EventType.DOCUMENT_PROCESSED:
+            return f"system: {_document_processed(event)}"
         case EventType.INBOUND_MESSAGE | EventType.ATTACHMENT_RECEIVED:
             text = _quote(event.body, limit) if event.body else "(no text)"
             sender = view.person(event.sender_contact_id)
@@ -558,6 +562,16 @@ def _risk_change(event: Event) -> str:
 
 def _kind_of(event: Event) -> str:
     return _text(event.data, "kind") or "an obligation"
+
+
+def _document_processed(event: Event) -> str:
+    """What the document pipeline found. The values come from a model's reading of an
+    outside file, so each is quoted like message text."""
+    data = event.data
+    document = _quote(_text(data, "document_id") or "unknown")
+    kind = _quote(_text(data, "type_id") or "unknown")
+    status = _quote(_text(data, "status") or "unknown")
+    return f"document {document} processed: type {kind}, status {status}"
 
 
 # Small helpers.

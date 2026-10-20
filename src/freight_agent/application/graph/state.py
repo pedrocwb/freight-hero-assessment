@@ -17,7 +17,7 @@ from freight_agent.application.gate import GateResult
 from freight_agent.application.prefilter import PrefilterResult
 from freight_agent.domain.actions import Action, Plan
 from freight_agent.domain.intents import GateDecision
-from freight_agent.domain.runs import RunStatus, Usage
+from freight_agent.domain.runs import RunStatus, TrajectoryStep, Usage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import ValidationOutcome, Violation
 
@@ -57,6 +57,11 @@ class RunState:
     validation: ValidationOutcome | None = None
     usage: Annotated[tuple[Usage, ...], operator.add] = ()  # every model call, in order
     verdict: Verdict | None = None
+    # The agent loop's record (card W3-AGT fills them; defaults until then).
+    intent: str | None = None  # the agent's label for the event, when it gave one
+    trajectory: tuple[TrajectoryStep, ...] = ()
+    sections_searched: tuple[str, ...] = ()
+    rejections: int = 0
 
     @property
     def gate_decision(self) -> GateDecision | None:
@@ -77,12 +82,16 @@ class RunUpdate(TypedDict, total=False):
     prefilter: PrefilterResult | None
     gate: GateResult
     sop: ResolvedSop
-    sop_version: str
+    sop_version: str | None
     visible_sections: tuple[ResolvedSection, ...]
     plan: Plan
     validation: ValidationOutcome
     usage: tuple[Usage, ...]
     verdict: Verdict
+    intent: str | None
+    trajectory: tuple[TrajectoryStep, ...]
+    sections_searched: tuple[str, ...]
+    rejections: int
 
 
 def need[T](value: T | None, what: str) -> T:

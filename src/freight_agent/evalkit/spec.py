@@ -16,7 +16,8 @@ Runner semantics (implemented in `evalkit.runner`):
 6. In `scripted` mode, model calls consume `script` entries in order, per role.
    Only inbound messages call the gate model; risk changes, timers and
    attachments get their intent from code and consume no gate entry. A run
-   whose gate acts consumes one plan. Runs skipped or escalated by the
+   whose gate acts consumes one plan (`script.agent`; `script.decide` is its
+   older name and is merged into it). Runs skipped or escalated by the
    prefilter consume nothing. Unused or missing script entries fail the step.
    In `replay` and `live` modes `script` is ignored.
 7. `load_overrides` is merged into the fixture's top-level keys before the load
@@ -29,7 +30,7 @@ Runner semantics (implemented in `evalkit.runner`):
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -37,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from freight_agent.domain.actions import Plan, Purpose
 from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.load import Channel, DelayRisk, Stage
-from freight_agent.domain.obligations import ObligationKind, ObligationStatus
+from freight_agent.domain.obligations import ObligationStatus
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.runs import RunStatus
 
@@ -48,11 +49,20 @@ class _Spec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class AttachmentSpec(_Spec):
+    """A file sent with a message: fixture bytes the trial stores as a blob (card W3-EVK)."""
+
+    filename: str
+    fixture: str = Field(description="The file, relative to the evals directory")
+    content_type: str = "application/pdf"
+
+
 class MessageStep(_Spec):
     channel: Channel
     sender: str | None = Field(description="Contact id; null means an unknown sender")
     body: str
     message_id: str | None = Field(default=None, description="Defaults to a derived id")
+    attachments: tuple[AttachmentSpec, ...] = ()
 
 
 class PingStep(_Spec):
@@ -104,7 +114,7 @@ class TimerExpectation(_Spec):
 class Expectation(_Spec):
     actions: tuple[ActionMatcher, ...] = ()
     no_actions: bool = Field(default=False, description="No outbox item at all during the step")
-    obligations: dict[ObligationKind, ObligationExpectation | None] = Field(
+    obligations: dict[str, ObligationExpectation | None] = Field(
         default_factory=dict,
         description="Latest obligation of each kind; null means none exists",
     )
@@ -119,8 +129,29 @@ class Expectation(_Spec):
 
 
 class ScriptedLlm(_Spec):
+    """What each role's model answers in scripted mode, in call order.
+
+    `decide` is the older name of `agent`: its entries are merged in front of `agent`'s,
+    so the scenarios written before wave 3 run unchanged.
+    """
+
     gate: tuple[GateDecision, ...] = ()
-    decide: tuple[Plan, ...] = ()
+    agent: tuple[Plan, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decide_is_agent(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "decide" not in data:
+            return data
+        fields = dict(cast(dict[str, Any], data))
+        decide = fields.pop("decide") or ()
+        fields["agent"] = (*decide, *(fields.get("agent") or ()))
+        return fields
+
+    @property
+    def decide(self) -> tuple[Plan, ...]:
+        """The `agent` entries, by their older name."""
+        return self.agent
 
 
 class Step(_Spec):

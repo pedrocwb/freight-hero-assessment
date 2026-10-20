@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from freight_agent.adapters.clock import SystemClock
-from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.api.errors import NotFound
 from freight_agent.bootstrap import build_llm
 from freight_agent.evalkit import suite as eval_suite
@@ -118,12 +118,12 @@ async def run_suite(
     `model` replaces the replay model (tests); scripted mode always uses the scenario's
     own script.
     """
-    sop = FileSopRepository(settings.sops_dir)
+    knowledge = MemorySopIndex.from_files(settings.sops_dir)
     if mode == "replay" and model is None:
         model = build_llm(settings, mode="replay", clock=SystemClock())
     runner = ScenarioRunner(
         evals_dir=settings.evals_dir,
-        sop=sop,
+        knowledge=knowledge,
         mode=mode,
         model=None if mode == "scripted" else model,
     )
@@ -136,7 +136,7 @@ async def run_suite(
         suite=suite,
         mode=mode,
         k=k,
-        sop_version=sop.version(),
+        sop_version=knowledge.content_version,
         total=len(summaries),
         passed=passed,
         failed=len(summaries) - passed,

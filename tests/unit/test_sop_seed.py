@@ -44,7 +44,7 @@ CANONICAL: dict[str, frozenset[Intent]] = {
     "acknowledgements": frozenset({Intent.ACKNOWLEDGEMENT}),
     "status_updates": frozenset({Intent.STATUS_UPDATE}),
     "driver_departed": frozenset({Intent.DRIVER_DEPARTED}),
-    "documents": frozenset({Intent.DOCUMENT}),
+    "documents": frozenset({Intent.DOCUMENT, Intent.DOCUMENT_PROCESSED}),
 }
 
 # Every file outside standard/, with the merge mode the table gives it.

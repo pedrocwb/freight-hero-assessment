@@ -1,7 +1,7 @@
 """The run graph's nodes. Each factory takes the services it needs and returns the node.
 
-Nodes are thin: the work lives in the services (`prefilter`, `Gate`, `domain.sop`,
-`Decider`, `domain.validation`). A node adapts their results to the run state and
+Nodes are thin: the work lives in the services (`prefilter`, `Gate`, the knowledge
+index, `Decider`, `domain.validation`). A node adapts their results to the run state and
 decides whether the run ends here, by writing a `Verdict`. Errors are not caught:
 the runtime turns a model failure or the deadline into an escalation and anything
 else into a failed attempt.
@@ -17,7 +17,6 @@ from freight_agent.application.graph.state import RunState, RunUpdate, Verdict, 
 from freight_agent.application.prefilter import PrefilterResult, prefilter
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.runs import RunStatus
-from freight_agent.domain.sop import effective_sections, resolve
 from freight_agent.domain.validation import (
     Rule,
     ValidationConfig,
@@ -25,7 +24,7 @@ from freight_agent.domain.validation import (
     ValidationOutcome,
     validate,
 )
-from freight_agent.ports.sop import SopRepository
+from freight_agent.ports.knowledge import SopIndex
 
 Node = Callable[[RunState], Awaitable[RunUpdate]]
 
@@ -61,29 +60,23 @@ def gate_node(gate: Gate) -> Node:
     return run_gate
 
 
-def resolve_sop_node(sop: SopRepository) -> Node:
+def resolve_sop_node(knowledge: SopIndex) -> Node:
     """The SOP sections for this intent and stage, plus every section the load can see.
 
     General sections (no intents) apply to every event, so they do not count as
-    a procedure: without a section that names the intent, the run escalates.
+    a procedure: without a section that names the intent, the run escalates. (Card
+    W3-AGT moves this check to the agent's `finish(no_procedure)`.)
     """
 
     async def run_resolve_sop(state: RunState) -> RunUpdate:
         ctx = state.ctx
         load = ctx.load
         intent = need(state.gate_decision, "a gate decision").intent
-        sections = await sop.sections_for_client(load.broker_id)
-        resolved = resolve(
-            sections,
-            client_id=load.broker_id,
-            load_types=load.load_types,
-            intent=intent,
-            stage=load.stage,
-        )
-        visible = effective_sections(sections, client_id=load.broker_id, load_types=load.load_types)
+        resolved = await knowledge.by_applies(load.broker_id, load.load_types, intent, load.stage)
+        visible = await knowledge.visible(load.broker_id, load.load_types)
         update: RunUpdate = {
             "sop": resolved,
-            "sop_version": sop.version(),
+            "sop_version": await knowledge.version(load.broker_id),
             "visible_sections": visible,
         }
         if not any(s.intents for s in resolved.sections):
@@ -103,7 +96,10 @@ def decide_node(decider: Decider) -> Node:
             need(state.sop, "the resolved SOP"),
             state.visible_sections,
         )
-        return {"plan": result.plan, "usage": result.usage}
+        update: RunUpdate = {"plan": result.plan, "usage": result.usage}
+        if result.intent is not None:
+            update["intent"] = result.intent
+        return update
 
     return run_decide
 

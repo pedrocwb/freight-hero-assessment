@@ -153,7 +153,7 @@ async def test_the_inspector_shows_what_each_run_saw_decided_and_cost(api: Api) 
     assert [a["type"] for a in run["plan"]["actions"]] == ["send_sms", "schedule_timer"]
     assert run["plan"]["actions"][0]["text"] == ASK_ETA.text
     assert run["violations"] == []
-    assert [(u["role"], u["model"]) for u in run["usage"]] == [("decide", "scripted")]
+    assert [(u["role"], u["model"]) for u in run["usage"]] == [("agent", "scripted")]
     assert run["cost_usd"] == 0.0
     assert (run["skip_reason"], run["error"]) == (None, None)
 

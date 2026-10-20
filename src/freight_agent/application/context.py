@@ -6,14 +6,15 @@ one consistent view of the load's memory.
 """
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import cast
 
+from freight_agent.domain.broker import Broker, choose_version, standard_broker
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import RUN_TRIGGERS, Event, EventType
 from freight_agent.domain.load import Channel, Load, Role
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.timers import Timer, TimerStatus
@@ -35,13 +36,16 @@ class RunContext:
     event_timer: Timer | None = None  # for TIMER_DUE events: the timer named in `event.data`
     tracker: RiskTracker | None = None
     already_processed: bool = False  # a run record already exists for this event
+    # The catalog and limits this run follows: the load's broker at the version its
+    # rollout gives this load, or the standard catalog for a broker never saved.
+    broker: Broker = field(default_factory=standard_broker)
 
     @property
     def open_obligations(self) -> tuple[Obligation, ...]:
         return tuple(o for o in self.obligations if o.is_open)
 
-    def open_obligation(self, kind: ObligationKind) -> Obligation | None:
-        return next((o for o in self.open_obligations if o.kind is kind), None)
+    def open_obligation(self, kind: str) -> Obligation | None:
+        return next((o for o in self.open_obligations if o.kind == kind), None)
 
     def obligation(self, obligation_id: str) -> Obligation | None:
         return next((o for o in self.obligations if o.obligation_id == obligation_id), None)
@@ -53,16 +57,20 @@ async def load_run_context(
     *,
     now: datetime,
     recent_limit: int,
-    outbound_window_minutes: int,
+    outbound_window_minutes: int | None = None,
 ) -> RunContext:
-    """Read the load, its ledger, timers, recent events and recent outbound messages.
+    """Read the load, its broker, ledger, timers, recent events and recent outbound messages.
 
-    Raises `DomainError` when the event names a load that was never registered:
-    there is no SOP, contact list or ledger to act on.
+    `outbound_window_minutes` defaults to the broker's SMS rate window. Raises
+    `DomainError` when the event names a load that was never registered: there is no
+    SOP, contact list or ledger to act on.
     """
     load = await uow.loads.get(event.load_id)
     if load is None:
         raise DomainError(f"unknown load {event.load_id!r} for event {event.event_id!r}")
+    broker = await _broker_for(uow, load)
+    if outbound_window_minutes is None:
+        outbound_window_minutes = broker.limits.validation.sms_window_minutes
 
     obligations = sorted(
         await uow.obligations.list_for_load(load.load_id),
@@ -88,7 +96,24 @@ async def load_run_context(
         event_timer=await _event_timer(uow, event),
         tracker=await uow.loads.get_tracker(load.load_id),
         already_processed=await uow.runs.for_event(event.event_id) is not None,
+        broker=broker,
     )
+
+
+async def _broker_for(uow: UnitOfWork, load: Load) -> Broker:
+    """The load's broker, at the version its rollout gives this load (`choose_version`).
+
+    A broker never saved runs on the standard catalog, so loads of brokers onboarded
+    before brokers were data behave as they always did.
+    """
+    current = await uow.brokers.get(load.broker_id)
+    if current is None:
+        return standard_broker()
+    rollout = current.rollout
+    previous = None
+    if rollout.percent < 100 and rollout.previous_version is not None:
+        previous = await uow.brokers.get_version(current.broker_id, rollout.previous_version)
+    return choose_version(current, previous, load.load_id)
 
 
 async def _event_timer(uow: UnitOfWork, event: Event) -> Timer | None:

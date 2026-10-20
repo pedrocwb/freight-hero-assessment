@@ -248,4 +248,4 @@ async def test_tms_notes_are_listed_with_their_time(api: Api) -> None:
     assert await api.get(f"/api/loads/{LOAD_ID}/tms") == [
         {"at": local(7, 1), "text": "Driver loading at door 4."}
     ]
-    assert api.model.remaining(ModelRole.DECIDE) == 0
+    assert api.model.remaining(ModelRole.AGENT) == 0

@@ -399,7 +399,7 @@ def test_eta_attempt_cap_reads_the_configured_cap(load: Load) -> None:
     ctx = context(
         load,
         open_obligations=(eta_obligation(attempts=1),),
-        config=ValidationConfig(max_eta_attempts=1),
+        config=ValidationConfig(max_attempts={"eta_request": 1}),
     )
 
     dropped(EtaAttemptCap(), eta_sms(), ctx)

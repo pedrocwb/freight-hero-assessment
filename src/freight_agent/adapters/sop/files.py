@@ -166,12 +166,43 @@ def read_sop_file(path: Path, location: SopLocation) -> SopFile:
     return SopFile(location, section_id, mode, section, ())
 
 
+def tree_version(root: Path) -> str:
+    """Short sha256 of the sorted (relative path, bytes) pairs: any edit or move changes it."""
+    digest = hashlib.sha256()
+    for source, path in sop_paths(root):
+        data = path.read_bytes()
+        # The length keeps the pairs unambiguous: no two trees hash the same bytes.
+        digest.update(source.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
+    return digest.hexdigest()[:_VERSION_LENGTH]
+
+
+def load_tree(root: Path) -> list[SopSection]:
+    """Every section of the tree, every client's included. Fails like `FileSopRepository`:
+    a file outside the layout, a file with a problem, an id used twice in one folder."""
+    files = [_load_file(source, path) for source, path in sop_paths(root)]
+    for section_id, repeat, first in duplicates(files):
+        raise SopFormatError(repeat.location.source, duplicate_problem(section_id, first))
+    return [file.section for file in files if file.section is not None]
+
+
+def _load_file(source: str, path: Path) -> SopFile:
+    location = locate(source)
+    if location is None:
+        raise SopFormatError(source, outside_layout_problem())
+    file = read_sop_file(path, location)
+    if file.section is None:
+        raise SopFormatError(source, "; ".join(file.problems))
+    return file
+
+
 class FileSopRepository:
-    """`SopRepository` over a folder of Markdown files.
+    """The sections of a folder of Markdown files, per client: the importer's file reader.
 
     Reads the disk on every call, so an edited SOP applies to the next run, and the
     version recorded with a run matches what that run read. Only the files a client can
-    see are read: a broken file of one client never blocks the others.
+    see are read: a broken file of one client never blocks the others. (Before wave 3
+    the runtime read SOPs through it; now it reads them through `ports.knowledge.SopIndex`,
+    see `adapters/knowledge/memory.py`.)
     """
 
     def __init__(self, root: Path) -> None:
@@ -179,7 +210,7 @@ class FileSopRepository:
 
     async def sections_for_client(self, client_id: str) -> list[SopSection]:
         files = [
-            self._load(source, path)
+            _load_file(source, path)
             for source, path in sop_paths(self._root)
             if _visible_to(source, client_id)
         ]
@@ -188,22 +219,7 @@ class FileSopRepository:
         return [file.section for file in files if file.section is not None]
 
     def version(self) -> str:
-        """Short sha256 of the sorted (relative path, bytes) pairs: any edit or move changes it."""
-        digest = hashlib.sha256()
-        for source, path in sop_paths(self._root):
-            data = path.read_bytes()
-            # The length keeps the pairs unambiguous: no two trees hash the same bytes.
-            digest.update(source.encode() + b"\0" + len(data).to_bytes(8, "big") + data)
-        return digest.hexdigest()[:_VERSION_LENGTH]
-
-    def _load(self, source: str, path: Path) -> SopFile:
-        location = locate(source)
-        if location is None:
-            raise SopFormatError(source, outside_layout_problem())
-        file = read_sop_file(path, location)
-        if file.section is None:
-            raise SopFormatError(source, "; ".join(file.problems))
-        return file
+        return tree_version(self._root)
 
 
 def _visible_to(source: str, client_id: str) -> bool:

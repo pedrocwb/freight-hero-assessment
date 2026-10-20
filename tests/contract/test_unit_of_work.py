@@ -13,7 +13,7 @@ foreign keys.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -27,7 +27,7 @@ from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.repositories import UnitOfWork, UnitOfWorkFactory
-from tests.contract.uow_factories import UOW_FACTORIES, UowFactory, open_memory
+from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, UowFactory, open_memory
 
 pytestmark = pytest.mark.contract
 
@@ -36,20 +36,9 @@ A = "481207"  # the fixture load
 B = "550031"  # a second load: the fixture under another id
 DRIVER = "drv_20931"
 ETA = ObligationKind.ETA_REQUEST
-MAX_QUEUE_ATTEMPTS = 3
 LEASE_S = 300.0  # five minutes, so the claim lease tests read in whole minutes
 OBLIGATION_OF = {A: "obl_1", B: "obl_2"}  # the parent obligation of each load's timers
 RUN_OF = {A: "run_1", B: "run_2"}  # the parent run of each load's outbox items
-
-
-@pytest.fixture(params=list(UOW_FACTORIES.values()), ids=list(UOW_FACTORIES))
-async def uow_factory(request: pytest.FixtureRequest) -> AsyncIterator[UnitOfWorkFactory]:
-    """A fresh, empty store per test, once for each implementation in the registry."""
-    factory: UowFactory = request.param
-    if (reason := factory.skip_reason()) is not None:
-        pytest.skip(reason)
-    async with factory.open_store(max_queue_attempts=MAX_QUEUE_ATTEMPTS) as new_uow:
-        yield new_uow
 
 
 @pytest.fixture

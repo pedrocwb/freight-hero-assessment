@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import Usage
@@ -33,12 +33,12 @@ from freight_agent.evalkit.suite import (
 )
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, SchemaT
-from freight_agent.ports.sop import SopRepository
 from freight_agent.settings import LlmMode
 
 ROOT = Path(__file__).resolve().parents[2]
-SOPS = FileSopRepository(ROOT / "sops")
+SOPS = MemorySopIndex.from_files(ROOT / "sops")
 
 # One step: the driver says "ok" with nothing open. The right run is a gate-only noop.
 ACK_STEPS = """\
@@ -131,7 +131,9 @@ async def run_suite(
     cost_cap_usd: float | None = None,
     budget: Budget | None = None,
 ) -> SuiteResult:
-    runner = SuiteRunner(evals_dir=evals, sop=SOPS, mode=mode, model_factory=model, budget=budget)
+    runner = SuiteRunner(
+        evals_dir=evals, knowledge=SOPS, mode=mode, model_factory=model, budget=budget
+    )
     return await runner.run(
         discover(evals, "core"),
         suite="core",
@@ -262,12 +264,12 @@ async def test_every_trial_gets_a_fresh_runtime(evals: Path) -> None:
     built: list[RuntimeLike] = []
 
     def factory(
-        clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository
+        clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
     ) -> RuntimeLike:
-        built.append(build_runtime(clock, model, gateways, sop))
+        built.append(build_runtime(clock, model, gateways, knowledge))
         return built[-1]
 
-    runner = SuiteRunner(evals_dir=evals, sop=SOPS, mode="scripted", runtime_factory=factory)
+    runner = SuiteRunner(evals_dir=evals, knowledge=SOPS, mode="scripted", runtime_factory=factory)
     result = await runner.run(discover(evals, "core"), suite="core", k=3, metadata=metadata())
 
     assert len({id(runtime) for runtime in built}) == 3
@@ -462,10 +464,10 @@ async def test_a_run_under_its_cap_is_not_stopped(evals: Path) -> None:
 @pytest.mark.unit
 def test_modes_other_than_scripted_need_a_model_factory(evals: Path) -> None:
     with pytest.raises(ValueError, match="replay mode needs a model"):
-        SuiteRunner(evals_dir=evals, sop=SOPS, mode="replay")
+        SuiteRunner(evals_dir=evals, knowledge=SOPS, mode="replay")
     with pytest.raises(ValueError, match="scripted mode"):
         SuiteRunner(
-            evals_dir=evals, sop=SOPS, mode="scripted", model_factory=factory_of(AckModel())
+            evals_dir=evals, knowledge=SOPS, mode="scripted", model_factory=factory_of(AckModel())
         )
 
 
@@ -475,7 +477,7 @@ async def test_the_progress_callback_sees_every_scenario(evals: Path) -> None:
     write_scenario(evals, "two")
     seen: list[str] = []
 
-    runner = SuiteRunner(evals_dir=evals, sop=SOPS, mode="scripted")
+    runner = SuiteRunner(evals_dir=evals, knowledge=SOPS, mode="scripted")
     await runner.run(
         discover(evals, "core"),
         suite="core",

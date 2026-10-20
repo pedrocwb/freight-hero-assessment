@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import VirtualClock
+from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.api import views
 from freight_agent.api.bus import EventBus, sse_message
 from freight_agent.api.errors import BadRequest, Conflict, NotFound
@@ -44,12 +45,20 @@ from freight_agent.api.schemas import (
     TmsNote,
 )
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
-from freight_agent.bootstrap import BootstrapError, Simulation, build_runtime, build_uow_factory
+from freight_agent.bootstrap import (
+    BootstrapError,
+    Simulation,
+    build_knowledge,
+    build_runtime,
+    build_uow_factory,
+)
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
 from freight_agent.domain.outbox import OutboxStatus
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import later
+from freight_agent.ports.documents import BlobStore
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.settings import LlmMode, MissingSetting, Settings
@@ -72,6 +81,8 @@ class Session:
     uow: UnitOfWorkFactory  # the runtime's store, for the read side the facade lacks
     timezone: ZoneInfo
     llm_mode: str
+    knowledge: SopIndex  # the SOP index the session's runs read
+    blobs: BlobStore  # the session's attachment bytes, gone with a reset
     completions: dict[str, views.Completion] = field(default_factory=dict)
     published_outbox: dict[str, OutboxStatus] = field(default_factory=dict)
     published_loads: dict[str, LoadSummary] = field(default_factory=dict)
@@ -108,21 +119,26 @@ def open_session(
     """A fresh simulation, as `bootstrap.build_simulation` builds it, keeping its store.
 
     The contract runs the platform on an in-memory store, whatever PERSISTENCE says, so a
-    reset really starts over. The model comes from `llm_mode` (default: the setting)
-    unless `llm` is given, which tests use to script the agent.
+    reset really starts over; attachment bytes live in memory with it. The model comes
+    from `llm_mode` (default: the setting) unless `llm` is given, which tests use to
+    script the agent.
     """
     mode = llm_mode or _interactive_mode(settings)
     effective = settings.model_copy(update={"persistence": "memory", "llm_mode": mode})
     persistence = build_uow_factory(effective)
     clock = VirtualClock(start.astimezone(timezone))
     gateways = RecordingGateways()
+    blobs = MemoryBlobStore()
     try:
+        knowledge = build_knowledge(effective)
         runtime = build_runtime(
             effective,
             clock=clock,
             gateways=gateways.as_gateways(),
             llm=llm,
             persistence=persistence,
+            knowledge=knowledge,
+            blobs=blobs,
         )
     except (MissingSetting, BootstrapError, ValueError) as exc:
         raise BadRequest(str(exc)) from exc
@@ -131,6 +147,8 @@ def open_session(
         uow=persistence,
         timezone=timezone,
         llm_mode=mode,
+        knowledge=knowledge,
+        blobs=blobs,
     )
 
 
@@ -156,6 +174,21 @@ class SimulationService:
     @property
     def settings(self) -> Settings:
         return self._settings
+
+    # The current session's ports, for the routes the runtime facade does not cover
+    # (documents, knowledge). A reset replaces them: read them per request.
+
+    @property
+    def uow_factory(self) -> UnitOfWorkFactory:
+        return self._session.uow
+
+    @property
+    def knowledge(self) -> SopIndex:
+        return self._session.knowledge
+
+    @property
+    def blobs(self) -> BlobStore:
+        return self._session.blobs
 
     def _open(self, request: ResetRequest) -> Session:
         timezone = zone(request.timezone or DEFAULT_TIMEZONE)

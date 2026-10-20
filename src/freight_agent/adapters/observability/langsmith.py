@@ -323,7 +323,7 @@ def _root_metadata(
 def _tags(run: RunRecord, broker_id: str | None) -> list[str]:
     tags = ["freight-agent", f"status:{run.status.value}", f"load:{run.load_id}"]
     if run.gate is not None:
-        tags.append(f"intent:{run.gate.intent.value}")
+        tags.append(f"intent:{run.gate.intent}")
     if broker_id is not None:
         tags.append(f"broker:{broker_id}")
     tags.extend(f"sop:{section_id}" for section_id in run.sop_section_ids)

@@ -48,7 +48,7 @@ class _RejectNotes:
 
 @pytest.mark.unit
 def test_eta_attempt_cap_defaults_to_two() -> None:
-    assert ValidationConfig().max_eta_attempts == 2
+    assert ValidationConfig().attempt_cap("eta_request") == 2
 
 
 @pytest.mark.unit

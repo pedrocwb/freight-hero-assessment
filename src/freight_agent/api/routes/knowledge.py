@@ -1,4 +1,12 @@
-"""The SOP viewer: the sections a client sees, and which apply to an event."""
+"""The knowledge base: the SOP viewer (`/api/sops`, moved here unchanged from the
+pre-wave-3 `routes/sops.py`) and, with card W3-KNW, a broker's SOP onboarding under
+`/api/brokers/{broker_id}/sops` (upload, draft, publish, versions) and
+`GET /api/sops/search?q=`.
+
+Owner: card W3-KNW. Bodies: `api.schemas.SopView`, `SopUploadResult`, `SopDraftView`,
+`SopDraftIn`, `SopPublishIn`, `SopPublishResult`, `SopVersionView`, `SearchHitView`.
+The paths are full (the router has no prefix) because they live under two roots.
+"""
 
 from fastapi import APIRouter
 
@@ -9,7 +17,7 @@ from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import ResolvedSop, effective_sections, resolve
 
-router = APIRouter(prefix="/sops", tags=["sops"])
+router = APIRouter(tags=["sops"])
 
 
 def _types(load_types: str) -> tuple[str, ...]:
@@ -17,7 +25,7 @@ def _types(load_types: str) -> tuple[str, ...]:
     return tuple(t.strip() for t in load_types.split(",") if t.strip())
 
 
-@router.get("")
+@router.get("/sops")
 async def sections(settings: AppSettings, client_id: str, load_types: str = "") -> SopView:
     """Every section the client's loads of these types follow, after the layers merge."""
     sop = FileSopRepository(settings.sops_dir)
@@ -28,7 +36,7 @@ async def sections(settings: AppSettings, client_id: str, load_types: str = "") 
     return SopView(version=sop.version(), client_id=client_id, load_types=types, sections=merged)
 
 
-@router.get("/preview")
+@router.get("/sops/preview")
 async def preview(
     settings: AppSettings, client_id: str, intent: Intent, stage: Stage, load_types: str = ""
 ) -> ResolvedSop:

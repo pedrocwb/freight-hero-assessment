@@ -2,14 +2,28 @@
 
 from fastapi import APIRouter
 
-from freight_agent.api.routes import evals, hero, ingress, loads, ops, sim, sops
+from freight_agent.api.routes import (
+    broker_evals,
+    brokers,
+    documents,
+    evals,
+    hero,
+    ingress,
+    knowledge,
+    loads,
+    ops,
+    sim,
+)
 
 ROUTERS: tuple[APIRouter, ...] = (
     sim.router,
     loads.router,
     ingress.router,
     hero.router,
-    sops.router,
+    knowledge.router,
     evals.router,
     ops.router,
+    brokers.router,
+    documents.router,
+    broker_evals.router,
 )

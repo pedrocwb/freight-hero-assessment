@@ -36,7 +36,8 @@ roles:
       order: [openai]
       allow_fallbacks: false
 
-  decide:
+  agent:
+    # The role was `decide` before wave 3; the agent loop (card W3-AGT) runs on it.
     # Tools (read_sop_section, read_document) plus the Plan as a forced tool call.
     # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
     # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
@@ -74,6 +75,24 @@ roles:
     fallbacks: [openai/gpt-4.1-nano]
     temperature: 0.7
     max_tokens: 400
+
+  extract:
+    # Wave 3 (card W3-DOC): classifies a document and extracts its values in one call,
+    # page images included (scans, phone photos), so a vision model. Settled once the
+    # document fixtures exist (one call each).
+    model: google/gemini-2.5-flash
+    fallbacks: [openai/gpt-4.1-mini]
+    temperature: 0
+    max_tokens: 4096
+
+  compile:
+    # Wave 3 (card W3-KNW): turns a broker's SOP document into a draft (sections, proposed
+    # intents and document requirements) and drafts eval scenarios. A person reviews every
+    # draft, and an upload that fails is retried by the editor, so no fallback.
+    model: openai/gpt-4.1-mini
+    fallbacks: []
+    temperature: 0
+    max_tokens: 8192
 
 # USD per 1M tokens and context length, as listed in the catalog on 2026-10-19.
 # cached_input: price of a prompt-cache read (omitted when the catalog lists none, then
@@ -115,6 +134,17 @@ pricing:
     output: 0.50
     cached_input: 0.01
     context_length: 1000000
+  # Wave 3. Not re-fetched from the catalog with C0: check both before the bake-off
+  # (card W3-BAKE). An embedding has no output tokens.
+  google/gemini-2.5-flash:
+    input: 0.30
+    output: 2.50
+    cached_input: 0.075
+    context_length: 1048576
+  openai/text-embedding-3-small:
+    input: 0.02
+    output: 0
+    context_length: 8192
 
 # The bake-off candidates (evals/RESULTS.md has the runs; config/models.NAME.yaml has each
 # candidate's set, run with --model-set NAME). Five at most: Mistral Small 3.2 was
@@ -129,3 +159,9 @@ bakeoff_candidates:
   - qwen/qwen3-30b-a3b-instruct-2507
   - openai/gpt-oss-120b
   - anthropic/claude-haiku-5.5
+
+# The SOP index's embedding model (live and record only; scripted, replay and CI use a
+# deterministic fake, adapters/knowledge/fake_embedder.py). dim is the vector column's.
+embedding:
+  model: openai/text-embedding-3-small
+  dim: 1536

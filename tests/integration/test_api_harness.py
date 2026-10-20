@@ -32,7 +32,7 @@ DRIVER = "drv_20931"
 DISPATCHER = "dsp_4410"
 BROKER = "brk_0087"
 GATE = ModelRole.GATE
-DECIDE = ModelRole.DECIDE
+DECIDE = ModelRole.AGENT  # the role was named decide before wave 3
 START = "2026-10-13T06:55:00-07:00"
 
 ASK_ETA = SendSms(

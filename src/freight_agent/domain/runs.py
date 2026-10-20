@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.base import DomainModel
@@ -27,6 +28,20 @@ class Usage(DomainModel):
     latency_ms: int = 0
 
 
+class TrajectoryStep(DomainModel):
+    """One tool call of the agent loop, as the run's trajectory shows it.
+
+    `accepted` is set for action tools (staged or refused by a rule) and None for read
+    tools. `cost_usd` is the model round that made the call.
+    """
+
+    tool: str
+    args: dict[str, Any]
+    result: str
+    accepted: bool | None
+    cost_usd: float = 0.0
+
+
 class RunRecord(DomainModel):
     run_id: str
     event_id: str
@@ -43,6 +58,13 @@ class RunRecord(DomainModel):
     skip_reason: str | None = None
     error: str | None = None
     trace_url: str | None = None
+    # Wave 3, all optional so records stored before them still validate.
+    intent: str | None = None  # the agent's reading of the event, when it labelled it
+    broker_id: str | None = None  # the broker config the run used
+    broker_config_version: int | None = None  # its version (canary: pinned per run)
+    trajectory: tuple[TrajectoryStep, ...] = ()  # the agent's tool calls, in order
+    sections_searched: tuple[str, ...] = ()  # sections search_sop returned or the agent read
+    rejections: int = 0  # action tool calls a rule refused
 
     @property
     def cost_usd(self) -> float:

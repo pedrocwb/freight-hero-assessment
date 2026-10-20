@@ -5,14 +5,19 @@ Sections are merged per `section_id`: a more specific layer either replaces
 the section or extends it (its body is appended after the inherited body).
 This is how "the standard procedure applies to all clients until a client
 changes it" is enforced: a client only ever writes the sections it changes.
+
+Intents are string ids of the broker's catalog (`domain.broker`). The knowledge base
+models (documents uploaded, the draft an editor reviews, the versions published) live
+here too; `ports.knowledge` stores and indexes them.
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 from enum import StrEnum
 
 from freight_agent.domain.base import DomainModel
+from freight_agent.domain.broker import DocumentRequirement, IntentDef
 from freight_agent.domain.errors import DomainError
-from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 
 
@@ -34,7 +39,7 @@ class SopSection(DomainModel):
     load_type: str | None = None
     title: str
     description: str
-    intents: tuple[Intent, ...] = ()
+    intents: tuple[str, ...] = ()  # empty means every intent
     stages: tuple[Stage, ...] = ()  # empty means every stage
     mode: MergeMode = MergeMode.REPLACE
     body: str
@@ -45,7 +50,7 @@ class ResolvedSection(DomainModel):
     section_id: str
     title: str
     description: str
-    intents: tuple[Intent, ...]
+    intents: tuple[str, ...]
     stages: tuple[Stage, ...]
     body: str
     sources: tuple[str, ...]  # files that contributed, least specific first
@@ -94,7 +99,7 @@ def resolve(
     *,
     client_id: str,
     load_types: Sequence[str],
-    intent: Intent,
+    intent: str,
     stage: Stage,
 ) -> ResolvedSop:
     """Sections that apply to this intent and stage, plus the catalog of all visible sections.
@@ -180,8 +185,97 @@ def _join(inherited: str, addition: str) -> str:
     return inherited.rstrip() + "\n\n" + addition.lstrip("\r\n")
 
 
-def _applies(section: ResolvedSection, *, intent: Intent, stage: Stage) -> bool:
+def _applies(section: ResolvedSection, *, intent: str, stage: Stage) -> bool:
     # Empty means "every intent" or "every stage".
     intent_ok = not section.intents or intent in section.intents
     stage_ok = not section.stages or stage in section.stages
     return intent_ok and stage_ok
+
+
+# --- the knowledge base: retrieval, uploads, drafts and published versions ---------------
+
+
+class SearchHit(DomainModel):
+    """One section a search found, best first. `score` only orders hits of one search."""
+
+    section_id: str
+    title: str
+    description: str
+    score: float
+
+
+class SopDocument(DomainModel):
+    """A file an editor uploaded (a broker's SOP PDF), kept as a blob.
+
+    `broker_id` None is the standard layer, shared by every broker.
+    """
+
+    document_id: str
+    broker_id: str | None
+    filename: str
+    content_type: str
+    blob_ref: str
+    pages: int = 0
+    sha256: str
+    uploaded_at: datetime
+
+
+class SourceRef(DomainModel):
+    """Where a draft section came from: an uploaded document and its pages (1-based)."""
+
+    document_id: str
+    pages: tuple[int, ...] = ()
+
+
+class DraftSection(DomainModel):
+    """A section of a draft, as an editor reviews it before it is published.
+
+    The fields of `SopSection` that an editor sets (the client is the draft's broker),
+    plus where the text came from and whether the compiler proposed it and no editor has
+    accepted it yet.
+    """
+
+    section_id: str
+    layer: SopLayer = SopLayer.CLIENT
+    load_type: str | None = None
+    title: str
+    description: str
+    intents: tuple[str, ...] = ()
+    stages: tuple[Stage, ...] = ()
+    mode: MergeMode = MergeMode.REPLACE
+    body: str
+    source: SourceRef | None = None
+    proposed: bool = True
+
+
+class ProposedIntent(IntentDef):
+    """An intent the compiler found in a document and the catalog does not have yet.
+
+    `evidence` quotes the text that suggests it; `accepted` is the editor's decision
+    (None: not reviewed yet).
+    """
+
+    evidence: str = ""
+    accepted: bool | None = None
+
+
+class SopDraft(DomainModel):
+    """The one draft of a broker's SOP (None: the standard layer), edited until published."""
+
+    broker_id: str | None
+    sections: tuple[DraftSection, ...] = ()
+    proposed_intents: tuple[ProposedIntent, ...] = ()
+    proposed_requirements: tuple[DocumentRequirement, ...] = ()
+    document_ids: tuple[str, ...] = ()  # the uploads the draft was compiled from
+    updated_at: datetime
+
+
+class SopVersion(DomainModel):
+    """A published, immutable set of sections. `version` is its content hash."""
+
+    broker_id: str | None
+    version: str
+    sections: tuple[SopSection, ...]
+    published_at: datetime
+    published_by: str
+    lint: tuple[str, ...] = ()  # the warnings the publish accepted

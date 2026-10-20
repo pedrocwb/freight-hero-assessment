@@ -1,9 +1,9 @@
 """One `LanguageModel` for the runtime, a different model behind each role.
 
 The runtime holds a single `LanguageModel`, and every request names its role (gate,
-decide, judge, driver_sim). `config/models.yaml` gives each role its own model and
-fallback chain, so the composition root builds one model per role and puts this router
-in front: the application never learns which model serves which call.
+agent, judge, driver_sim, extract, compile). `config/models.yaml` gives each role its
+own model and fallback chain, so the composition root builds one model per role and
+puts this router in front: the application never learns which model serves which call.
 """
 
 from collections.abc import Mapping

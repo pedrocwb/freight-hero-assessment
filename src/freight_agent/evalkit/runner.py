@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
+from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
@@ -28,6 +29,7 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
+from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
@@ -38,8 +40,8 @@ from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
-from freight_agent.ports.sop import SopRepository
 
 Mode = Literal["scripted", "replay", "live"]
 
@@ -64,21 +66,26 @@ class RuntimeLike(Protocol):
     async def snapshot(self, load_id: str) -> LoadSnapshot: ...
 
 
-RuntimeFactory = Callable[[Clock, LanguageModel, Gateways, SopRepository], RuntimeLike]
+RuntimeFactory = Callable[[Clock, LanguageModel, Gateways, SopIndex], RuntimeLike]
 
 
 def build_runtime(
-    clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository
+    clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
 ) -> RuntimeLike:
-    """The product runtime on fresh in-memory storage, with deterministic ids and no tracing."""
+    """The product runtime on fresh in-memory storage, with deterministic ids and no tracing.
+
+    Blobs live in memory, per trial; documents are not read yet (card W3-DOC).
+    """
     deps = RuntimeDeps(
         uow_factory=MemoryStore().unit_of_work,
         clock=clock,
         ids=SequentialIdGenerator(),
         llm=model,
-        sop=sop,
+        knowledge=knowledge,
         gateways=gateways,
         tracer=NullTracer(),
+        blobs=MemoryBlobStore(),
+        documents=NullDocumentProcessor(),
         # An eval must fail loudly on a harness error (a missing cassette, a bug), not
         # record it as a failed run and move on.
         config=RuntimeConfig(reraise_unexpected=True),
@@ -113,7 +120,7 @@ class ScenarioRunner:
     def __init__(
         self,
         evals_dir: Path,
-        sop: SopRepository,
+        knowledge: SopIndex,
         mode: Mode,
         model: LanguageModel | None = None,
         runtime_factory: RuntimeFactory | None = None,
@@ -124,7 +131,7 @@ class ScenarioRunner:
         if mode != "scripted" and model is None:
             raise ValueError(f"{mode} mode needs a model")
         self._evals_dir = evals_dir
-        self._sop = sop
+        self._knowledge = knowledge
         self._model = model
         self._factory = runtime_factory or build_runtime
         self._observer: Observer = observer or NullObserver()
@@ -139,7 +146,7 @@ class ScenarioRunner:
         inner, script = self._trial_model()
         model = CountingModel(inner)
         clock = VirtualClock(_local(scenario.date, scenario.start, tz))
-        runtime = self._factory(clock, model, RecordingGateways().as_gateways(), self._sop)
+        runtime = self._factory(clock, model, RecordingGateways().as_gateways(), self._knowledge)
         play = _Trial(scenario, tz, load.load_id, clock, runtime, model, script, self._observer)
         error = await play.run(load)
         return RunOutcome(
@@ -217,7 +224,7 @@ class _Trial:
         async with self._observer.step(self._scenario, index, step, at) as span:
             before = await self._runtime.snapshot(self._load_id)
             calls_before = self._model.calls
-            # Pushed before the clock moves: timers that fire on the way consume decide plans.
+            # Pushed before the clock moves: timers that fire on the way consume agent plans.
             self._push_script(step)
             await self._advance_to(at)
             if await self._inject(index, step, at):
@@ -287,7 +294,7 @@ class _Trial:
         if self._script is None:
             return
         self._script.push(ModelRole.GATE, *step.script.gate)
-        self._script.push(ModelRole.DECIDE, *step.script.decide)
+        self._script.push(ModelRole.AGENT, *step.script.agent)
 
     def _settle_script(self, index: int) -> list[Failure]:
         """Report unused and missing script entries for the step, then start the next one clean."""
@@ -295,7 +302,7 @@ class _Trial:
         if script is None:
             return []
         failures: list[Failure] = []
-        for role in (ModelRole.GATE, ModelRole.DECIDE):
+        for role in (ModelRole.GATE, ModelRole.AGENT):
             if left := script.remaining(role):
                 message = f"{left} scripted {role} output(s) were not used"
                 failures.append(Failure(step_index=index, check="script", message=message))

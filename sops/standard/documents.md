@@ -2,7 +2,7 @@
 id: documents
 title: Documents
 description: A BOL, POD, rate confirmation, receipt or photo arrives. For now a Hero reviews every document.
-intents: [document]
+intents: [document, document_processed]
 ---
 
 A contact sends a document: a BOL (signed at pickup), a POD (signed at delivery), a

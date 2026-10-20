@@ -1,4 +1,5 @@
-"""Command line entry point: `agent eval run|list|report` and `agent sop lint`.
+"""Command line entry point: `agent eval run|list|report`, `agent sop ...` (in `cli_sop.py`),
+`agent serve` and `agent db migrate`.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from freight_agent.cli_sop import sop_app
 from freight_agent.settings import LlmMode, Settings
 
 if TYPE_CHECKING:
@@ -31,7 +33,6 @@ if TYPE_CHECKING:
 
 app = typer.Typer(no_args_is_help=True, help="Freight load agent.", add_completion=False)
 eval_app = typer.Typer(no_args_is_help=True, help="Run, list and report the scenario evals.")
-sop_app = typer.Typer(no_args_is_help=True, help="Check the SOP files.")
 app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
 
@@ -169,7 +170,7 @@ def _run(
     budget: "Budget | None",
     langsmith: bool = False,
 ) -> int:
-    from freight_agent.adapters.sop.files import FileSopRepository
+    from freight_agent.adapters.knowledge.memory import MemorySopIndex
     from freight_agent.evalkit.metadata import collect_metadata
     from freight_agent.evalkit.report import (
         REPORT_FILE,
@@ -201,12 +202,12 @@ def _run(
     except (SuiteError, ReportError) as exc:
         raise UsageProblem(str(exc)) from exc
     factory = _checked_model_factory(settings, mode)
-    sop = FileSopRepository(settings.sops_dir)
+    knowledge = MemorySopIndex.from_files(settings.sops_dir)
     metadata = collect_metadata(
         created_at=datetime.now(UTC),
         mode=mode,
         model_set=model_set,
-        sop=sop,
+        sop_version=knowledge.content_version,
         models_config=models_config,
         repo=Path.cwd(),
         settings=settings.describe(),
@@ -218,7 +219,7 @@ def _run(
     )
     runner = SuiteRunner(
         evals_dir=settings.evals_dir,
-        sop=sop,
+        knowledge=knowledge,
         mode=mode,
         model_factory=factory,
         budget=budget,
@@ -408,34 +409,6 @@ def eval_report(
         typer.echo(render_scenario_line(summary))
     typer.echo("")
     typer.echo(render_summary(result, comparison, report=report))
-
-
-# --- agent sop lint ---------------------------------------------------------------------
-
-
-@sop_app.command("lint")
-def sop_lint() -> None:
-    """Check every SOP file, and warn about sections no eval scenario covers.
-
-    Exit code 1 when there is an error; warnings alone leave it at 0.
-    """
-    from freight_agent.adapters.sop.lint import Severity, lint
-    from freight_agent.evalkit.suite import SuiteError, discover, suites
-
-    settings = Settings()
-    tags: list[str] | None
-    try:
-        evals = settings.evals_dir
-        tags = [tag for name in suites(evals) for s in discover(evals, name) for tag in s.tags]
-    except SuiteError as exc:
-        typer.echo(f"warning: coverage not checked, the scenarios cannot be read: {exc}")
-        tags = None
-    issues = lint(settings.sops_dir, tags)
-    for issue in issues:
-        typer.echo(str(issue))
-    errors = sum(issue.severity is Severity.ERROR for issue in issues)
-    typer.echo(f"{errors} errors, {len(issues) - errors} warnings in {settings.sops_dir}")
-    raise typer.Exit(1 if errors else 0)
 
 
 # --- agent serve and agent db -------------------------------------------------------------

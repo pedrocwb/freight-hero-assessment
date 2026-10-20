@@ -59,7 +59,7 @@ async def test_assignment_sequence_for_client_a(load: Load) -> None:
 
     assert [(r.event_id, r.status) for r in runs] == [("risk:p1", RunStatus.ACTED)]
     run = runs[0]
-    assert run.gate is not None and run.gate.intent is Intent.DELAY_RISK_HIGH
+    assert run.gate is not None and run.gate.intent == Intent.DELAY_RISK_HIGH
     assert "delay_risk_high" in run.sop_section_ids
     assert (run.started_at, run.finished_at) == (at(7, 1), at(7, 1))
     assert [d.payload["contact_id"] for d in world.sent("sms")] == [DRIVER]
@@ -92,7 +92,7 @@ async def test_assignment_sequence_for_client_a(load: Load) -> None:
     runs = await world.tick(at(7, 31))
 
     assert [(r.event_id, r.status) for r in runs] == [("timer:timer_1", RunStatus.ACTED)]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.ETA_FOLLOW_UP_DUE
     assert len(world.sent("sms")) == 3
     obligation = await world.eta_request()
     assert obligation is not None and obligation.attempts == 2
@@ -145,7 +145,7 @@ async def test_acknowledgement_after_the_eta_request_is_a_noop(load: Load) -> No
     runs = await world.tick(at(7, 6))
 
     assert [r.status for r in runs] == [RunStatus.NOOP]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.ACKNOWLEDGEMENT
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.ACKNOWLEDGEMENT
     assert len(runs[0].usage) == 1 and runs[0].usage[0].role == "gate"
     assert runs[0].plan is None
     assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)
@@ -344,7 +344,7 @@ async def test_a_downgrade_needs_two_pings_and_a_duplicate_does_not_count(load: 
     runs = await world.tick(at(7, 16))
 
     assert [r.status for r in runs] == [RunStatus.ACTED]
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.DELAY_RISK_LOW
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.DELAY_RISK_LOW
     assert runs[0].sop_section_ids == ("communication_rules", "delay_risk_cleared", "escalation")
     obligation = await world.eta_request()
     assert obligation is not None and obligation.status is ObligationStatus.CANCELLED

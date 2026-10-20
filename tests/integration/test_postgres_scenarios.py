@@ -14,18 +14,19 @@ from pathlib import Path
 import pytest
 
 from freight_agent.adapters.clock import SequentialIdGenerator
+from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.adapters.persistence.postgres.store import PostgresStore, open_store
-from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.application.runtime import AgentRuntime, RuntimeDeps
 from freight_agent.evalkit.results import StepObservation
 from freight_agent.evalkit.runner import RuntimeFactory, ScenarioRunner
 from freight_agent.evalkit.spec import load_scenario
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
-from freight_agent.ports.sop import SopRepository
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -49,15 +50,16 @@ async def store() -> AsyncIterator[PostgresStore]:
 
 
 def _on(store: PostgresStore) -> RuntimeFactory:
-    def build(clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository):
+    def build(clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex):
         deps = RuntimeDeps(
             uow_factory=store.unit_of_work,
             clock=clock,
             ids=SequentialIdGenerator(),
             llm=model,
-            sop=sop,
+            knowledge=knowledge,
             gateways=gateways,
             tracer=NullTracer(),
+            blobs=MemoryBlobStore(),
         )
         return AgentRuntime(deps)
 
@@ -86,10 +88,10 @@ async def test_a_scenario_runs_on_postgres_as_on_the_memory_store(
     path: Path, store: PostgresStore
 ) -> None:
     scenario = load_scenario(path)
-    sop = FileSopRepository(ROOT / "sops")
+    knowledge = MemorySopIndex.from_files(ROOT / "sops")
 
-    memory = await ScenarioRunner(EVALS, sop, "scripted").run(scenario)
-    postgres = await ScenarioRunner(EVALS, sop, "scripted", runtime_factory=_on(store)).run(
+    memory = await ScenarioRunner(EVALS, knowledge, "scripted").run(scenario)
+    postgres = await ScenarioRunner(EVALS, knowledge, "scripted", runtime_factory=_on(store)).run(
         scenario
     )
 

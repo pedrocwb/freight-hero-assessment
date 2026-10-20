@@ -46,7 +46,7 @@ async def test_reset_clears_queues_and_history() -> None:
     model = ScriptedModel()
     model.push(ModelRole.GATE, ACK)
     await model.generate(GATE, GateDecision)
-    model.push(ModelRole.DECIDE, ACK)
+    model.push(ModelRole.AGENT, ACK)
 
     model.reset()
 

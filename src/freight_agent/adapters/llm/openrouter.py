@@ -560,7 +560,7 @@ async def _smoke(config_path: Path) -> None:
         ),
         (
             LlmRequest(
-                role=ModelRole.DECIDE,
+                role=ModelRole.AGENT,
                 system=(
                     "You follow the SOP. Read the section delay_risk_high with the tool, "
                     "then answer with a plan. The driver's contact id is drv-1."

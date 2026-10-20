@@ -129,7 +129,7 @@ async def test_due_eta_timer_is_a_follow_up(load: Load) -> None:
 
     result, model = await classify(load, trigger)
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
     assert result.decision.act is True
     assert result.usage is None
     assert model.calls == []
@@ -141,7 +141,7 @@ async def test_timer_kind_falls_back_to_the_timer_obligation(load: Load) -> None
 
     result, _ = await classify(load, trigger, obligations=(ETA_REQUEST,), event_timer=TIMER)
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
 
 
 @pytest.mark.unit
@@ -150,7 +150,7 @@ async def test_timer_kind_falls_back_to_the_obligation_named_in_the_event(load: 
 
     result, _ = await classify(load, trigger, obligations=(ETA_REQUEST,))
 
-    assert result.decision.intent is Intent.ETA_FOLLOW_UP_DUE
+    assert result.decision.intent == Intent.ETA_FOLLOW_UP_DUE
 
 
 @pytest.mark.unit
@@ -159,7 +159,7 @@ async def test_timer_of_an_unknown_obligation_still_goes_to_decide(load: Load) -
 
     result, model = await classify(load, trigger)
 
-    assert result.decision.intent is Intent.OTHER
+    assert result.decision.intent == Intent.OTHER
     assert result.should_act
     assert model.calls == []
 
@@ -267,7 +267,7 @@ async def test_system_only_intent_from_the_model_becomes_other(load: Load) -> No
 
     result = await Gate(model).classify(context(load, sms("gonna be late")))
 
-    assert result.decision.intent is Intent.OTHER
+    assert result.decision.intent == Intent.OTHER
     assert result.decision.act is True
     assert "delay_risk_high" in result.decision.reason
 
@@ -295,4 +295,4 @@ def test_should_act_honors_must_act(intent: Intent, act: bool, expected: bool) -
 def test_every_obligation_kind_has_a_follow_up_intent() -> None:
     for kind in ObligationKind:
         assert follow_up_intent(kind) is not None
-    assert follow_up_intent(ObligationKind.ETA_REQUEST) is Intent.ETA_FOLLOW_UP_DUE
+    assert follow_up_intent(ObligationKind.ETA_REQUEST) == Intent.ETA_FOLLOW_UP_DUE

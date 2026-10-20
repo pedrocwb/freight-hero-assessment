@@ -7,11 +7,14 @@ from typing import Protocol, Self
 
 from freight_agent.domain.events import Event
 from freight_agent.domain.load import Load
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer
+from freight_agent.ports.brokers import BrokerRepository
+from freight_agent.ports.documents import DocumentRepository
+from freight_agent.ports.knowledge import SopStore
 
 
 class LoadRepository(Protocol):
@@ -36,7 +39,7 @@ class EventLog(Protocol):
 
 class ObligationRepository(Protocol):
     async def get(self, obligation_id: str) -> Obligation | None: ...
-    async def get_open(self, load_id: str, kind: ObligationKind) -> Obligation | None: ...
+    async def get_open(self, load_id: str, kind: str) -> Obligation | None: ...
     async def list_for_load(self, load_id: str) -> list[Obligation]: ...
     async def save(self, obligation: Obligation) -> None: ...
 
@@ -125,6 +128,9 @@ class UnitOfWork(Protocol):
     outbox: OutboxRepository
     runs: RunRepository
     queue: EventQueue
+    brokers: BrokerRepository
+    sops: SopStore
+    documents: DocumentRepository
 
     async def __aenter__(self) -> Self: ...
 

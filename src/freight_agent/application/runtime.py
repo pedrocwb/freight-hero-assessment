@@ -10,7 +10,8 @@ a database would hold the claimed rows):
 1. claim: one unit of work claims the next event, reads its context
    (`load_run_context`) and commits the claim;
 2. think: the run graph (prefilter, gate, SOP resolution, decide, validate) runs
-   outside any transaction, under the run deadline;
+   outside any transaction, under the run deadline; it reads the SOP through the
+   knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of work;
 3. commit: one unit of work checks again that no other run finished the event,
    executes the verdict's actions, saves the run record and completes the event.
 
@@ -20,6 +21,10 @@ while releasing) leaves its event in flight. The claim lease takes it back: ever
 failed attempt (the watchdog of the plan).
 
 The tracer exports the run after the commit, and can never break it.
+
+A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
+timers and processing the queue, so a message's attachment is read before the queue
+runs and its `document_processed` event is queued behind the message.
 """
 
 import asyncio
@@ -38,10 +43,12 @@ from freight_agent.application.contracts import (
     LocationPing,
 )
 from freight_agent.application.decide import Decider
+from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.executor import ExecutionResult, Executor
 from freight_agent.application.gate import Gate
 from freight_agent.application.graph import GraphDeps, RunState, Verdict, build_graph, need
 from freight_agent.application.prefilter import SkipReason
+from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
@@ -56,10 +63,11 @@ from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import ValidationConfig
 from freight_agent.ports.clock import Clock, IdGenerator
+from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import DeliveryError, Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmError
 from freight_agent.ports.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
-from freight_agent.ports.sop import SopRepository
 from freight_agent.ports.tracing import Tracer
 
 logger = logging.getLogger(__name__)
@@ -102,9 +110,11 @@ class RuntimeDeps:
     clock: Clock
     ids: IdGenerator
     llm: LanguageModel
-    sop: SopRepository
+    knowledge: SopIndex  # the SOP the think phase reads, outside any unit of work
     gateways: Gateways
     tracer: Tracer
+    blobs: BlobStore  # attachment bytes, for the document pipeline
+    documents: DocumentProcessor = field(default_factory=NullDocumentProcessor)
     config: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
@@ -142,7 +152,7 @@ class AgentRuntime:
                     max_tool_rounds=config.decide_max_tool_rounds,
                     timeout_s=config.llm_timeout_s,
                 ),
-                sop=deps.sop,
+                knowledge=deps.knowledge,
                 validation=config.validation,
             )
         )
@@ -161,9 +171,14 @@ class AgentRuntime:
             await uow.commit()
 
     async def ingest_message(self, message: InboundMessage) -> IngestResult:
-        """Dedupe by message_id, append to the event log and enqueue, in one transaction."""
+        """Dedupe by message_id, append to the event log and enqueue, in one transaction.
+
+        Each attachment of a new message is saved as a pending document in the same
+        transaction, for the document pipeline of the next tick.
+        """
         async with self._uow() as uow:
-            if await uow.loads.get(message.load_id) is None:
+            load = await uow.loads.get(message.load_id)
+            if load is None:
                 return _unknown_load(message.load_id)
             event = Event(
                 event_id=message.message_id,
@@ -178,6 +193,19 @@ class AgentRuntime:
             if not await uow.events.append(event):
                 return IngestResult(accepted=True, duplicate=True, event_id=event.event_id)
             await uow.queue.enqueue(event)
+            for attachment in message.attachments:
+                await uow.documents.save(
+                    Document.pending(
+                        document_id=self._deps.ids.new("doc"),
+                        load_id=load.load_id,
+                        attachment_id=attachment.attachment_id,
+                        broker_id=load.broker_id,
+                        blob_ref=attachment.ref,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        received_at=message.occurred_at,
+                    )
+                )
             await uow.commit()
         return IngestResult(accepted=True, event_id=event.event_id)
 
@@ -259,7 +287,7 @@ class AgentRuntime:
                 "timer_id": timer.timer_id,
                 "obligation_id": timer.obligation_id,
                 "due_at": timer.due_at.isoformat(),
-                "kind": obligation.kind.value if obligation is not None else None,
+                "kind": obligation.kind if obligation is not None else None,
             },
         )
 
@@ -334,7 +362,6 @@ class AgentRuntime:
                     event,
                     now=attempt.started_at,
                     recent_limit=deps.config.recent_events_limit,
-                    outbound_window_minutes=deps.config.validation.sms_window_minutes,
                 )
                 attempt.state = RunState(ctx=ctx)
             except Exception as exc:  # the claim still commits: the failure path releases it
@@ -399,6 +426,7 @@ class AgentRuntime:
 
     def _record(self, attempt: _Attempt, verdict: Verdict) -> RunRecord:
         state = attempt.state
+        broker = state.ctx.broker if state else None
         return RunRecord(
             run_id=attempt.run_id,
             event_id=attempt.event.event_id,
@@ -414,6 +442,12 @@ class AgentRuntime:
             usage=state.usage if state else (),
             skip_reason=verdict.skip_reason,
             error=verdict.error,
+            intent=state.intent if state else None,
+            broker_id=broker.broker_id if broker else None,
+            broker_config_version=broker.config_version if broker else None,
+            trajectory=state.trajectory if state else (),
+            sections_searched=state.sections_searched if state else (),
+            rejections=state.rejections if state else 0,
         )
 
     async def _export(self, finished: _Finished) -> RunRecord:
@@ -485,8 +519,9 @@ class AgentRuntime:
         return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
 
     async def tick(self) -> list[RunRecord]:
-        """fire_due_timers, then process_all, then dispatch_outbox."""
+        """fire_due_timers, then the document pipeline, then process_all, then dispatch_outbox."""
         await self.fire_due_timers()
+        await self._deps.documents.process_pending()
         runs = await self.process_all()
         await self.dispatch_outbox()
         return runs

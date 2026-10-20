@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 from freight_agent.application.context import RunContext
 from freight_agent.domain.actions import CreateHeroTask, Plan
 from freight_agent.domain.events import EventType
-from freight_agent.domain.intents import Intent
 from freight_agent.domain.validation import Severity, ValidationOutcome
 
 # Titles are stable: scenarios and dashboards match on them.
@@ -53,7 +52,7 @@ def unknown_sender(ctx: RunContext, detail: str) -> Escalation:
     )
 
 
-def sop_gap(ctx: RunContext, intent: Intent) -> Escalation:
+def sop_gap(ctx: RunContext, intent: str) -> Escalation:
     """No section with an explicit intent applies: the agent does not improvise."""
     load = ctx.load
     stage = load.stage.value
@@ -62,13 +61,13 @@ def sop_gap(ctx: RunContext, intent: Intent) -> Escalation:
             title=SOP_GAP_TITLE,
             description=(
                 f"No SOP section of {load.broker_name} ({load.broker_id}) covers intent "
-                f"{intent.value} at stage {stage}, so the agent did not act on "
+                f"{intent} at stage {stage}, so the agent did not act on "
                 f"{describe_event(ctx)}. Handle it by hand, and tell the SOP editors if a "
                 "procedure is missing."
             ),
             urgent=False,
         ),
-        reason=f"sop_gap: {intent.value}/{stage}",
+        reason=f"sop_gap: {intent}/{stage}",
     )
 
 

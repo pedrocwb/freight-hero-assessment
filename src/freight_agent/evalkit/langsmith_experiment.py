@@ -577,7 +577,7 @@ def _observation_summary(o: StepObservation) -> dict[str, Any]:
             {
                 "event_id": run.event_id,
                 "status": run.status.value,
-                "intent": None if run.gate is None else run.gate.intent.value,
+                "intent": None if run.gate is None else run.gate.intent,
                 "skip_reason": run.skip_reason,
                 "sop_section_ids": list(run.sop_section_ids),
                 "plan": None if run.plan is None else run.plan.model_dump(mode="json"),

@@ -190,7 +190,7 @@ def sop_tool(log: list[dict[str, Any]], fail: Exception | None = None) -> ToolSp
 
 def decide(*tools: ToolSpec, max_tool_rounds: int = 2, timeout_s: float = 60.0) -> LlmRequest:
     return LlmRequest(
-        role=ModelRole.DECIDE,
+        role=ModelRole.AGENT,
         system="follow the SOP",
         user="delay risk is high",
         tools=tools,
@@ -331,6 +331,7 @@ async def test_the_action_union_goes_out_as_one_flat_object_picked_by_its_type()
         "schedule_timer",
         "defer_obligation",
         "close_obligation",
+        "open_obligation",
     ]
     assert "schedule_timer: kind, due_in_minutes" in properties["type"]["description"]
     assert properties["due_in_minutes"]["type"] == "integer"
@@ -571,7 +572,7 @@ async def test_usage_sums_every_round_and_is_priced() -> None:
     response = await model.generate(decide(sop_tool([])), Plan)
 
     usage = response.usage
-    assert (usage.role, usage.model) == ("decide", "acme/small")
+    assert (usage.role, usage.model) == ("agent", "acme/small")
     assert (usage.input_tokens, usage.output_tokens, usage.cached_tokens) == (2_200, 200, 1_400)
     assert usage.cost_usd == pytest.approx(
         PRICING.cost_usd(input_tokens=2_200, output_tokens=200, cached_tokens=1_400)
@@ -623,7 +624,7 @@ async def test_a_provider_error_becomes_an_llm_error_naming_the_model() -> None:
 
 @pytest.mark.unit
 async def test_an_answer_that_does_not_match_the_schema_is_an_llm_error() -> None:
-    model, _ = make_model(answers("GateDecision", {"intent": "dance", "act": True, "reason": "x"}))
+    model, _ = make_model(answers("GateDecision", {"intent": 42, "act": True, "reason": "x"}))
 
     with pytest.raises(LlmError, match=r"acme/small.*GateDecision.*intent"):
         await model.generate(GATE, GateDecision)
@@ -763,7 +764,7 @@ def test_models_for_role_builds_one_model_per_entry_of_the_chain() -> None:
         built.append(role.model)
         return FakeChat()
 
-    models = models_for_role(config, ModelRole.DECIDE, SecretStr(KEY), chat_factory=factory)
+    models = models_for_role(config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory)
 
     assert [m.model_id for m in models] == ["acme/small", "acme/tiny"]
     assert built == ["acme/small", "acme/tiny"]

@@ -114,7 +114,7 @@ def test_key_ignores_the_timeout_and_the_tool_implementation() -> None:
 @pytest.mark.parametrize(
     "change",
     [
-        {"role": ModelRole.DECIDE},
+        {"role": ModelRole.AGENT},
         {"system": "You classify driver messages. Be brief."},
         {"user": "Driver: ok thanks!"},
         {"max_tool_rounds": 2},
@@ -296,7 +296,7 @@ def _doctor(document: dict[str, Any], field: str, value: Any) -> Any:
         ("<root>", ["not", "an", "object"], "not a JSON object"),
         ("version", 99, "format version 99"),
         ("key", "0" * 64, "holds key"),
-        ("parsed", {"intent": "not_an_intent", "act": False, "reason": "x"}, "parsed output"),
+        ("parsed", {"intent": 42, "act": False, "reason": "x"}, "parsed output"),
         ("usage", {"role": "gate"}, "bad usage"),
         ("transcript", "not a list", "transcript"),
         ("transcript", ["not an object"], "transcript"),

@@ -54,7 +54,7 @@ def test_the_gate_and_decide_stay_on_cheap_models() -> None:
     """The user's rule: cheap, light models first. Under US$ 1 per 1M output tokens."""
     config = load_models_config(SHIPPED)
 
-    for role in (ModelRole.GATE, ModelRole.DECIDE):
+    for role in (ModelRole.GATE, ModelRole.AGENT):
         assert config.pricing_for(config.role(role).model).output < 1.0
 
 
@@ -82,7 +82,7 @@ def test_a_missing_role_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_a_model_without_pricing_is_an_error(tmp_path: Path) -> None:
     raw = _config()
-    raw["roles"]["decide"]["fallbacks"] = ["acme/unpriced"]
+    raw["roles"]["agent"]["fallbacks"] = ["acme/unpriced"]
 
     with pytest.raises(ValueError, match="acme/unpriced"):
         load_models_config(_write(tmp_path, raw))

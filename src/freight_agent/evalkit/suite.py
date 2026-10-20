@@ -39,8 +39,8 @@ from freight_agent.evalkit.runner import (
 from freight_agent.evalkit.spec import Scenario, load_scenario
 from freight_agent.ports.clock import Clock
 from freight_agent.ports.gateways import Gateways
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, SchemaT
-from freight_agent.ports.sop import SopRepository
 from freight_agent.settings import LlmMode
 
 REGRESSION = "regression"
@@ -344,7 +344,7 @@ class SuiteRunner:
         self,
         *,
         evals_dir: Path,
-        sop: SopRepository,
+        knowledge: SopIndex,
         mode: LlmMode,
         model_factory: ModelFactory | None = None,
         budget: Budget | None = None,
@@ -362,15 +362,15 @@ class SuiteRunner:
         trial_model = TrialModel(model_factory) if model_factory is not None else None
 
         def factory(
-            clock: Clock, model: LanguageModel, gateways: Gateways, sop: SopRepository
+            clock: Clock, model: LanguageModel, gateways: Gateways, knowledge: SopIndex
         ) -> RuntimeLike:
             if trial_model is not None:
                 trial_model.start(clock)
-            return inner(clock, model, gateways, sop)
+            return inner(clock, model, gateways, knowledge)
 
         self._runner = ScenarioRunner(
             evals_dir=evals_dir,
-            sop=sop,
+            knowledge=knowledge,
             mode=_RUNNER_MODES[mode],
             model=trial_model,
             runtime_factory=factory,

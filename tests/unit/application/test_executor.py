@@ -194,7 +194,7 @@ async def test_a1_first_eta_request_opens_the_obligation_and_schedules_the_follo
     result = await _a1(world)
 
     obligation = await world.obligation()
-    assert obligation.kind is ETA
+    assert obligation.kind == ETA
     assert obligation.status is Status.OPEN
     assert obligation.attempts == 1
     assert obligation.opened_at == at(7, 1)

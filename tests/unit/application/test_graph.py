@@ -66,7 +66,7 @@ def context(load: Load, event: Event) -> RunContext:
 
 
 def graph(model: ScriptedModel) -> RunGraph:
-    return build_graph(GraphDeps(gate=Gate(model), decider=Decider(model), sop=FakeSop()))
+    return build_graph(GraphDeps(gate=Gate(model), decider=Decider(model), knowledge=FakeSop()))
 
 
 async def run(model: ScriptedModel, ctx: RunContext) -> list[RunState]:
@@ -106,7 +106,7 @@ async def test_a_gate_that_does_not_act_ends_as_a_noop(load: Load) -> None:
     final = states[-1]
     assert len(states) == 3
     assert final.verdict is not None and final.verdict.status is RunStatus.NOOP
-    assert final.gate_decision is not None and final.gate_decision.intent is Intent.ACKNOWLEDGEMENT
+    assert final.gate_decision is not None and final.gate_decision.intent == Intent.ACKNOWLEDGEMENT
     assert [u.role for u in final.usage] == ["gate"]
     assert final.sop is None
 
@@ -136,7 +136,7 @@ async def test_the_full_path_ends_with_the_approved_actions(load: Load) -> None:
     assert final.verdict is not None and final.verdict.status is RunStatus.ACTED
     assert final.verdict.actions == (ASK_ETA, FOLLOW_UP_IN_30)
     assert final.gate is not None and final.gate.usage is None  # intent from code
-    assert [u.role for u in final.usage] == ["decide"]
+    assert [u.role for u in final.usage] == ["agent"]
     assert final.violations == ()
     assert len(final.visible_sections) == 9  # every merged section, for read_sop_section
     assert "delay_risk_high" in final.section_ids

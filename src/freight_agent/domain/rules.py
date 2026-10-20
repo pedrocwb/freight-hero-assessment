@@ -16,8 +16,8 @@ from freight_agent.domain.actions import (
     Action,
     CloseObligation,
     DeferObligation,
+    OpenObligation,
     PostBrokerSlack,
-    Purpose,
     ScheduleTimer,
     SendEmail,
     SendSms,
@@ -139,31 +139,38 @@ class _LedgerView:
     deferrals_used: int
 
 
+def _requested_kind(action: Action) -> str | None:
+    """The obligation an SMS asks for: the executor opens it with this SMS, or records one
+    more attempt (`purpose: eta_request` means `requests: eta_request`)."""
+    return action.requests if isinstance(action, SendSms) else None
+
+
 def _is_eta_request(action: Action) -> bool:
-    """The executor opens the ETA obligation with this SMS, or records one more attempt."""
-    return isinstance(action, SendSms) and action.purpose is Purpose.ETA_REQUEST
+    return _requested_kind(action) == ObligationKind.ETA_REQUEST
 
 
-def _open_in_ledger(kind: ObligationKind, ctx: ValidationContext) -> bool:
-    return any(o.kind is kind for o in ctx.open_obligations)
+def _open_in_ledger(kind: str, ctx: ValidationContext) -> bool:
+    return any(o.kind == kind for o in ctx.open_obligations)
 
 
 def _projected_obligation(
-    kind: ObligationKind, ctx: ValidationContext, approved: Sequence[Action]
+    kind: str, ctx: ValidationContext, approved: Sequence[Action]
 ) -> _LedgerView | None:
     """The open obligation of `kind` once the approved actions have run; None if there is none."""
-    current = next((o for o in ctx.open_obligations if o.kind is kind), None)
+    current = next((o for o in ctx.open_obligations if o.kind == kind), None)
     view = None if current is None else _LedgerView(current.attempts, current.deferrals_used)
     for action in approved:
-        if kind is ObligationKind.ETA_REQUEST and _is_eta_request(action):
+        if _requested_kind(action) == kind:
             view = (
                 _LedgerView(attempts=1, deferrals_used=0)
                 if view is None
                 else replace(view, attempts=view.attempts + 1)
             )
-        elif isinstance(action, DeferObligation) and action.kind is kind and view is not None:
+        elif isinstance(action, OpenObligation) and action.kind == kind and view is None:
+            view = _LedgerView(attempts=0, deferrals_used=0)
+        elif isinstance(action, DeferObligation) and action.kind == kind and view is not None:
             view = replace(view, deferrals_used=view.deferrals_used + 1)
-        elif isinstance(action, CloseObligation) and action.kind is kind:
+        elif isinstance(action, CloseObligation) and action.kind == kind:
             view = None
     return view
 
@@ -221,7 +228,8 @@ class DeferralWithinPolicy(_BaseRule):
 
 
 class EtaAttemptCap(_BaseRule):
-    """Stops chasing the driver for an ETA after `max_eta_attempts` requests."""
+    """Stops chasing the driver for an ETA after the cap of `eta_request` requests
+    (`ValidationConfig.attempt_cap`)."""
 
     name = "eta_attempt_cap"
 
@@ -231,8 +239,8 @@ class EtaAttemptCap(_BaseRule):
         if not _is_eta_request(action):
             return None
         view = _projected_obligation(ObligationKind.ETA_REQUEST, ctx, approved)
-        cap = ctx.config.max_eta_attempts
-        if view is None or view.attempts < cap:
+        cap = ctx.config.attempt_cap(ObligationKind.ETA_REQUEST)
+        if view is None or cap is None or view.attempts < cap:
             return None
         return self._violation(
             index, f"the ETA was already requested {view.attempts} times (cap {cap})"

@@ -36,7 +36,7 @@ from freight_agent.application.graph.nodes import (
 from freight_agent.application.graph.state import RunState
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import Rule, ValidationConfig
-from freight_agent.ports.sop import SopRepository
+from freight_agent.ports.knowledge import SopIndex
 
 PREFILTER = "prefilter"
 GATE = "gate"
@@ -76,7 +76,7 @@ class _Builder(Protocol):
 class GraphDeps:
     gate: Gate
     decider: Decider
-    sop: SopRepository
+    knowledge: SopIndex
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     rules: Sequence[Rule] = field(default_factory=default_rules)
 
@@ -111,7 +111,7 @@ def build_graph(deps: GraphDeps) -> RunGraph:
     builder = cast(_Builder, StateGraph(RunState))
     builder.add_node(PREFILTER, prefilter_node())
     builder.add_node(GATE, gate_node(deps.gate))
-    builder.add_node(RESOLVE_SOP, resolve_sop_node(deps.sop))
+    builder.add_node(RESOLVE_SOP, resolve_sop_node(deps.knowledge))
     builder.add_node(DECIDE, decide_node(deps.decider))
     builder.add_node(VALIDATE, validate_node(deps.rules, deps.validation))
     builder.add_edge(START, PREFILTER)

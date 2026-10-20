@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.cassette import CassetteModel
-from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.domain.actions import (
     CloseObligation,
     CloseStatus,
@@ -44,7 +44,7 @@ from freight_agent.ports.llm import LanguageModel
 
 ROOT = Path(__file__).resolve().parents[2]
 EVALS = ROOT / "evals"
-SOPS = FileSopRepository(ROOT / "sops")
+SOPS = MemorySopIndex.from_files(ROOT / "sops")
 DRIVER = "drv_20931"
 DISPATCHER = "dsp_4410"
 
@@ -64,7 +64,7 @@ def rescript(
         old = steps[step].script
         script = ScriptedLlm(
             gate=old.gate if gate is None else gate,
-            decide=old.decide if decide is None else decide,
+            agent=old.agent if decide is None else decide,
         )
         steps[step] = steps[step].model_copy(update={"script": script})
         return scenario.model_copy(update={"steps": tuple(steps)})
@@ -80,7 +80,7 @@ async def run_core(mutations: Mapping[str, Mutation]) -> SuiteResult:
     scenarios = discover(EVALS, "core")
     assert set(mutations) <= {s.id for s in scenarios}
     played = [mutations.get(s.id, lambda s: s)(s) for s in scenarios]
-    runner = SuiteRunner(evals_dir=EVALS, sop=SOPS, mode="scripted")
+    runner = SuiteRunner(evals_dir=EVALS, knowledge=SOPS, mode="scripted")
     return await runner.run(played, suite="core", metadata=metadata())
 
 
@@ -208,7 +208,7 @@ async def test_a_missing_cassette_in_replay_fails_the_run_with_a_clear_message(
     def replay(clock: Clock) -> LanguageModel:
         return CassetteModel(tmp_path / "cassettes", "test/never-recorded", "replay")
 
-    runner = SuiteRunner(evals_dir=EVALS, sop=SOPS, mode="replay", model_factory=replay)
+    runner = SuiteRunner(evals_dir=EVALS, knowledge=SOPS, mode="replay", model_factory=replay)
     scenarios = select(discover(EVALS, "core"), ids=["b_ack_with_nothing_open"])
 
     result = await runner.run(scenarios, suite="core", metadata=metadata())

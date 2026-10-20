@@ -1,6 +1,7 @@
 """The runtime's exits other than acting: escalations, failures, retries and tracing."""
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 
 import pytest
@@ -11,10 +12,10 @@ from freight_agent.application.runtime import RuntimeConfig
 from freight_agent.domain.actions import Purpose, SendEmail, SendSms
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.intents import Intent
-from freight_agent.domain.load import Channel, DelayRisk, Load
+from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
-from freight_agent.domain.sop import MergeMode, SopSection
+from freight_agent.domain.sop import MergeMode, ResolvedSop
 from freight_agent.domain.validation import Severity
 from freight_agent.ports.llm import LlmError, LlmRequest, LlmResponse, ModelRole, SchemaT
 from tests.unit.application.test_runtime_harness import (
@@ -105,7 +106,7 @@ async def test_a_decide_failure_escalates_once_and_completes_the_event(load: Loa
 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert runs[0].error == "llm_error: provider returned 503"
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.DELAY_RISK_HIGH
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.DELAY_RISK_HIGH
     assert "delay_risk_high" in runs[0].sop_section_ids
     [task] = world.sent("hero_task")
     assert task.payload["urgent"] is True
@@ -136,7 +137,7 @@ class SlowModel:
         self.inner = ScriptedModel()
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
-        if request.role is ModelRole.DECIDE:
+        if request.role is ModelRole.AGENT:
             await asyncio.sleep(10)
         return await self.inner.generate(request, schema)
 
@@ -151,7 +152,7 @@ async def test_a_run_over_its_deadline_escalates_with_what_it_had(load: Load) ->
 
     assert [r.status for r in runs] == [RunStatus.ESCALATED]
     assert runs[0].error == "deadline: the run took more than 0.05 s"
-    assert runs[0].gate is not None and runs[0].gate.intent is Intent.QUESTION
+    assert runs[0].gate is not None and runs[0].gate.intent == Intent.QUESTION
     assert [u.role for u in runs[0].usage] == ["gate"]
     [task] = world.sent("hero_task")
     assert task.payload["urgent"] is True
@@ -290,17 +291,19 @@ class FlakySop(FakeSop):
         self.failures = failures
         self.error = error or RuntimeError("SOP store unreachable")
 
-    async def sections_for_client(self, client_id: str) -> list[SopSection]:
+    async def by_applies(
+        self, broker_id: str, load_types: Sequence[str], intent: str, stage: Stage
+    ) -> ResolvedSop:
         if self.failures > 0:
             self.failures -= 1
             raise self.error
-        return await super().sections_for_client(client_id)
+        return await super().by_applies(broker_id, load_types, intent, stage)
 
 
 async def test_an_unexpected_error_is_retried_and_a_success_leaves_no_failed_run(
     load: Load,
 ) -> None:
-    world = await World(load, sop=FlakySop(failures=1)).start()
+    world = await World(load, knowledge=FlakySop(failures=1)).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
     world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
 
@@ -315,7 +318,7 @@ async def test_an_unexpected_error_is_retried_and_a_success_leaves_no_failed_run
 
 
 async def test_an_event_that_keeps_failing_becomes_a_dead_letter(load: Load) -> None:
-    world = await World(load, sop=FlakySop(failures=10)).start()
+    world = await World(load, knowledge=FlakySop(failures=10)).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
 
     runs = await world.tick(at(7, 1))
@@ -332,7 +335,7 @@ async def test_an_event_that_keeps_failing_becomes_a_dead_letter(load: Load) -> 
 
 async def test_reraise_unexpected_releases_the_event_then_raises(load: Load) -> None:
     config = RuntimeConfig(reraise_unexpected=True)
-    world = await World(load, sop=FlakySop(failures=1), config=config).start()
+    world = await World(load, knowledge=FlakySop(failures=1), config=config).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
     world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
 
@@ -348,7 +351,7 @@ async def test_reraise_unexpected_releases_the_event_then_raises(load: Load) -> 
 async def test_reraise_unexpected_keeps_domain_errors_as_failed_runs(load: Load) -> None:
     broken = (*SECTIONS, section("orphan", "More.", client_id="northline", mode=MergeMode.EXTEND))
     config = RuntimeConfig(reraise_unexpected=True)
-    world = await World(load, sop=FakeSop(broken), config=config).start()
+    world = await World(load, knowledge=FakeSop(broken), config=config).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
 
     runs = await world.tick(at(7, 1))
@@ -434,7 +437,7 @@ class HangingModel:
         self.entered = asyncio.Event()
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
-        if request.role is ModelRole.DECIDE and self.times > 0:
+        if request.role is ModelRole.AGENT and self.times > 0:
             self.times -= 1
             self.entered.set()
             await asyncio.Event().wait()  # until cancelled
@@ -481,7 +484,7 @@ async def test_an_event_whose_release_failed_runs_again_after_the_lease(
     """The run fails, and so does the release of its event (the store went away): the
     error reaches the worker and the event stays in flight until its lease runs out."""
     config = RuntimeConfig(claim_lease_s=60)
-    world = await World(load, sop=FlakySop(failures=1), config=config).start()
+    world = await World(load, knowledge=FlakySop(failures=1), config=config).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
 
     async def unreachable(self: MemoryEventQueue, event_id: str, error: str) -> None:
@@ -557,7 +560,7 @@ async def test_the_trace_url_is_saved_with_a_stored_run(load: Load) -> None:
 
 async def test_a_failed_attempt_is_traced_but_not_stored(load: Load) -> None:
     tracer = UrlTracer()
-    world = await World(load, sop=FlakySop(failures=1), tracer=tracer).start()
+    world = await World(load, knowledge=FlakySop(failures=1), tracer=tracer).start()
     await world.ping(at(7, 0), DelayRisk.HIGH, "p1")
     world.model.push(DECIDE, plan(ASK_ETA, FOLLOW_UP_IN_30))
 

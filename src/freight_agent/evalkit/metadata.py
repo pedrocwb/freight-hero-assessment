@@ -26,7 +26,6 @@ from pydantic import BaseModel, ConfigDict
 from freight_agent.adapters.llm.models_config import load_models_config
 from freight_agent.application import prompts, tools
 from freight_agent.application.runtime import RuntimeConfig
-from freight_agent.ports.sop import SopRepository
 
 # What `evalkit.runner.build_runtime` runs the agent with. Hashed, not imported from the
 # runner, because the runner builds it inline.
@@ -63,7 +62,7 @@ def collect_metadata(
     created_at: datetime,
     mode: str,
     model_set: str,
-    sop: SopRepository,
+    sop_version: str | None,
     models_config: Path,
     repo: Path,
     settings: Mapping[str, str] | None = None,
@@ -78,7 +77,7 @@ def collect_metadata(
         model_set=model_set,
         git_sha=sha,
         git_dirty=dirty,
-        sop_version=_sop_version(sop),
+        sop_version=sop_version,
         models=models,
         models_config_sha256=models_sha,
         prompts_sha256=prompts_sha256(),
@@ -136,13 +135,6 @@ def _plain(config: RuntimeConfig) -> dict[str, Any]:
         value = getattr(config, item.name)
         plain[item.name] = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
     return plain
-
-
-def _sop_version(sop: SopRepository) -> str | None:
-    try:
-        return sop.version()
-    except Exception:  # a missing folder: the run reports it, the metadata says unknown
-        return None
 
 
 def _models(path: Path) -> tuple[dict[str, list[str]], str | None]:

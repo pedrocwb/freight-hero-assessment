@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from freight_agent.domain.load import Load
-from freight_agent.domain.obligations import Obligation, ObligationKind
+from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
@@ -105,17 +105,17 @@ def _check_forbid(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]
 
 
 def _check_obligations(
-    expected: Mapping[ObligationKind, ObligationExpectation | None],
+    expected: Mapping[str, ObligationExpectation | None],
     obligations: Sequence[Obligation],
 ) -> _Findings:
     for kind, want in expected.items():
-        check = f"expect.obligations.{kind.value}"
+        check = f"expect.obligations.{kind}"
         latest = _latest(obligations, kind)
         if want is None:
             if latest is not None:
-                yield check, f"expected no {kind.value} obligation, found {_describe(latest)}"
+                yield check, f"expected no {kind} obligation, found {_describe(latest)}"
         elif latest is None:
-            yield check, f"expected an {kind.value} obligation, found none"
+            yield check, f"expected an {kind} obligation, found none"
         else:
             yield from _compare_obligation(check, want, latest)
 
@@ -309,8 +309,8 @@ def _text(item: OutboxItem) -> str:
     return "\n".join(v for v in values if isinstance(v, str))
 
 
-def _latest(obligations: Sequence[Obligation], kind: ObligationKind) -> Obligation | None:
-    of_kind = [o for o in obligations if o.kind is kind]
+def _latest(obligations: Sequence[Obligation], kind: str) -> Obligation | None:
+    of_kind = [o for o in obligations if o.kind == kind]
     return max(of_kind, key=lambda o: (o.opened_at, o.obligation_id), default=None)
 
 
