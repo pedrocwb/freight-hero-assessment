@@ -84,12 +84,8 @@ jobs:
       # A changed prompt, SOP, scenario or model misses its recording and fails here:
       # re-record each suite with `uv run agent eval run --suite S --mode record
       # --cost-cap-usd 0.20`.
-      # Wave 3 renamed the decide role to agent and changed the prompts and schemas, so
-      # every recording misses (CassetteMissing) until the wave 3 re-record. Non-blocking
-      # until then: the orchestrator removes `continue-on-error` in the commit that adds
-      # the new cassettes (card W3-BAKE).
+      # Scenarios tagged scripted_only (guardrail controls) are skipped here.
       - name: Evals, replay mode
-        continue-on-error: true
         run: make eval-replay
 
       # pytest exits with 5 when the selection collects no test.

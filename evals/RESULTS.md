@@ -273,6 +273,9 @@ single-plan decide call; the gate's call averaged 892. DeepInfra reported no cac
 for gpt-oss, so the margin comes from its input price ($0.037 per million tokens), not
 from caching.
 
-Spend of this section: $0.958 (round 1 $0.402, round 2 $0.556) plus the smoke run of
-load 481207 ($0.003) and the cassette recording below. The `extract` role stayed
+Spend of this section: $0.958 (round 1 $0.402, round 2 $0.556), plus the smoke run of
+load 481207 ($0.003) and the recording of the cassettes ($0.042: core 22/22, agent t2,
+docs 3/3, every scenario passing while it was recorded): **$1.003 in total**, against a
+cap of $3. The 45 wave 2 cassettes, no longer read by any prompt, were removed; replay
+runs on the 63 new ones and blocks CI again. The `extract` role stayed
 `google/gemini-2.5-flash` (the docs suite's extractions passed in both rounds).
