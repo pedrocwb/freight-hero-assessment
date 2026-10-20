@@ -243,6 +243,28 @@ def test_live_mode_without_the_key_exits_2_before_any_trial(env: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("mode", ["scripted", "replay"])
+def test_langsmith_experiments_are_live_only(env: Path, mode: str) -> None:
+    result = agent("eval", "run", "--mode", mode, "--langsmith", "--out", str(env / "results"))
+
+    assert result.exit_code == 2
+    assert "--langsmith records live runs only" in result.stderr
+    assert not (env / "results").exists()
+
+
+@pytest.mark.unit
+def test_langsmith_without_its_key_exits_2_before_any_trial(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    result = agent("eval", "run", "--mode", "live", "--langsmith", "--out", str(env / "results"))
+
+    assert result.exit_code == 2
+    assert "--langsmith needs LANGSMITH_API_KEY" in result.stderr
+    assert not (env / "results").exists()
+
+
+@pytest.mark.unit
 def test_replay_without_cassettes_exits_2_and_says_how_to_record(env: Path) -> None:
     out = env / "results"
 

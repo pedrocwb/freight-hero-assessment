@@ -33,6 +33,7 @@ from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
 from freight_agent.domain.runs import RunRecord, Usage
 from freight_agent.evalkit.counting import CountingModel
+from freight_agent.evalkit.observe import NullObserver, Observer
 from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.ports.clock import Clock
@@ -116,6 +117,7 @@ class ScenarioRunner:
         mode: Mode,
         model: LanguageModel | None = None,
         runtime_factory: RuntimeFactory | None = None,
+        observer: Observer | None = None,
     ) -> None:
         if mode == "scripted" and model is not None:
             raise ValueError("scripted mode feeds its own ScriptedModel; do not pass a model")
@@ -125,6 +127,7 @@ class ScenarioRunner:
         self._sop = sop
         self._model = model
         self._factory = runtime_factory or build_runtime
+        self._observer: Observer = observer or NullObserver()
 
     async def run(self, scenario: Scenario, trial: int = 1) -> RunOutcome:
         try:
@@ -137,7 +140,7 @@ class ScenarioRunner:
         model = CountingModel(inner)
         clock = VirtualClock(_local(scenario.date, scenario.start, tz))
         runtime = self._factory(clock, model, RecordingGateways().as_gateways(), self._sop)
-        play = _Trial(scenario, tz, load.load_id, clock, runtime, model, script)
+        play = _Trial(scenario, tz, load.load_id, clock, runtime, model, script, self._observer)
         error = await play.run(load)
         return RunOutcome(
             scenario_id=scenario.id,
@@ -184,6 +187,7 @@ class _Trial:
         runtime: RuntimeLike,
         model: CountingModel,
         script: ScriptedModel | None,
+        observer: Observer,
     ) -> None:
         self._scenario = scenario
         self._load_id = load_id
@@ -191,6 +195,7 @@ class _Trial:
         self._runtime = runtime
         self._model = model
         self._script = script
+        self._observer = observer
         self._times = [_local(scenario.date, step.at, tz) for step in scenario.steps]
         self.observations: list[StepObservation] = []
         self.failures: list[Failure] = []
@@ -209,17 +214,17 @@ class _Trial:
 
     async def _step(self, index: int, step: Step) -> None:
         at = self._times[index]
-        before = await self._runtime.snapshot(self._load_id)
-        calls_before = self._model.calls
-        # Pushed before the clock moves: timers that fire on the way consume decide plans.
-        self._push_script(step)
-        await self._advance_to(at)
-        if await self._inject(index, step, at):
-            self._clock.set(self._settle_time(index, at))
-            await self._runtime.tick()
-        after = await self._runtime.snapshot(self._load_id)
-        self.observations.append(
-            StepObservation(
+        async with self._observer.step(self._scenario, index, step, at) as span:
+            before = await self._runtime.snapshot(self._load_id)
+            calls_before = self._model.calls
+            # Pushed before the clock moves: timers that fire on the way consume decide plans.
+            self._push_script(step)
+            await self._advance_to(at)
+            if await self._inject(index, step, at):
+                self._clock.set(self._settle_time(index, at))
+                await self._runtime.tick()
+            after = await self._runtime.snapshot(self._load_id)
+            observation = StepObservation(
                 step_index=index,
                 at=at,
                 outbox=_created(before.outbox, after.outbox, key=lambda item: item.outbox_id),
@@ -227,7 +232,8 @@ class _Trial:
                 llm_calls=self._model.calls - calls_before,
                 snapshot=after,
             )
-        )
+            self.observations.append(observation)
+            span.observed(observation)
         self.failures.extend(self._settle_script(index))
 
     async def _advance_to(self, at: datetime) -> None:
