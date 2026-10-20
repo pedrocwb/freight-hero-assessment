@@ -1,7 +1,6 @@
 """Brokers as data: the catalog a broker's runs follow, versioned for canary rollouts.
 
-Owner: card W3-BRK (catalog validation, the methods); C0 wrote the shape and a working
-`standard_broker()`.
+Owner: card W3-BRK.
 
 A broker is onboarded without code: its intents (what an event can mean), its
 obligation kinds (what it waits for, how often it follows up, who gets the case when
@@ -10,16 +9,27 @@ and the limits of its runs. Every broker starts as a copy of the standard catalo
 (`new_broker`), which carries today's 12 intents, the `eta_request` obligation and the
 four document types of `docs/answers.md` 1.2.
 
-Each save of a broker bumps `config_version`; the repository keeps every version, so a
-canary can send a share of the loads to the new version and the rest to the previous
-one (`choose_version`, sticky per load id).
+A catalog is checked whenever a `Broker` is validated (`catalog_problems`): ids are
+snake_case and unique, the intents code emits are there with the behaviour code relies
+on, requirements name types and kinds of the catalog, and the limits are sane. So a
+broker posted to the API, read back from the database or loaded from an export is
+usable by every run, or refused with every problem named. `model_copy` skips pydantic
+validation, so a change goes through `Broker.revised`.
+
+Each change of a broker's configuration is saved as a new `config_version`; the
+repository keeps every version, so a canary can send a share of the loads to the new
+version and the rest to the previous one (`choose_version`, sticky per load id).
 """
 
 import hashlib
+import math
+import re
+from collections import Counter
+from collections.abc import Iterable, Sequence
 from functools import cache
-from typing import Literal
+from typing import Any, Final, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.intents import Intent
@@ -35,6 +45,40 @@ FieldCheckKind = Literal[
 
 STANDARD_BROKER_ID = "standard"
 FOLLOW_UP_SUFFIX = "_follow_up_due"
+
+# The intents code gives an event, whatever the broker: a risk change, the ETA request's
+# follow-up timer, a processed document (`application/gate.py`). Each obligation's
+# follow-up intent is a system intent too, emitted by its timer.
+SYSTEM_INTENTS_FROM_CODE: Final[tuple[str, ...]] = (
+    Intent.DELAY_RISK_HIGH,
+    Intent.DELAY_RISK_LOW,
+    Intent.ETA_FOLLOW_UP_DUE,
+    Intent.DOCUMENT_PROCESSED,
+)
+# Message intents code gives too: a photo with no text is a document, and the gate
+# corrects an answer the catalog lacks to `other`.
+MESSAGE_INTENTS_FROM_CODE: Final[tuple[str, ...]] = (Intent.DOCUMENT, Intent.OTHER)
+
+# Limits: a typo must not let one run loop, spend or text without bound.
+MAX_STEPS: Final = 20  # tool rounds per run
+MAX_COST_USD: Final = 1.0  # model spend per run
+MAX_REJECTIONS: Final = 20
+MAX_ATTEMPTS: Final = 10  # requests per obligation
+MAX_WAIT_MINUTES: Final = 7 * 24 * 60  # a follow-up or a document deadline: one week
+MAX_RATE_WINDOW_MINUTES: Final = 24 * 60
+
+_SNAKE_CASE: Final = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+_BROKER_ID: Final = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_MAX_ID_LENGTH: Final = 64
+# The field kinds each check can read; a check left out reads any kind.
+_CHECK_KINDS: Final[dict[str, tuple[FieldKind, ...]]] = {
+    "signature": ("bool",),
+    "date_in_window": ("date", "datetime"),
+    "po_number": ("number", "text"),
+    "mc_number": ("number", "text"),
+    "seal_number": ("number", "text"),
+    "stop_name": ("text",),
+}
 
 
 class IntentDef(DomainModel):
@@ -128,6 +172,12 @@ class Rollout(DomainModel):
 
 
 class Broker(DomainModel):
+    """A broker's whole configuration at one `config_version`.
+
+    Validating one runs `catalog_problems` and refuses the broker with every problem
+    found; `model_copy` does not validate, so change a broker with `revised`.
+    """
+
     broker_id: str
     name: str
     triage: bool = True  # False: no gate model call; every message goes to the agent
@@ -139,6 +189,17 @@ class Broker(DomainModel):
     sop_version: str | None = None  # the published SOP version this config runs with
     config_version: int = 1
     rollout: Rollout = Rollout()
+
+    @model_validator(mode="after")
+    def _check_catalog(self) -> Self:
+        problems = catalog_problems(self)
+        if problems:
+            raise ValueError(f"invalid broker {self.broker_id!r}: " + "; ".join(problems))
+        return self
+
+    def revised(self, **changes: Any) -> "Broker":
+        """A copy with `changes` (field values, models or their dicts), validated."""
+        return Broker.model_validate({**self.model_dump(), **changes})
 
     def intent(self, intent_id: str) -> IntentDef | None:
         return next((i for i in self.intents if i.intent_id == intent_id), None)
@@ -159,9 +220,7 @@ class Broker(DomainModel):
     def follow_up_intent(self, kind: str) -> str | None:
         """What a due follow-up timer of an obligation of `kind` means; None: unknown kind."""
         obligation = self.obligation(kind)
-        if obligation is None:
-            return None
-        return obligation.follow_up_intent or f"{kind}{FOLLOW_UP_SUFFIX}"
+        return None if obligation is None else _follow_up_of(obligation)
 
     def obligation_for_follow_up(self, intent: str) -> ObligationDef | None:
         """The obligation whose follow-up timer produces `intent`."""
@@ -187,7 +246,285 @@ class Broker(DomainModel):
 
 def new_broker(broker_id: str, name: str) -> Broker:
     """A new broker: a copy of the standard catalog under its own id, version 1."""
-    return standard_broker().model_copy(update={"broker_id": broker_id, "name": name})
+    return standard_broker().revised(broker_id=broker_id, name=name)
+
+
+def with_follow_up_intents(
+    intents: Sequence[IntentDef], obligations: Sequence[ObligationDef]
+) -> tuple[IntentDef, ...]:
+    """`intents`, plus a system intent for each obligation whose follow-up intent is
+    missing (its timer emits it). Intents already there are kept as they are."""
+    found = list(intents)
+    known = {i.intent_id for i in found}
+    for obligation in obligations:
+        intent_id = _follow_up_of(obligation)
+        if intent_id in known:
+            continue
+        known.add(intent_id)
+        found.append(
+            IntentDef(
+                intent_id=intent_id,
+                title=f"{obligation.title} follow-up due",
+                description=(
+                    f"The follow-up timer of an open {obligation.kind} obligation is due: its"
+                    " wait ended without an answer."
+                ),
+                system=True,
+            )
+        )
+    return tuple(found)
+
+
+# --- catalog validation -------------------------------------------------------------------
+
+
+def catalog_problems(broker: Broker) -> tuple[str, ...]:
+    """What keeps `broker` from working with the code that runs it; empty: nothing.
+
+    `Broker` validation runs it, so a broker that exists was checked. Call it directly
+    to lint a catalog built without validation (`model_copy`), such as a draft.
+    """
+    return (
+        *_identity_problems(broker),
+        *_intent_problems(broker),
+        *_obligation_problems(broker),
+        *_document_problems(broker),
+        *_limit_problems(broker.limits),
+    )
+
+
+def _follow_up_of(obligation: ObligationDef) -> str:
+    return obligation.follow_up_intent or f"{obligation.kind}{FOLLOW_UP_SUFFIX}"
+
+
+def _blank(text: str) -> bool:
+    return not text.strip()
+
+
+def _id_problems(label: str, ids: Iterable[str]) -> list[str]:
+    """Each id must be snake_case and appear once."""
+    counts = Counter(ids)
+    problems = [
+        f"{label} {value!r} must be snake_case (a-z, 0-9 and single underscores, starting"
+        f" with a letter, at most {_MAX_ID_LENGTH} characters)"
+        for value in counts
+        if len(value) > _MAX_ID_LENGTH or not _SNAKE_CASE.fullmatch(value)
+    ]
+    problems += [f"{label} {value} appears {n} times" for value, n in counts.items() if n > 1]
+    return problems
+
+
+def _between(name: str, value: float, low: float, high: float) -> list[str]:
+    if math.isfinite(value) and low <= value <= high:
+        return []
+    return [f"{name} must be between {low:g} and {high:g}"]
+
+
+def _identity_problems(broker: Broker) -> list[str]:
+    """The id, the name, and the versions a rollout splits the loads between."""
+    problems: list[str] = []
+    broker_id = broker.broker_id
+    if len(broker_id) > _MAX_ID_LENGTH or not _BROKER_ID.fullmatch(broker_id):
+        problems.append(
+            f"broker id {broker_id!r} must be lowercase letters, digits, - and _, starting"
+            f" with a letter or a digit, at most {_MAX_ID_LENGTH} characters"
+        )
+    if _blank(broker.name):
+        problems.append(f"broker {broker_id} has no name")
+    if broker.config_version < 1:
+        problems.append(f"config_version must be at least 1, not {broker.config_version}")
+    previous = broker.rollout.previous_version
+    if previous is not None and not 1 <= previous < broker.config_version:
+        problems.append(
+            "rollout.previous_version must be an earlier version than"
+            f" {broker.config_version}, not {previous}"
+        )
+    return problems
+
+
+def _intent_problems(broker: Broker) -> list[str]:
+    """Ids, wording, and the intents code emits with the behaviour code relies on: a
+    system event always reaches the agent, and `other` is the gate's last resort."""
+    problems = _id_problems("intent id", (i.intent_id for i in broker.intents))
+    for intent in broker.intents:
+        if _blank(intent.title):
+            problems.append(f"intent {intent.intent_id} has no title")
+        if _blank(intent.description):
+            problems.append(f"intent {intent.intent_id} has no description")
+    for intent_id in SYSTEM_INTENTS_FROM_CODE:
+        found = broker.intent(intent_id)
+        if found is None:
+            problems.append(f"system intent {intent_id} is missing: code emits it")
+        elif not found.system:
+            problems.append(f"intent {intent_id} must be a system intent: code emits it")
+    follow_ups = {_follow_up_of(o) for o in broker.obligations}
+    for intent in broker.system_intents():
+        if not intent.must_act or intent.noop_eligible:
+            problems.append(
+                f"system intent {intent.intent_id} must act (must_act true, noop_eligible"
+                " false): code emits it for the agent to handle"
+            )
+        emitted = intent.intent_id in SYSTEM_INTENTS_FROM_CODE or intent.intent_id in follow_ups
+        if not emitted:
+            problems.append(
+                f"system intent {intent.intent_id}: nothing emits it (no code, no"
+                " obligation's follow-up); remove it or add its obligation"
+            )
+    for intent_id in MESSAGE_INTENTS_FROM_CODE:
+        found = broker.intent(intent_id)
+        if found is None:
+            problems.append(f"intent {intent_id} is missing: the gate gives it from code")
+        elif found.system:
+            problems.append(
+                f"intent {intent_id} must be a message intent: the gate gives it to messages"
+            )
+    other = broker.intent(Intent.OTHER)
+    if other is not None and not other.system:
+        problems += [
+            f"intent other must come last (priority {other.priority}): {i.intent_id} has"
+            f" priority {i.priority}"
+            for i in broker.message_intents()
+            if i.intent_id != Intent.OTHER and i.priority >= other.priority
+        ]
+    return problems
+
+
+def _obligation_problems(broker: Broker) -> list[str]:
+    problems = _id_problems("obligation kind", (o.kind for o in broker.obligations))
+    following: dict[str, list[str]] = {}  # follow-up intent -> the kinds that use it
+    for obligation in broker.obligations:
+        following.setdefault(_follow_up_of(obligation), []).append(obligation.kind)
+    problems += [
+        f"obligations {' and '.join(kinds)} both follow up as {intent_id}"
+        for intent_id, kinds in following.items()
+        if len(kinds) > 1
+    ]
+    for obligation in broker.obligations:
+        kind = obligation.kind
+        if _blank(obligation.title):
+            problems.append(f"obligation {kind} has no title")
+        if _blank(obligation.description):
+            problems.append(f"obligation {kind} has no description")
+        numbers = [
+            *_between("follow_up_minutes", obligation.follow_up_minutes, 1, MAX_WAIT_MINUTES),
+            *_between("max_attempts", obligation.max_attempts, 1, MAX_ATTEMPTS),
+        ]
+        problems += [f"obligation {kind}: {p}" for p in numbers]
+        if not obligation.on_exhausted:
+            problems.append(f"obligation {kind}: on_exhausted names nobody")
+        for target, n in Counter(obligation.on_exhausted).items():
+            if n > 1:
+                problems.append(f"obligation {kind}: on_exhausted names {target} twice")
+        if following[_follow_up_of(obligation)][0] == kind:  # a shared one is reported once
+            problems += _follow_up_problems(broker, obligation)
+    eta = broker.obligation(ObligationKind.ETA_REQUEST)
+    if eta is None:
+        problems.append("obligation eta_request is missing: an SMS asking for an ETA opens it")
+    elif _follow_up_of(eta) != Intent.ETA_FOLLOW_UP_DUE:
+        problems.append(
+            "obligation eta_request must follow up as eta_follow_up_due: the standard SOPs"
+            " follow up on it"
+        )
+    return problems
+
+
+def _follow_up_problems(broker: Broker, obligation: ObligationDef) -> list[str]:
+    """The intent an obligation's timer emits: its own, in the catalog, as a system intent."""
+    kind, intent_id = obligation.kind, _follow_up_of(obligation)
+    if intent_id in SYSTEM_INTENTS_FROM_CODE:
+        if (kind, intent_id) == (ObligationKind.ETA_REQUEST, Intent.ETA_FOLLOW_UP_DUE):
+            return []  # checked with the intents code emits
+        return [
+            f"obligation {kind} cannot follow up as {intent_id}: code emits it for something else"
+        ]
+    found = broker.intent(intent_id)
+    if found is None:
+        return [
+            f"obligation {kind} follows up as {intent_id}, which is not in the catalog: add it"
+            " as a system intent"
+        ]
+    if not found.system:
+        return [
+            f"intent {intent_id} must be a system intent: the follow-up timer of {kind} emits it"
+        ]
+    return []
+
+
+def _document_problems(broker: Broker) -> list[str]:
+    problems = _id_problems("document type id", (d.type_id for d in broker.document_types))
+    for doc in broker.document_types:
+        where = f"document type {doc.type_id}"
+        if _blank(doc.title):
+            problems.append(f"{where} has no title")
+        if _blank(doc.description):
+            problems.append(f"{where} has no description")
+        names = _id_problems("field name", (f.name for f in doc.fields))
+        problems += [f"{where}: {p}" for p in names]
+        for field in doc.fields:
+            if _blank(field.description):
+                problems.append(f"{where}: field {field.name} has no description")
+            kinds = _CHECK_KINDS.get(field.check)
+            if kinds is not None and field.kind not in kinds:
+                problems.append(
+                    f"{where}: field {field.name} has kind {field.kind}, but a {field.check}"
+                    f" check needs {' or '.join(kinds)}"
+                )
+    problems += _requirement_problems(broker)
+    return problems
+
+
+def _requirement_problems(broker: Broker) -> list[str]:
+    problems: list[str] = []
+    types = {d.type_id for d in broker.document_types}
+    kinds = {o.kind for o in broker.obligations}
+    for requirement in broker.documents:
+        where = f"requirement {requirement.type_id} at {requirement.at_stage}"
+        if requirement.type_id not in types:
+            problems.append(f"{where}: unknown document type {requirement.type_id}")
+        opens = requirement.opens_obligation
+        if opens is not None and opens not in kinds:
+            problems.append(f"{where}: unknown obligation kind {opens}")
+        if requirement.within_minutes is not None:
+            if opens is None:
+                problems.append(
+                    f"{where}: within_minutes needs opens_obligation (the timer belongs to the"
+                    " obligation)"
+                )
+            within = _between("within_minutes", requirement.within_minutes, 1, MAX_WAIT_MINUTES)
+            problems += [f"{where}: {p}" for p in within]
+    counts = Counter((r.type_id, r.at_stage) for r in broker.documents)
+    problems += [
+        f"requirement {type_id} at {stage} appears {n} times"
+        for (type_id, stage), n in counts.items()
+        if n > 1
+    ]
+    return problems
+
+
+def _limit_problems(limits: BrokerLimits) -> list[str]:
+    problems = [
+        *_between("limits.max_steps", limits.max_steps, 0, MAX_STEPS),
+        *_between("limits.max_cost_usd", limits.max_cost_usd, 0, MAX_COST_USD),
+        *_between("limits.max_rejections", limits.max_rejections, 0, MAX_REJECTIONS),
+    ]
+    validation = limits.validation
+    if validation.sms_max_per_window < 1:
+        problems.append(
+            "limits.validation.sms_max_per_window must be at least 1, not"
+            f" {validation.sms_max_per_window}"
+        )
+    problems += _between(
+        "limits.validation.sms_window_minutes",
+        validation.sms_window_minutes,
+        1,
+        MAX_RATE_WINDOW_MINUTES,
+    )
+    deferral = validation.deferral
+    if min(deferral.max_minutes, deferral.max_per_obligation, deferral.grace_minutes) < 0:
+        problems.append("limits.validation.deferral values must not be negative")
+    for kind, cap in validation.max_attempts.items():
+        problems += _between(f"limits.validation.max_attempts[{kind}]", cap, 1, MAX_ATTEMPTS)
+    return problems
 
 
 def choose_version(current: Broker, previous: Broker | None, load_id: str) -> Broker:
