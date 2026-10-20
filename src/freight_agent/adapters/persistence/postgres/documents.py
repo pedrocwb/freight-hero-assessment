@@ -21,11 +21,19 @@ _COLUMNS: Final = (
     "document_id, load_id, attachment_id, broker_id, blob_ref, filename, content_type,"
     " status, type_id, confidence, extracted, checks, text, pages, received_at, processed_at"
 )
-_VALUES: Final = ", ".join(f"%({name.strip()})s" for name in _COLUMNS.split(","))
-_UPDATES: Final = ", ".join(
-    f"{name} = EXCLUDED.{name}"
-    for name in (n.strip() for n in _COLUMNS.split(","))
-    if name != "document_id"
+_VALUES: Final = (
+    "%(document_id)s, %(load_id)s, %(attachment_id)s, %(broker_id)s, %(blob_ref)s,"
+    " %(filename)s, %(content_type)s, %(status)s, %(type_id)s, %(confidence)s,"
+    " %(extracted)s, %(checks)s, %(text)s, %(pages)s, %(received_at)s, %(processed_at)s"
+)
+_UPDATES: Final = (
+    "load_id = EXCLUDED.load_id, attachment_id = EXCLUDED.attachment_id,"
+    " broker_id = EXCLUDED.broker_id, blob_ref = EXCLUDED.blob_ref,"
+    " filename = EXCLUDED.filename, content_type = EXCLUDED.content_type,"
+    " status = EXCLUDED.status, type_id = EXCLUDED.type_id,"
+    " confidence = EXCLUDED.confidence, extracted = EXCLUDED.extracted,"
+    " checks = EXCLUDED.checks, text = EXCLUDED.text, pages = EXCLUDED.pages,"
+    " received_at = EXCLUDED.received_at, processed_at = EXCLUDED.processed_at"
 )
 _ORDER: Final = "ORDER BY received_at, id_order(document_id)"
 
