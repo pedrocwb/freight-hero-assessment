@@ -15,7 +15,7 @@ import type {
   TrajectoryStep,
 } from "../api";
 
-export const LOAD_ID = "481207";
+const LOAD_ID = "481207";
 
 export function event(over: Partial<LoadEvent> & Pick<LoadEvent, "event_id" | "type" | "occurred_at">): LoadEvent {
   return {
@@ -30,7 +30,7 @@ export function event(over: Partial<LoadEvent> & Pick<LoadEvent, "event_id" | "t
   };
 }
 
-export function step(tool: string, args: Record<string, unknown>, accepted: boolean | null, result = "ok"): TrajectoryStep {
+function step(tool: string, args: Record<string, unknown>, accepted: boolean | null, result = "ok"): TrajectoryStep {
   return { tool, args, result, accepted, cost_usd: 0.0002 };
 }
 

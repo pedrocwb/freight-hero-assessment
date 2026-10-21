@@ -14,7 +14,7 @@ export function currentStop(load: Load): Stop | undefined {
   return load.stops.find((s) => s.type === wanted) ?? load.stops[load.stops.length - 1];
 }
 
-export function contactsWithRole(load: Load | undefined, role: Role): Contact[] {
+function contactsWithRole(load: Load | undefined, role: Role): Contact[] {
   return load ? load.contacts.filter((c) => c.role === role) : [];
 }
 
@@ -28,7 +28,7 @@ export function contactFor(
   return withRole.find((c) => c.channels.includes(channel)) ?? withRole[0];
 }
 
-export const ROLE_LABEL: Record<string, string> = {
+const ROLE_LABEL: Record<string, string> = {
   driver: "Driver",
   dispatcher: "Dispatcher",
   broker: "Broker",
@@ -40,7 +40,7 @@ export function roleLabel(role: string | null | undefined): string {
   return ROLE_LABEL[role] ?? role.charAt(0).toUpperCase() + role.slice(1);
 }
 
-export const STAGE_LABEL: Record<Stage, string> = {
+const STAGE_LABEL: Record<Stage, string> = {
   dispatched: "Dispatched",
   to_pickup: "To pickup",
   at_pickup: "At pickup",

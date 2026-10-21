@@ -5,7 +5,7 @@ import { useId, useRef, useState, type KeyboardEvent } from "react";
 type Upload = { state: "uploading" | "done" | "failed"; filename: string; message: string };
 
 /** "pod_clean.pdf, 182 KB". */
-export function fileLabel(file: Pick<File, "name" | "size">): string {
+function fileLabel(file: Pick<File, "name" | "size">): string {
   const kb = file.size / 1024;
   const size = kb < 1 ? `${file.size} B` : kb < 1024 ? `${Math.round(kb)} KB` : `${(kb / 1024).toFixed(1)} MB`;
   return `${file.name}, ${size}`;

@@ -25,7 +25,7 @@ import { currentStop } from "../lib/load";
 import { isPlaying, newerRun } from "../lib/scenarios";
 import { useToasts } from "./toasts";
 
-export const DEFAULT_TIMEZONE = "America/Los_Angeles";
+const DEFAULT_TIMEZONE = "America/Los_Angeles";
 
 /** While a scenario plays, its progress is read every second besides the stream's events. */
 const SCENARIO_POLL_MS = 1000;

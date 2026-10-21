@@ -135,7 +135,7 @@ const CHANNEL_OF: Record<OutboxKind, ActionChannel> = {
   stage_update: "other",
 };
 
-export const ACTION_CHANNELS: readonly { channel: ActionChannel; label: string }[] = [
+const ACTION_CHANNELS: readonly { channel: ActionChannel; label: string }[] = [
   { channel: "sms", label: "SMS" },
   { channel: "email", label: "Email" },
   { channel: "broker_slack", label: "Broker Slack" },

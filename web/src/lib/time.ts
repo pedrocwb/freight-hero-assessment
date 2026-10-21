@@ -87,7 +87,7 @@ export function formatDateTime(iso: string | null | undefined, timeZone: string)
 }
 
 /** The local calendar day, for grouping and same-day checks. */
-export function localDayKey(iso: string | null | undefined, timeZone: string): string {
+function localDayKey(iso: string | null | undefined, timeZone: string): string {
   const date = parse(iso);
   if (!date) return "";
   const p = parts(date, timeZone, { year: "numeric", month: "2-digit", day: "2-digit" });
