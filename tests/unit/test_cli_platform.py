@@ -11,6 +11,7 @@ from freight_agent.adapters.persistence.postgres.migrate import MigrationError
 from freight_agent.settings import Settings
 
 runner = CliRunner()
+MODELS_YAML = Path(__file__).resolve().parents[2] / "config" / "models.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -46,19 +47,28 @@ def test_db_migrate_applies_the_migrations_to_the_database_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[str] = []
+    stores: list[tuple[str, int]] = []
 
     def migrate(url: str) -> list[str]:
         seen.append(url)
         return ["0001_load_memory.sql"]
 
+    async def setup_store(url: str, dims: int) -> None:
+        stores.append((url, dims))
+
     monkeypatch.setattr("freight_agent.adapters.persistence.postgres.migrate.migrate", migrate)
+    monkeypatch.setattr("freight_agent.adapters.memory.postgres.setup_store", setup_store)
     monkeypatch.setenv("DATABASE_URL", "postgresql://agent:agent@db:5432/agent")
+    monkeypatch.setenv("MODELS_CONFIG", str(MODELS_YAML))
 
     result = runner.invoke(cli.app, ["db", "migrate"])
 
     assert result.exit_code == 0, result.output
     assert seen == ["postgresql://agent:agent@db:5432/agent"]
+    # Then the facility memory's store, at the width of the memory embeddings model.
+    assert stores == [("postgresql://agent:agent@db:5432/agent", 1536)]
     assert "applied 1 migration(s): 0001_load_memory.sql" in result.output
+    assert "facility memory store is set up (1536-dimension vectors)" in result.output
 
 
 @pytest.mark.unit

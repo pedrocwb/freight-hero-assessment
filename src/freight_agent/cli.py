@@ -329,22 +329,30 @@ app.add_typer(db_app, name="db")
 
 @db_app.command("migrate")
 def db_migrate() -> None:
-    """Apply the pending migrations of migrations/ to DATABASE_URL (environment or .env).
+    """Apply the pending migrations of migrations/ to DATABASE_URL (environment or .env),
+    then set up the facility memory's LangGraph store there (its tables and vector index).
 
     Each file is applied once and recorded in schema_migrations, so a rerun applies only
-    new files. Exit code 2: no DATABASE_URL, an unreachable database or a bad migration.
+    new files; the store's setup keeps its own migration counters and is idempotent too.
+    Exit code 2: no DATABASE_URL, an unreachable database, a bad migration or no models
+    config.
     """
     from psycopg import OperationalError
 
+    from freight_agent.adapters.memory.postgres import setup_store
     from freight_agent.adapters.persistence.postgres.migrate import MigrationError, migrate
+    from freight_agent.bootstrap import BootstrapError, memory_dims
 
     try:
-        url = Settings().require_database_url().get_secret_value()
+        settings = Settings()
+        url = settings.require_database_url().get_secret_value()
         applied = migrate(url)
+        dims = memory_dims(settings)
+        asyncio.run(setup_store(url, dims))
     except MissingSetting as exc:
         typer.echo(f"error: {exc}")
         raise typer.Exit(2) from exc
-    except MigrationError as exc:
+    except (MigrationError, BootstrapError) as exc:
         typer.echo(f"error: {exc}")
         raise typer.Exit(2) from exc
     except OperationalError as exc:  # the message names host and port, never the password
@@ -353,3 +361,4 @@ def db_migrate() -> None:
     typer.echo(
         f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else "")
     )
+    typer.echo(f"the facility memory store is set up ({dims}-dimension vectors)")

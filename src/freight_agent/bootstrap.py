@@ -40,10 +40,13 @@ editing this file:
 Until one exists, the runtime behaves as before wave 3: it reads no document. The runs
 read the SOP files of `SOPS_DIR`, and each client's catalog there.
 
-The facility memory (`build_memory`) is a LangGraph `InMemoryStore` with an embeddings
-index, one per runtime: the `embeddings.memory` model of `config/models.yaml` on
-OpenRouter, or a deterministic offline hash without the key or with
-`MEMORY_EMBEDDINGS=fake`. Its extraction runs on the `memory` role's model and template.
+The facility memory follows `PERSISTENCE` too (`build_platform_memory`): a LangGraph
+`InMemoryStore` with an embeddings index, or LangGraph's `AsyncPostgresStore` with a
+pgvector index in the same database as the load memory, whose tables `agent db migrate`
+creates. The evals and Studio get a fresh in-memory one per play (`build_memory`). It
+embeds with the `embeddings.memory` model of `config/models.yaml` on OpenRouter, or a
+deterministic offline hash without the key or with `MEMORY_EMBEDDINGS=fake`. Its
+extraction runs on the `memory` role's model and template.
 """
 
 import importlib
@@ -75,6 +78,7 @@ from freight_agent.adapters.memory.embeddings import (
     embeddings_dims,
     memory_store,
 )
+from freight_agent.adapters.memory.postgres import LazyPostgresStore, postgres_index
 from freight_agent.adapters.memory.store import StoreFacilityMemory
 from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
@@ -389,13 +393,63 @@ def build_embeddings(settings: Settings) -> Embeddings:
     )
 
 
+# The width of the facility memory's vectors on Postgres when the models file names no
+# `embeddings.memory` model: `openai/text-embedding-3-small`'s.
+DEFAULT_MEMORY_DIMS = 1536
+
+
 def build_memory(
     settings: Settings, *, embeddings: Embeddings | None = None
 ) -> StoreFacilityMemory:
     """The facility memory and its extraction queue, on a fresh in-memory LangGraph store
-    whose index embeds each fact's text."""
+    whose index embeds each fact's text: the world of one eval or Studio play, or of a
+    platform on `PERSISTENCE=memory`."""
     embeddings = build_embeddings(settings) if embeddings is None else embeddings
     return StoreFacilityMemory(memory_store(embeddings, embeddings_dims(embeddings)))
+
+
+def memory_dims(settings: Settings) -> int:
+    """The width of the facility memory's vectors on Postgres: the `embeddings.memory`
+    model's, fixed when `agent db migrate` creates the vector table."""
+    entry = _models_config(settings.models_config).embeddings.get(MEMORY_EMBEDDINGS)
+    return DEFAULT_MEMORY_DIMS if entry is None else entry.dims
+
+
+@dataclass(frozen=True)
+class PlatformMemory:
+    """The platform's facility memory, with what its lifecycle needs: `durable` says
+    whether it outlives the process, `clear` forgets every note and job (a reset of the
+    simulation, with the load memory), `close` belongs in the shutdown."""
+
+    memory: StoreFacilityMemory
+    durable: bool
+    close: Callable[[], Awaitable[None]] = _nothing
+
+    async def clear(self) -> None:
+        await self.memory.clear()
+
+
+def build_platform_memory(
+    settings: Settings, *, embeddings: Embeddings | None = None
+) -> PlatformMemory:
+    """The facility memory `PERSISTENCE` names: in memory (`build_memory`), or LangGraph's
+    Postgres store on `DATABASE_URL` (`MissingSetting` without it), whose pool opens on
+    first use. On Postgres the vectors are `memory_dims` wide, so without the OpenRouter
+    key the offline hash is built at that width too."""
+    if settings.persistence != "postgres":
+        return PlatformMemory(build_memory(settings, embeddings=embeddings), durable=False)
+    url = settings.require_database_url().get_secret_value()
+    dims = memory_dims(settings)
+    embeddings = build_embeddings(settings) if embeddings is None else embeddings
+    if embeddings_dims(embeddings) != dims:
+        if not isinstance(embeddings, HashEmbeddings):
+            raise BootstrapError(
+                f"the facility memory's embeddings are {embeddings_dims(embeddings)} wide, and "
+                f"its Postgres table {dims}: make embeddings.memory.dims match the model"
+            )
+        embeddings = HashEmbeddings(dims)
+    store = LazyPostgresStore(url, index=postgres_index(embeddings, dims))
+    return PlatformMemory(StoreFacilityMemory(store), durable=True, close=store.close)
 
 
 def build_memory_extraction(deps: RuntimeDeps) -> MemoryProcessor:
@@ -437,7 +491,8 @@ def build_runtime_deps(
     `gateways` defaults to recording fakes: this build has no real integrations, so
     deliveries are recorded, not sent. `prompts` default to `build_prompts`. The
     decision model is built only for the jev gate engine (`build_decisions`). `memory`
-    defaults to a fresh facility memory (`build_memory`).
+    defaults to the facility memory of `PERSISTENCE` (`build_platform_memory`) with the
+    settings' own store, and to a fresh in-memory one with a `persistence` passed.
     """
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
@@ -446,7 +501,13 @@ def build_runtime_deps(
     if decisions is None:
         decisions = gate_decisions(settings)
     if memory is None:
-        memory = build_memory(settings)
+        # The platform's own store gets the platform's facility memory; a store the
+        # caller passes (a play's world) gets a fresh in-memory one.
+        memory = (
+            build_platform_memory(settings).memory
+            if persistence is None
+            else build_memory(settings)
+        )
     deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=clock,

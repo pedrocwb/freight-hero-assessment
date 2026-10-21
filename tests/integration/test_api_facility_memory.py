@@ -53,3 +53,31 @@ async def test_an_unknown_load_has_no_facility_memory(api: Api) -> None:
     response = await api.client.get("/api/loads/nope/facility-memory")
 
     assert response.status_code == 404
+
+
+async def test_a_reset_forgets_the_notes_and_the_sessions_share_one_memory(api: Api) -> None:
+    await api.create_load()
+    before = api.app.state.service.session.simulation.runtime.facility_memory
+    assert before is not None
+    told = datetime.fromisoformat(local(7, 0))
+    note = FacilityFact(
+        fact_id="f1",
+        client_id="northline",
+        facility_key="riverbend-plant~stockton-ca",
+        facility_name="Riverbend plant",
+        text="Check in at gate 4",
+        kind=FactKind.CHECK_IN,
+        source_load_id="470113",
+        source_event_id="m1",
+        source_at=told,
+        created_at=told,
+        updated_at=told,
+    )
+    await before.apply("northline", upserts=[note])
+
+    assert (await api.client.post("/api/sim/reset", json={})).status_code == 200
+    await api.create_load()
+
+    assert api.app.state.service.session.simulation.runtime.facility_memory is before
+    stops = await api.get(f"/api/loads/{LOAD_ID}/facility-memory")
+    assert [s["facts"] for s in stops] == [[], []]

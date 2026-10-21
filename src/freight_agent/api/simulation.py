@@ -10,6 +10,12 @@ which resets first) empties it. On Postgres the loads, runs and ledger survive a
 restart: the new process resumes them (`resume`), its clock at the latest time they
 hold, and attachment bytes go to `BLOBS_DIR` so the documents' files survive too.
 
+The facility memory is the process's one platform memory too
+(`bootstrap.build_platform_memory`, on the same `PERSISTENCE`): every session's runtime
+reads and writes it, a reset empties it with the store, and on Postgres its notes survive
+a restart, which also queues the extraction of any delivered load whose job was lost
+(`AgentRuntime.queue_missed_extractions`).
+
 While a scenario plays (`api.scenarios`) every write from a client is refused (409):
 another client would break the run.
 
@@ -36,6 +42,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
+from freight_agent.adapters.memory.store import StoreFacilityMemory
 from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.api import views
 from freight_agent.api.bus import EventBus, sse_message
@@ -56,10 +63,12 @@ from freight_agent.api.schemas import (
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
 from freight_agent.bootstrap import (
     BootstrapError,
+    PlatformMemory,
     PlatformStore,
     Simulation,
     build_blobs,
     build_knowledge,
+    build_platform_memory,
     build_platform_store,
     build_runtime,
     build_tracer,
@@ -146,6 +155,7 @@ def open_session(
     blobs: BlobStore,
     llm: LanguageModel | None = None,
     tracer: Tracer | None = None,
+    memory: StoreFacilityMemory | None = None,
 ) -> Session:
     """A simulation on `persistence` and `blobs`, as `bootstrap.build_simulation` builds
     it. It reads what the store holds: emptying it first (a reset) is the caller's part.
@@ -170,6 +180,7 @@ def open_session(
             blobs=blobs,
             tracer=tracer,
             decisions=model if decisions is not None else None,
+            memory=memory,
         )
     except (MissingSetting, BootstrapError, ValueError) as exc:
         raise BadRequest(str(exc)) from exc
@@ -203,6 +214,7 @@ class SimulationService:
         self._lock = asyncio.Lock()
         self._tracer = build_tracer(settings)
         self._store: PlatformStore = build_platform_store(settings)
+        self._memory: PlatformMemory = build_platform_memory(settings)
         # Durable attachment bytes go with a durable store; in memory they reset with it.
         self._durable_blobs = build_blobs(settings) if self._store.durable else None
         self._session = self._open(ResetRequest())
@@ -254,6 +266,7 @@ class SimulationService:
             blobs=self._durable_blobs or MemoryBlobStore(),
             llm=self._llm,
             tracer=self._tracer,
+            memory=self._memory.memory,
         )
 
     # --- lifecycle ------------------------------------------------------------------------
@@ -261,18 +274,23 @@ class SimulationService:
     async def resume(self) -> SimState:
         """At startup: on a durable store that holds loads, the simulation goes on from the
         latest time they hold (the clock is not stored, and timers due before it would
-        otherwise fire again on the next advance); otherwise nothing changes."""
+        otherwise fire again on the next advance); otherwise nothing changes. On a durable
+        facility memory, a delivered load whose extraction job was lost is queued again;
+        the next tick runs it."""
         async with self._lock:
             session = self._session
             if self._store.durable:
                 latest = _latest(await self._snapshots(session))
                 if latest is not None and _after(latest, session.clock.now()):
                     session.clock.set(session.local(latest))
+            if self._memory.durable:
+                await session.simulation.runtime.queue_missed_extractions()
             return await self._publish(session, ())
 
     async def close(self) -> None:
-        """At shutdown: release the store (the Postgres pool)."""
+        """At shutdown: release the stores (the Postgres pools)."""
         await self._store.close()
+        await self._memory.close()
 
     # --- simulation -----------------------------------------------------------------------
 
@@ -283,6 +301,7 @@ class SimulationService:
         async with self._lock:
             session = self._open(request)
             await self._store.clear()
+            await self._memory.clear()
             self._session = session
             return await self._publish(self._session, ())
 
@@ -323,6 +342,7 @@ class SimulationService:
         async with self._lock:
             session = self._open_at(start, timezone)
             await self._store.clear()
+            await self._memory.clear()
             self._session = session
             await self._publish(self._session, ())
             return self._session

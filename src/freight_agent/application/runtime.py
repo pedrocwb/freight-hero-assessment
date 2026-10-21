@@ -45,8 +45,10 @@ and next stop from `RuntimeDeps.memory` in its knowledge node, and the run recor
 them. A run that sets its load to `delivered` queues the load's extraction
 (`RuntimeDeps.memory_queue`) once its commit is done, and the tick's last part, after the
 outbox, works through that queue (`RuntimeDeps.memory_extraction`). The queue sits beside
-the unit of work, not in it: a crash between the commit and the queue loses one load's
-extraction, which `agent memory extract --load` runs again.
+the unit of work, not in it (it is the facility memory's store), so a crash between the
+commit and the queue, or a failed enqueue, leaves a delivered load without its job:
+`queue_missed_extractions` queues every such load again, and the platform calls it when
+it starts on a durable store. `agent memory extract --load` also runs one by hand.
 """
 
 import asyncio
@@ -517,6 +519,28 @@ class AgentRuntime:
                 load.load_id,
                 exc_info=True,
             )
+
+    async def queue_missed_extractions(self) -> list[str]:
+        """Queue the extraction of every delivered load that has no job: one whose job
+        was lost between its run's commit and the queue. Returns the loads it queued.
+        Idempotent: a load with a job, pending, done or failed, is left alone."""
+        queue = self._deps.memory_queue
+        if queue is None:
+            return []
+        async with self._uow() as uow:
+            loads = [await uow.loads.get(load_id) for load_id in await uow.loads.list_ids()]
+        queued: list[str] = []
+        for load in loads:
+            if load is None or load.stage is not Stage.DELIVERED:
+                continue
+            if await queue.get(load.broker_id, load.load_id) is not None:
+                continue
+            job = ExtractionJob(
+                load_id=load.load_id, client_id=load.broker_id, queued_at=self._deps.clock.now()
+            )
+            if await queue.enqueue(job):
+                queued.append(load.load_id)
+        return queued
 
     async def _fail(self, attempt: _Attempt, exc: Exception) -> _Finished:
         error = f"{type(exc).__name__}: {exc}"

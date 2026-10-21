@@ -255,6 +255,39 @@ async def test_a_queue_that_fails_does_not_fail_the_run(load: Load) -> None:
     assert (await world.snapshot()).load.stage is Stage.DELIVERED
 
 
+async def test_a_delivered_load_whose_job_was_lost_is_queued_again_once(load: Load) -> None:
+    class Flaky(StoreFacilityMemory):
+        down = True
+
+        async def enqueue(self, job: ExtractionJob) -> bool:
+            if self.down:
+                raise RuntimeError("queue down")
+            return await super().enqueue(job)
+
+    facts = Flaky(memory_store(HashEmbeddings(), 8))
+    world = await World(load, memory=facts).start()
+    await world.message(at(9, 0), "delivered and empty")
+    world.model.push(GATE, decision(Intent.STATUS_UPDATE))
+    world.model.push(DECIDE, plan(UpdateStage(stage=Stage.DELIVERED)))
+    await world.tick(at(9, 1))
+    assert await facts.get("northline", load.load_id) is None
+
+    facts.down = False
+    world.restart()
+
+    assert await world.runtime.queue_missed_extractions() == [load.load_id]
+    job = await facts.get("northline", load.load_id)
+    assert job is not None and job.status is ExtractionStatus.PENDING
+    assert await world.runtime.queue_missed_extractions() == []
+
+
+async def test_a_load_not_delivered_or_without_a_memory_queues_nothing(load: Load) -> None:
+    assert (
+        await (await World(load, memory=memory()).start()).runtime.queue_missed_extractions() == []
+    )
+    assert await (await World(load).start()).runtime.queue_missed_extractions() == []
+
+
 # --- the extractor ---------------------------------------------------------------------------
 
 

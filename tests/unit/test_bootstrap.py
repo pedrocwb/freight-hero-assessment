@@ -818,3 +818,85 @@ def test_the_runtime_gets_a_facility_memory_and_its_extraction() -> None:
     assert deps.memory_extraction.prompt.role.value == "memory"
     given = build_memory(_settings())
     assert build_runtime_deps(_settings(), memory=given).memory is given
+
+
+def test_the_platform_facility_memory_is_in_memory_by_default() -> None:
+    from langgraph.store.memory import InMemoryStore
+
+    platform = bootstrap.build_platform_memory(_settings())
+
+    assert platform.durable is False
+    assert isinstance(platform.memory.store, InMemoryStore)
+
+
+def test_the_facility_memory_on_postgres_needs_its_database_url() -> None:
+    with pytest.raises(MissingSetting, match="DATABASE_URL"):
+        bootstrap.build_platform_memory(_settings(persistence="postgres"))
+
+
+def test_on_postgres_the_facility_memory_is_langgraphs_store_at_the_models_width() -> None:
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings, OpenRouterEmbeddings
+    from freight_agent.adapters.memory.postgres import LazyPostgresStore
+
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    offline = bootstrap.build_platform_memory(_settings(persistence="postgres", database_url=url))
+    keyed = bootstrap.build_platform_memory(
+        _settings(persistence="postgres", database_url=url, openrouter_api_key="sk-test")
+    )
+
+    embedders: list[object] = []
+    for platform in (offline, keyed):
+        store = platform.memory.store
+        assert platform.durable is True
+        assert isinstance(store, LazyPostgresStore)
+        assert store.pool.closed  # nothing connects before the first operation
+        index = cast(dict[str, Any], store.index)
+        assert (index["dims"], index["fields"]) == (1536, ["text"])
+        embedders.append(index["embed"])
+    # Without the key the offline hash is built at the table's width.
+    hashed, live = embedders
+    assert isinstance(hashed, HashEmbeddings) and hashed.dims == 1536
+    assert isinstance(live, OpenRouterEmbeddings)
+
+
+def test_embeddings_of_another_width_than_the_postgres_table_stop_the_build() -> None:
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    settings = _settings(persistence="postgres", database_url=url)
+
+    from freight_agent.adapters.memory.embeddings import OpenRouterEmbeddings
+
+    class Narrow(OpenRouterEmbeddings):
+        @property
+        def dims(self) -> int:
+            return 3
+
+    config = bootstrap.load_models_config(MODELS_YAML)
+    entry = config.embeddings["memory"]
+    narrow = Narrow(entry, config.pricing_for(entry.model), SecretStr("sk-test"))
+
+    with pytest.raises(BootstrapError, match="1536"):
+        bootstrap.build_platform_memory(settings, embeddings=narrow)
+
+
+def test_the_runtime_on_the_settings_store_gets_the_platform_facility_memory() -> None:
+    from freight_agent.adapters.memory.postgres import LazyPostgresStore
+
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    settings = _settings(persistence="postgres", database_url=url)
+
+    own = build_runtime_deps(settings)
+    play = build_runtime_deps(settings, persistence=bootstrap.memory_uow_factory())
+
+    assert isinstance(cast(Any, own.memory).store, LazyPostgresStore)
+    assert not isinstance(cast(Any, play.memory).store, LazyPostgresStore)
+
+
+def test_the_memory_width_falls_back_without_a_memory_embeddings_model(tmp_path: Path) -> None:
+    import yaml
+
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
+    del data["embeddings"]
+    models = tmp_path / "models.yaml"
+    models.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    assert bootstrap.memory_dims(_settings(models_config=models)) == bootstrap.DEFAULT_MEMORY_DIMS
