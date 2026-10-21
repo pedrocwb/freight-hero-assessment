@@ -55,7 +55,11 @@ def database() -> Iterator[str]:
         pytest.skip("the test database user cannot create a database")
     url = make_conninfo(DATABASE_URL, dbname=name)
     try:
-        assert migrate(url) == ["0001_load_memory.sql", "0002_vector_extension.sql"]
+        assert migrate(url) == [
+            "0001_load_memory.sql",
+            "0002_vector_extension.sql",
+            "0003_temporal.sql",
+        ]
         asyncio.run(setup_store(url, 1536))
         yield url
     finally:

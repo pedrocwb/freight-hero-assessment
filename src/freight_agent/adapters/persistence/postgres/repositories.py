@@ -54,7 +54,7 @@ _OBLIGATION: Final = (
 _TIMER: Final = "timer_id, load_id, obligation_id, due_at, created_at, status, reason"
 _OUTBOX: Final = (
     "outbox_id, idempotency_key, run_id, load_id, kind, payload, created_at, status,"
-    " attempts, last_error"
+    " attempts, last_error, accepted_at"
 )
 
 _PENDING: Final = TimerStatus.PENDING.value
@@ -63,6 +63,15 @@ _PENDING: Final = TimerStatus.PENDING.value
 class PostgresLoadRepository:
     def __init__(self, session: Session) -> None:
         self._s = session
+
+    async def add(self, load: Load) -> bool:
+        row = await self._s.one(
+            "INSERT INTO loads (load_id, broker_id, stage, delay_risk, metadata)"
+            " VALUES (%(load_id)s, %(broker_id)s, %(stage)s, %(delay_risk)s, %(metadata)s)"
+            " ON CONFLICT (load_id) DO NOTHING RETURNING load_id",
+            rows.load_params(load),
+        )
+        return row is not None
 
     async def get(self, load_id: str) -> Load | None:
         row = await self._s.one(
@@ -241,7 +250,7 @@ class PostgresOutboxRepository:
 
     _VALUES: Final = (
         "%(outbox_id)s, %(idempotency_key)s, %(run_id)s, %(load_id)s, %(kind)s, %(payload)s,"
-        " %(created_at)s, %(status)s, %(attempts)s, %(last_error)s"
+        " %(created_at)s, %(status)s, %(attempts)s, %(last_error)s, %(accepted_at)s"
     )
 
     async def add(self, item: OutboxItem) -> bool:
@@ -269,7 +278,7 @@ class PostgresOutboxRepository:
             " run_id = EXCLUDED.run_id, load_id = EXCLUDED.load_id, kind = EXCLUDED.kind,"
             " payload = EXCLUDED.payload, created_at = EXCLUDED.created_at,"
             " status = EXCLUDED.status, attempts = EXCLUDED.attempts,"
-            " last_error = EXCLUDED.last_error",
+            " last_error = EXCLUDED.last_error, accepted_at = EXCLUDED.accepted_at",
             rows.outbox_params(item),
         )
 
@@ -327,6 +336,8 @@ WITH next AS (
     SELECT q.event_id
     FROM event_queue q
     WHERE q.state = 'queued'
+      AND (%(load_id)s::text IS NULL OR q.load_id = %(load_id)s)
+      AND (%(event_id)s::text IS NULL OR q.event_id = %(event_id)s)
       AND NOT EXISTS (
           SELECT 1 FROM event_queue busy
           WHERE busy.load_id = q.load_id AND busy.state = 'in_flight'
@@ -339,7 +350,7 @@ WITH next AS (
     LIMIT 1
     FOR NO KEY UPDATE OF q SKIP LOCKED
 ), claimed AS (
-    UPDATE event_queue q SET state = 'in_flight', claimed_at = %(now)s
+    UPDATE event_queue q SET state = 'in_flight', claimed_at = %(now)s, claim_token = %(token)s
     FROM next WHERE q.event_id = next.event_id
     RETURNING q.event_id
 )
@@ -395,10 +406,22 @@ class PostgresEventQueue:
             (event.event_id, event.load_id),
         )
 
-    async def claim_next(self, now: datetime) -> Event | None:
+    async def claim_next(
+        self,
+        now: datetime,
+        *,
+        load_id: str | None = None,
+        event_id: str | None = None,
+        token: str | None = None,
+    ) -> Event | None:
         """`claimed_at` is `now`, the runtime's clock, not the database's: the lease
         compares it with the runtime's `now` (see `reclaim_expired`)."""
-        params = {"now": rows.aware(now, "claim time")}
+        params = {
+            "now": rows.aware(now, "claim time"),
+            "load_id": load_id,
+            "event_id": event_id,
+            "token": token,
+        }
         for _ in range(_CLAIM_ATTEMPTS):
             try:
                 async with self._s.conn.transaction():  # a savepoint in the unit of work
@@ -407,6 +430,46 @@ class PostgresEventQueue:
                 continue  # another worker took this load first; the next look sees it
             return None if row is None else rows.event_from(row)
         return None
+
+    async def owns_claim(self, event_id: str, token: str) -> bool:
+        row = await self._s.one(
+            "SELECT event_id FROM event_queue WHERE event_id = %s"
+            " AND state = 'in_flight' AND claim_token = %s FOR NO KEY UPDATE",
+            (event_id, token),
+        )
+        return row is not None
+
+    async def head(self, load_id: str) -> Event | None:
+        row = await self._s.one(
+            f"SELECT {_EVENT_E} FROM event_queue q JOIN events e USING (event_id)"
+            " WHERE q.load_id = %s ORDER BY q.seq LIMIT 1",
+            (load_id,),
+        )
+        return None if row is None else rows.event_from(row)
+
+    async def is_dead(self, event_id: str) -> bool:
+        return (
+            await self._s.one(
+                "SELECT event_id FROM event_queue WHERE event_id = %s AND state = 'dead'",
+                (event_id,),
+            )
+            is not None
+        )
+
+    async def wake_loads(self, *, include_timers: bool = False) -> list[str]:
+        found = await self._s.all(
+            "SELECT load_id FROM ("
+            " SELECT load_id FROM event_queue WHERE state IN ('queued', 'in_flight')"
+            " UNION SELECT load_id FROM outbox WHERE status = 'pending'"
+            " UNION SELECT load_id FROM timers WHERE %s AND status = 'pending'"
+            ") active WHERE NOT EXISTS ("
+            " SELECT 1 FROM event_queue q WHERE q.load_id = active.load_id AND q.state = 'dead'"
+            ") AND NOT EXISTS ("
+            " SELECT 1 FROM outbox o WHERE o.load_id = active.load_id AND o.status = 'failed'"
+            ") ORDER BY load_id",
+            (include_timers,),
+        )
+        return [row["load_id"] for row in found]
 
     async def complete(self, event_id: str) -> None:
         await self._s.run(

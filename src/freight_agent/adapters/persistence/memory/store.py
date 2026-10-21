@@ -60,6 +60,7 @@ class _State:
     next_arrival: int = 0
     inflight: dict[str, str] = field(default_factory=dict)  # load_id -> event_id
     claimed_at: dict[str, datetime] = field(default_factory=dict)  # in-flight event_id -> claim
+    claim_tokens: dict[str, str | None] = field(default_factory=dict)
     failures: dict[str, int] = field(default_factory=dict)
     dead: list[str] = field(default_factory=list)
     # Wave 3 (`documents.py`).
@@ -84,6 +85,12 @@ class MemoryStore:
 class MemoryLoadRepository:
     def __init__(self, store: MemoryStore) -> None:
         self._s = store
+
+    async def add(self, load: Load) -> bool:
+        if load.load_id in self._s.state.loads:
+            return False
+        self._s.state.loads[load.load_id] = load
+        return True
 
     async def get(self, load_id: str) -> Load | None:
         return self._s.state.loads.get(load_id)
@@ -232,20 +239,67 @@ class MemoryEventQueue:
         if event.event_id not in state.events:
             state.events[event.event_id] = event
             state.event_order.append(event.event_id)
+        if (
+            event.event_id in state.queue
+            or event.event_id in state.inflight.values()
+            or event.event_id in state.dead
+        ):
+            return
         state.queue.append(event.event_id)
         state.arrivals[event.event_id] = state.next_arrival
         state.next_arrival += 1
 
-    async def claim_next(self, now: datetime) -> Event | None:
+    async def claim_next(
+        self,
+        now: datetime,
+        *,
+        load_id: str | None = None,
+        event_id: str | None = None,
+        token: str | None = None,
+    ) -> Event | None:
         state = self._s.state
-        for index, event_id in enumerate(state.queue):
-            event = state.events[event_id]
+        seen: set[str] = set()
+        for index, queued_id in enumerate(state.queue):
+            event = state.events[queued_id]
+            if event.load_id in seen:
+                continue
+            seen.add(event.load_id)
+            if load_id is not None and event.load_id != load_id:
+                continue
+            if event_id is not None and queued_id != event_id:
+                continue
             if event.load_id not in state.inflight:
                 del state.queue[index]
-                state.inflight[event.load_id] = event_id
-                state.claimed_at[event_id] = now
+                state.inflight[event.load_id] = queued_id
+                state.claimed_at[queued_id] = now
+                state.claim_tokens[queued_id] = token
                 return event
         return None
+
+    async def owns_claim(self, event_id: str, token: str) -> bool:
+        return self._in_flight(event_id) and self._s.state.claim_tokens.get(event_id) == token
+
+    async def head(self, load_id: str) -> Event | None:
+        state = self._s.state
+        ids = [
+            i
+            for i in [*state.queue, *state.inflight.values(), *state.dead]
+            if state.events[i].load_id == load_id
+        ]
+        return state.events[min(ids, key=state.arrivals.__getitem__)] if ids else None
+
+    async def is_dead(self, event_id: str) -> bool:
+        return event_id in self._s.state.dead
+
+    async def wake_loads(self, *, include_timers: bool = False) -> list[str]:
+        state = self._s.state
+        active = {state.events[i].load_id for i in [*state.queue, *state.inflight.values()]}
+        active |= {i.load_id for i in state.outbox.values() if i.status is OutboxStatus.PENDING}
+        if include_timers:
+            active |= {t.load_id for t in state.timers.values() if t.status is TimerStatus.PENDING}
+        blocked = {state.events[i].load_id for i in state.dead}
+        blocked |= {i.load_id for i in state.outbox.values() if i.status is OutboxStatus.FAILED}
+        return sorted(active - blocked)
 
     async def complete(self, event_id: str) -> None:
         if self._in_flight(event_id):
@@ -280,6 +334,7 @@ class MemoryEventQueue:
         state = self._s.state
         del state.inflight[state.events[event_id].load_id]
         del state.claimed_at[event_id]
+        state.claim_tokens.pop(event_id, None)
 
     async def size(self) -> int:
         return len(self._s.state.queue)

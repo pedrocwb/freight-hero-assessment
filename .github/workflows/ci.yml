@@ -69,6 +69,9 @@ jobs:
       - name: Tests with coverage (unit, contract, property)
         run: make cov
 
+      - name: Durable workflows (Temporal time-skipping server, scripted LLM)
+        run: make temporal-test
+
       # Errors in any SOP file fail the build; sections no scenario covers only warn.
       - name: SOP lint
         run: make sop-lint

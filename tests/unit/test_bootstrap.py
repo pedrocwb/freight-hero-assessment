@@ -571,7 +571,9 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
         def __init__(self, **given: Any) -> None:
             built.append(given)
 
-        async def process_pending(self, limit: int = 10) -> list[Any]:
+        async def process_pending(
+            self, limit: int = 10, *, load_id: str | None = None
+        ) -> list[Any]:
             return []
 
     class Pages:

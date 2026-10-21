@@ -655,3 +655,36 @@ async def test_a_document_that_cannot_be_saved_stays_pending_and_the_others_go_o
 def test_the_extract_template_uses_every_variable_the_pipeline_computes() -> None:
     assert PROMPTS.extract.system.variables == EXTRACT_SYSTEM_VARIABLES
     assert PROMPTS.extract.user.variables == EXTRACT_USER_VARIABLES
+
+
+async def test_scoped_document_activity_leaves_other_loads_pending(world: World) -> None:
+    from dataclasses import replace
+
+    from freight_agent.application.runtime import RuntimeConfig
+    from freight_agent.orchestration.activities import LoadActivities
+    from freight_agent.orchestration.contracts import LoadKey
+    from tests.unit.application.test_runtime_harness import World as RuntimeWorld
+
+    async with world.store.unit_of_work() as uow:
+        await uow.loads.save(world.load.model_copy(update={"load_id": "other"}))
+        await uow.commit()
+    await world.receive(load_id="other")  # older; must not be processed by this load
+    await world.receive()
+    await world.receive()
+    world.model.push(EXTRACT, answer("pod_clean"), answer("pod_clean"))
+    base = RuntimeWorld(world.load, config=RuntimeConfig(delivery_followups=True))
+    deps = replace(
+        base.deps,
+        uow_factory=world.store.unit_of_work,
+        documents=world.pipeline(),
+        clock=world.clock,
+    )
+    activities = LoadActivities(deps)
+    key = LoadKey(world.load.broker_id, world.load.load_id)
+    assert (await activities.snapshot(key)).documents_pending
+    await activities.documents(key)
+    assert (await world.document("doc_2")).status is DocumentStatus.PROCESSED
+    assert (await world.document("doc_3")).status is DocumentStatus.PENDING
+    await activities.documents(key)
+    assert not (await activities.snapshot(key)).documents_pending
+    assert (await world.document("doc_1")).status is DocumentStatus.PENDING

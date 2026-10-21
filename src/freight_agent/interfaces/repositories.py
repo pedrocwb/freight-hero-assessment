@@ -16,6 +16,10 @@ from freight_agent.interfaces.documents import DocumentRepository
 
 
 class LoadRepository(Protocol):
+    async def add(self, load: Load) -> bool:
+        """Insert once. False if the globally unique load id already exists."""
+        ...
+
     async def get(self, load_id: str) -> Load | None: ...
     async def save(self, load: Load) -> None: ...
     async def list_ids(self) -> list[str]: ...
@@ -81,11 +85,32 @@ class EventQueue(Protocol):
 
     async def enqueue(self, event: Event) -> None: ...
 
-    async def claim_next(self, now: datetime) -> Event | None:
+    async def claim_next(
+        self,
+        now: datetime,
+        *,
+        load_id: str | None = None,
+        event_id: str | None = None,
+        token: str | None = None,
+    ) -> Event | None:
         """The oldest queued event whose load has nothing in flight, or None.
 
         The event is in flight from `now`, the claim time `reclaim_expired` counts from.
         """
+        ...
+
+    async def owns_claim(self, event_id: str, token: str) -> bool:
+        """Lock and verify the current owner, for fencing a commit or release."""
+        ...
+
+    async def head(self, load_id: str) -> Event | None:
+        """Oldest queued or in-flight event of this load (including dead letters)."""
+        ...
+
+    async def is_dead(self, event_id: str) -> bool: ...
+
+    async def wake_loads(self, *, include_timers: bool = False) -> list[str]:
+        """Unblocked loads with queued/in-flight events, pending sends, or recovery timers."""
         ...
 
     async def complete(self, event_id: str) -> None:

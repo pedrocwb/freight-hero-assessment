@@ -77,3 +77,14 @@ Results we measured are in [evals/RESULTS.md](evals/RESULTS.md).
 - [docs/architecture.md](docs/architecture.md): the design in diagrams.
 - [docs/development.md](docs/development.md): every command, Postgres, prompts, keys, LangGraph
   Studio and the repository layout.
+
+## Durable scheduling with Temporal
+
+The real-clock integration now runs one active Workflow per load, the existing LangGraph
+in an Activity, and durable SOP waits (ETA follow-up: 30 minutes from confirmed delivery).
+Run `docker compose -f compose.temporal.yml up --build` for the isolated local stack
+(API on 8001, Temporal UI on 8233). The original simulation UI keeps its virtual clock.
+
+See [the Temporal guide](docs/temporal.md) for ingress examples, restart/retry behavior,
+provider idempotency requirements and production limits. `make temporal-test` validates
+the real Workflow and LangGraph with time skipping and a scripted model.

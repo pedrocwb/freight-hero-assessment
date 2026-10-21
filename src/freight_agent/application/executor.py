@@ -65,16 +65,29 @@ class Executor:
     """Applies a run's approved actions. The deferral policy and the document requirements
     are the run's broker's (`ctx.broker`)."""
 
-    def __init__(self, clock: Clock, ids: IdGenerator) -> None:
+    def __init__(
+        self,
+        clock: Clock,
+        ids: IdGenerator,
+        *,
+        delivery_followups: bool = False,
+    ) -> None:
         self._clock = clock
         self._ids = ids
+        self._delivery_followups = delivery_followups
 
     async def apply(
         self, uow: UnitOfWork, *, run_id: str, ctx: RunContext, actions: Sequence[Action]
     ) -> ExecutionResult:
         policy = ctx.broker.limits.validation.deferral
         execution = _Execution(
-            uow, run_id=run_id, ctx=ctx, now=self._clock.now(), ids=self._ids, policy=policy
+            uow,
+            run_id=run_id,
+            ctx=ctx,
+            now=self._clock.now(),
+            ids=self._ids,
+            policy=policy,
+            delivery_followups=self._delivery_followups,
         )
         for index, action in enumerate(actions):
             await execution.apply(index, action)
@@ -153,6 +166,7 @@ class _Execution:
         now: datetime,
         ids: IdGenerator,
         policy: DeferralPolicy,
+        delivery_followups: bool = False,
     ) -> None:
         self._uow = uow
         self._run_id = run_id
@@ -162,6 +176,7 @@ class _Execution:
         self._now = now
         self._ids = ids
         self._policy = policy
+        self._delivery_followups = delivery_followups
         self._grace = timedelta(minutes=policy.grace_minutes)
         self._outbox: list[OutboxItem] = []
         self._obligations: dict[str, Obligation] = {}  # latest version, in first-change order
@@ -185,6 +200,12 @@ class _Execution:
                 self._skip(index, action, f"already applied: {key} is in the outbox")
                 return
             await self._change_state(action)
+            if self._delivery_followups:
+                match action:
+                    case SendSms(requests=str() as kind) | SendEmail(requests=str() as kind):
+                        await self._bind_followup(kind)
+                    case _:
+                        pass
         except InvariantViolation as exc:
             self._skip(index, action, str(exc))
 
@@ -268,6 +289,27 @@ class _Execution:
             updated = current.record_attempt(self._now)
         await self._save_obligation(updated)
 
+    async def _bind_followup(self, kind: str) -> None:
+        obligation = await self._open_obligation(kind, "bind delivery")
+        definition = self._broker.obligation(kind)
+        if definition is None:
+            raise InvariantViolation(f"unknown obligation kind: {kind}")
+        item = self._outbox[-1]
+        item = item.model_copy(
+            update={
+                "payload": {
+                    **item.payload,
+                    "follow_up": {
+                        "obligation_id": obligation.obligation_id,
+                        "minutes": definition.follow_up_minutes,
+                        "grace_minutes": self._policy.grace_minutes,
+                    },
+                }
+            }
+        )
+        self._outbox[-1] = item
+        await self._uow.outbox.save(item)
+
     async def _open(self, kind: str) -> None:
         """Open an obligation of `kind` with no attempt yet (a document the load owes)."""
         if await self._uow.obligations.get_open(self._load.load_id, kind) is not None:
@@ -323,6 +365,11 @@ class _Execution:
 
     async def _schedule_timer(self, kind: str, minutes: int) -> None:
         obligation = await self._open_obligation(kind, "schedule a timer")
+        if self._delivery_followups and any(
+            item.payload.get("follow_up", {}).get("obligation_id") == obligation.obligation_id
+            for item in self._outbox
+        ):
+            return  # the catalog's cadence starts when this request is confirmed
         due_at = follow_up_due_at(
             requested=later(self._now, timedelta(minutes=minutes)),
             deferred_until=obligation.deferred_until,

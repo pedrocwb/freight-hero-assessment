@@ -88,3 +88,11 @@ studio:
 ci: lint typecheck arch cov sop-lint
 
 all: lint typecheck arch cov
+
+# Downloads the Temporal time-skipping test server on first run; no LLM calls.
+.PHONY: temporal-test temporal-up
+temporal-test:
+	RUN_TEMPORAL_TESTS=1 uv run pytest tests/temporal -v
+
+temporal-up:
+	docker compose -f compose.temporal.yml up --build
