@@ -28,5 +28,6 @@ the message that carried the file:
    note, for example "POD received, signed by the receiver at 09:42".
 5. A POD with an exception, no signature or a value that does not match the load
    (needs_review): do not set the load to delivered. Open a Hero task with the values
-   found and what does not match. Send the driver nothing about it.
+   found and, for each value that does not match, the value on the POD and the value on
+   the load. Send the driver nothing about it.
 6. Never forward the POD to anyone.

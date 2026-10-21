@@ -6,12 +6,12 @@ Nothing else imports adapters into the core, and `application`, `domain` and `po
 never import this module (the import-linter contracts forbid it).
 
 The model is always the live one on OpenRouter, per role (`config/models.yaml`), behind
-the fallback chain and its circuit breakers. Storage is in memory and the gateways record
-what they would send (there are no real integrations). Tracing is LangGraph's own, on
-LangSmith, when `LANGSMITH_TRACING` is on and its key is set; switched on without its
-key it falls back to no tracing, with a warning that names no secret. Without
-`OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run that needs the
-model escalates to a Hero, saying the key is missing.
+the fallback chain, its retries and its circuit breakers. Storage is in memory and the
+gateways record what they would send (there are no real integrations). Tracing is
+LangGraph's own, on LangSmith, when `LANGSMITH_TRACING` is on and its key is set;
+switched on without its key it falls back to no tracing, with a warning that names no
+secret. Without `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run
+that needs the model escalates to a Hero, saying the key is missing.
 
 The gate's engine is `GATE_ENGINE` (`build_runtime_config`). On `jev` the gate runs on the
 decision model of `config/models.yaml` (`decisions.gate`), through OpenRouter's Decisions

@@ -12,30 +12,47 @@
 # Role settings:
 #   model             OpenRouter model id (primary)
 #   fallbacks         ordered; walked by the resilient wrapper (adapters/llm/resilient.py),
-#                     one OpenRouterModel per id. Pick another provider family for
-#                     availability.
+#                     one OpenRouterModel per entry, once the model before it failed (its
+#                     retries included). An entry is a model id, which runs with the
+#                     primary's settings, or a mapping with `model` and the settings below
+#                     it changes (temperature, max_tokens, reasoning_effort, provider).
+#                     Pick another provider family for availability, and a model that
+#                     passes the suites on its settings.
 #   temperature       null: not sent. Some reasoning models (Claude Haiku 5.5, GPT-6 Luna)
 #                     take no temperature; with require_parameters on, sending one leaves
-#                     them no endpoint, so a role on such a model sets null.
+#                     them no endpoint, so a role or a fallback on such a model sets null.
 #   max_tokens        completion cap, reasoning tokens included
 #   reasoning_effort  optional: none | minimal | low | medium | high
-#   provider          OpenRouter provider routing for the PRIMARY model only (fallbacks use
-#                     default routing). Pinned for reproducible evals; a pinned provider
-#                     that is down fails the call and the chain moves to the next model.
+#   provider          OpenRouter provider routing for the primary model (a fallback uses
+#                     default routing unless its entry sets one). `order` puts the
+#                     preferred provider first, the one the evals measured and the prices
+#                     below assume; `allow_fallbacks: true` lets OpenRouter serve the same
+#                     model from another provider that passes the other filters when that
+#                     one fails or rate limits, before the chain moves to another model.
+#                     The trade-off is reproducibility: such a call ran on another
+#                     endpoint, maybe at another price, and the run records which
+#                     (`Usage.provider`, from OpenRouter's routing metadata).
 #                     require_parameters defaults to true: only endpoints that honour every
-#                     parameter we send (notably tool_choice).
+#                     parameter we send (notably a forced tool_choice), which can leave a
+#                     single endpoint to route to.
+#
+# A call the provider rate limits or reports overloaded (HTTP 429, 502, 503, 529) is
+# retried on the same model first: at most twice, after about 1 s then 2 s with jitter, or
+# the provider's Retry-After when it is 8 s or less, and always within the call's timeout
+# (RetryPolicy in adapters/llm/resilient.py). Then the next fallback serves it.
 
 roles:
   gate:
     # Classification into a small enum, the cheapest reliable structured output.
     # GPT-4.1 Nano: no reasoning, fast first token, forced tool calls are solid.
+    # OpenAI first, then the same model on Azure (both force tool calls).
     model: openai/gpt-4.1-nano
     fallbacks: [google/gemini-2.5-flash-lite]
     temperature: 0
     max_tokens: 256
     provider:
       order: [openai]
-      allow_fallbacks: false
+      allow_fallbacks: true
 
   agent:
     # The agent loop: one model round per graph step, with read and action tools, for at
@@ -43,19 +60,34 @@ roles:
     # gpt-oss-120b is the only model of the bake-off that met every threshold
     # (evals/RESULTS.md, "How the agent model was chosen"), at about $0.0007 per run;
     # Claude Haiku 5.5 passed too, at about 3.6 times the cost, and is the first upgrade.
-    # gpt-oss always reasons; low effort keeps an agent call near 7 s (p95 about 15 s).
-    # Pinned to DeepInfra at bf16, the cheapest full-precision endpoint; fp4/int4 ones
-    # are cheaper still but were not measured. The fallback is another family and takes
-    # `reasoning` too: the chain sends every fallback the same settings, and GPT-4.1
-    # has no endpoint for `reasoning` (it failed that way in the bake-off).
+    # gpt-oss always reasons; low effort keeps an agent call near 8 s (p95 about 13 s).
+    # DeepInfra at bf16 first, the endpoint the evals measured, and fallbacks allowed to
+    # any other bf16 endpoint that takes every parameter sent. On 2026-10-20 there is
+    # none: DekaLLM, AkashML and Crusoe serve gpt-oss at bf16 but take only
+    # `tool_choice: auto`, and every agent round forces a tool call (`required`, or the
+    # answer tool by name), so OpenRouter's routing reports "available=1" and a DeepInfra
+    # rate limit comes back as a 429 (evals/RESULTS.md): the same-model retries absorb
+    # most, the next fallback the rest. The other endpoints that force tool calls are fp16
+    # (Cerebras, $0.35 / $0.75 per 1M), fp4/int4 or of unlisted precision, none measured,
+    # so the filter stays at bf16 until one is.
+    # Then Claude Haiku 5.5, with the settings it passed the core suite with as the agent
+    # model (22/22 at k = 3): no temperature (no Anthropic endpoint takes one with
+    # require_parameters), its own reasoning default, a 2048-token cap. Gemini 2.5 Flash
+    # Lite is the last resort: it serves a round when both are down, but loses steps of
+    # the loop (evals/RESULTS.md), so a run it finishes is less reliable.
     model: openai/gpt-oss-120b
-    fallbacks: [google/gemini-2.5-flash-lite]
+    fallbacks:
+      - model: anthropic/claude-haiku-5.5
+        temperature: null
+        reasoning_effort: null
+        max_tokens: 2048
+      - google/gemini-2.5-flash-lite
     temperature: 0
     max_tokens: 4096
     reasoning_effort: low
     provider:
       order: [deepinfra]
-      allow_fallbacks: false
+      allow_fallbacks: true
       quantizations: [bf16]
 
   judge:
@@ -112,8 +144,9 @@ pricing:
     input: 0.09
     output: 0.30
     context_length: 262144
-  # The pinned DeepInfra bf16 endpoint's price (the catalog's model-level price is
-  # 0.15 / 0.60). No cache-read price is listed, so cached tokens cost the input price.
+  # The preferred DeepInfra bf16 endpoint's price (the catalog's model-level price is
+  # 0.15 / 0.60); a call another bf16 endpoint serves is billed at that one's price.
+  # No cache-read price is listed, so cached tokens cost the input price.
   openai/gpt-oss-120b:
     input: 0.037
     output: 0.17

@@ -134,7 +134,7 @@ def test_collect_metadata_records_the_code_the_sops_the_models_and_the_prompts(
     assert git.calls[0][0] == tmp_path
     config = load_models_config(MODELS)
     assert found.models == {
-        **{role.value: [c.model, *c.fallbacks] for role, c in config.roles.items()},
+        **{role.value: list(c.models) for role, c in config.roles.items()},
         "decision_gate": ["typesafe/jev-1.14"],
     }
     assert found.models["gate"][0] == "openai/gpt-4.1-nano"

@@ -20,14 +20,26 @@ Every method is one model call:
   sends it back as LangChain would.
 - `request.images` go with the user prompt as image parts (data URLs).
 
+Each call's `Usage` names the provider that served it: a role lists its preferred provider
+first and may let OpenRouter serve the model elsewhere. The SDK's response model drops
+OpenRouter's `provider` field, so the client opts in to OpenRouter's routing metadata
+(`_RoutedChatOpenRouter`), which names the endpoint selected and how many it could choose
+from; the trace keeps that summary in the reply's `response_metadata["routing"]`.
+
 Any provider error, timeout (`request.timeout_s`, for the call) or answer that does not
-fit the schema becomes `LlmError`, named after the model. Each call is a LangChain run,
-named after its role and model, so a LangSmith trace shows it under its graph node, with
-the version of the prompt template it was rendered from (`prompt_version`).
+fit the schema becomes `LlmError`, named after the model. A rate limit or an overloaded
+provider (`_TRANSIENT_STATUSES`) becomes `TransientLlmError`, with the provider's
+`Retry-After`: the resilient wrapper retries it on the same model before falling back,
+while this class sends each call once (`max_retries=0` on the client). Each call is a
+LangChain run, named after its role and model, so a LangSmith trace shows it under its
+graph node, with the version of the prompt template it was rendered from
+(`prompt_version`).
 """
 
 import asyncio
 import base64
+import json
+import math
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -36,9 +48,11 @@ from typing import Any, cast
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import ToolCall as LcToolCall
+from langchain_core.outputs import ChatResult
 from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openrouter import ChatOpenRouter
+from openrouter.errors import OpenRouterError  # the SDK under ChatOpenRouter: HTTP errors
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from freight_agent.adapters.llm.models_config import ModelPricing, ModelsConfig, RoleConfig
@@ -55,6 +69,7 @@ from freight_agent.ports.llm import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    TransientLlmError,
     Turn,
     UserTurn,
 )
@@ -68,6 +83,9 @@ _REQUIRED = "required"  # tool choice: call some tool, prose is not an option
 _AUTO = "auto"  # tool choice: a tool or prose, as the model likes
 # What a reply carries for the next round: OpenRouter's reasoning text and details.
 _PROVIDER_KEYS = ("reasoning_content", "reasoning_details")
+# HTTP statuses after which the same call may succeed shortly: a rate limit (429), the
+# model's providers down or overloaded behind OpenRouter (502, 503) or saying so (529).
+_TRANSIENT_STATUSES = frozenset({429, 502, 503, 529})
 
 # Model id prefixes whose tool rounds use `auto`: OpenRouter has no Anthropic endpoint that
 # takes `tool_choice: "required"` (a 404 for Claude Haiku 5.5), while a forced call to one
@@ -79,9 +97,39 @@ def round_tool_choice(model_id: str) -> str:
     return _AUTO if model_id.startswith(_NO_REQUIRED_MODELS) else _REQUIRED
 
 
+class _RoutedChatOpenRouter(ChatOpenRouter):
+    """`ChatOpenRouter` that asks for OpenRouter's routing metadata (`openrouter_metadata`
+    on the response) and copies from it the provider that served the call into the reply's
+    `response_metadata`, where `OpenRouterModel` reads it."""
+
+    def _create_chat_result(self, response: Any) -> ChatResult:
+        result = super()._create_chat_result(response)
+        data = response if isinstance(response, dict) else response.model_dump(by_alias=True)
+        routing = cast("dict[str, Any]", data).get("openrouter_metadata")
+        if isinstance(routing, dict):
+            routing = cast("dict[str, Any]", routing)
+            provider = _selected_provider(routing)
+            for generation in result.generations:
+                metadata = generation.message.response_metadata
+                if provider is not None:
+                    metadata.setdefault("provider", provider)
+                metadata["routing"] = {k: routing.get(k) for k in ("summary", "attempt")}
+        return result
+
+
+def _selected_provider(routing: dict[str, Any]) -> str | None:
+    endpoints = routing.get("endpoints")
+    available = endpoints.get("available") if isinstance(endpoints, dict) else None
+    for endpoint in available if isinstance(available, list) else []:
+        if isinstance(endpoint, dict) and endpoint.get("selected"):
+            provider = cast("dict[str, Any]", endpoint).get("provider")
+            return provider if isinstance(provider, str) else None
+    return None
+
+
 def openrouter_chat(role: RoleConfig, api_key: SecretStr) -> BaseChatModel:
     """The production chat model for one single-model config. Builds a client, sends nothing."""
-    return ChatOpenRouter(
+    return _RoutedChatOpenRouter(
         model=role.model,
         api_key=api_key,
         temperature=role.temperature,
@@ -91,6 +139,7 @@ def openrouter_chat(role: RoleConfig, api_key: SecretStr) -> BaseChatModel:
         max_retries=0,  # retries and fallbacks belong to the resilient wrapper
         app_title=_APP_TITLE,
         app_url=None,
+        model_kwargs={"x_open_router_metadata": "enabled"},  # the routing metadata
     )
 
 
@@ -179,7 +228,10 @@ class OpenRouterModel:
         except Exception as exc:  # the SDK, httpx and LangChain raise many types
             text = f"{type(exc).__name__}: {exc}"
             redacted = self._redact(text)  # before the cut, which could split the key
-            error = self._error(request, f"provider error: {redacted[:_MAX_CAUSE]}")
+            status = _http_status(exc)
+            error = self._error(request, f"provider error{status}: {redacted[:_MAX_CAUSE]}")
+            if _transient(exc):
+                error = TransientLlmError(str(error), retry_after_s=_retry_after_s(exc))
             # An error that quotes the key stays out of the chain, so no traceback logs it.
             raise error from (exc if redacted == text else None)
         if not isinstance(reply, AIMessage):
@@ -204,9 +256,11 @@ class OpenRouterModel:
         input_tokens = metadata["input_tokens"] if metadata else 0
         output_tokens = metadata["output_tokens"] if metadata else 0
         cached = (metadata.get("input_token_details", {}).get("cache_read") or 0) if metadata else 0
+        provider = reply.response_metadata.get("provider")
         return Usage(
             role=request.role.value,
             model=self.model_id,
+            provider=provider if isinstance(provider, str) and provider else None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached,
@@ -234,6 +288,34 @@ def models_for_role(
         OpenRouterModel(entry, config.pricing_for(entry.model), api_key, chat_factory)
         for entry in config.role(role).chain()
     )
+
+
+def _http_status(exc: Exception) -> str:
+    """The status of an HTTP error, with the provider that answered it when OpenRouter's
+    error body names one (" (HTTP 429 from DeepInfra)"); empty for any other error."""
+    if not isinstance(exc, OpenRouterError):
+        return ""
+    try:
+        body = json.loads(exc.body)
+        provider = body["error"]["metadata"]["provider_name"]
+    except (ValueError, TypeError, KeyError):
+        provider = None
+    source = f" from {provider}" if isinstance(provider, str) and provider else ""
+    return f" (HTTP {exc.status_code}{source})"
+
+
+def _transient(exc: Exception) -> bool:
+    return isinstance(exc, OpenRouterError) and exc.status_code in _TRANSIENT_STATUSES
+
+
+def _retry_after_s(exc: Exception) -> float | None:
+    """The provider's `Retry-After`, in seconds; None without one or for an HTTP date."""
+    value = exc.headers.get("retry-after") if isinstance(exc, OpenRouterError) else None
+    try:
+        seconds = float(value) if value is not None else math.nan
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def answer_tool(schema: type[BaseModel], description: str | None = None) -> dict[str, Any]:

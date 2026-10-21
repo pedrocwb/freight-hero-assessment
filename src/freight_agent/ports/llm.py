@@ -142,6 +142,15 @@ class LlmError(Exception):
     """The model failed, timed out, or returned output that does not match the schema."""
 
 
+class TransientLlmError(LlmError):
+    """The provider rate limited the call or is overloaded: the same call may succeed after
+    a short wait. `retry_after_s` is the wait the provider asked for, when it said."""
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
 class LanguageModel(Protocol):
     async def generate(
         self, request: LlmRequest, schema: type[SchemaT]

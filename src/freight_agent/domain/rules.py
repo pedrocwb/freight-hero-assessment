@@ -5,6 +5,12 @@ earlier in the same plan, and returns a violation or None. It never edits the
 action. Rules that read the ledger or the stage first replay what the approved
 actions will do (executor semantics, `docs/decisions.md`), so each action is
 judged against the state the executor will find when it reaches it.
+
+A violation's message is what the agent reads at the call ("rejected by <rule>:
+<message>"), and a Hero reads it when the run escalates: what is wrong, then, briefly,
+what an acceptable action looks like, so the next round can correct the action instead
+of dropping the step. The messages name no client's procedure, and use no semicolon (the
+agent's answer joins several violations with one).
 """
 
 import re
@@ -71,7 +77,10 @@ class RecipientIsContact(_BaseRule):
         if not unknown:
             return None
         return self._violation(
-            index, f"not a contact of load {ctx.load.load_id}: {', '.join(unknown)}"
+            index,
+            f"not a contact of load {ctx.load.load_id}: {', '.join(unknown)}. Only the "
+            "load's contacts, named by contact id, can receive a message: send nothing to "
+            "another address",
         )
 
 
@@ -89,13 +98,17 @@ class ChannelAllowed(_BaseRule):
         channel, contact_ids = addressing
         # Unknown ids are skipped: recipient_is_contact reports them.
         refused = [
-            c.id
+            f"{c.id} (has {', '.join(c.channels) or 'none'})"
             for c in contacts_of(ctx.load, contact_ids)
             if c is not None and channel not in c.channels
         ]
         if not refused:
             return None
-        return self._violation(index, f"{channel} is not a channel of {', '.join(refused)}")
+        return self._violation(
+            index,
+            f"{channel} is not a channel of {', '.join(refused)}. Reach each contact only "
+            "on a channel they have",
+        )
 
 
 class SmsRateLimit(_BaseRule):
@@ -123,7 +136,8 @@ class SmsRateLimit(_BaseRule):
         return self._violation(
             index,
             f"{action.contact_id} already has {sent + planned} SMS in the last "
-            f"{config.sms_window_minutes} minutes (limit {config.sms_max_per_window})",
+            f"{config.sms_window_minutes} minutes (limit {config.sms_max_per_window}). Send "
+            "them no more SMS now: a timer can follow up later",
         )
 
 
@@ -194,10 +208,15 @@ class KnownObligationKind(_BaseRule):
         unknown = [kind for kind in _named_kinds(action) if kind not in known]
         if not unknown:
             return None
+        fix = (
+            "Name one of them, or leave requests out of a message that asks for something else"
+            if _requested_kind(action) is not None
+            else "Name one of them"
+        )
         return self._violation(
             index,
             f"{', '.join(unknown)} is not an obligation kind of this broker "
-            f"(kinds: {', '.join(known) or 'none'})",
+            f"(kinds: {', '.join(known) or 'none'}). {fix}",
         )
 
 
@@ -219,15 +238,25 @@ class ObligationExists(_BaseRule):
         if isinstance(action, OpenObligation):
             if _projected_obligation(action.kind, ctx, approved) is None:
                 return None
-            return self._violation(index, f"an open {action.kind} obligation already exists")
-        if not isinstance(action, ScheduleTimer | DeferObligation | CloseObligation):
+            return self._violation(
+                index,
+                f"an open {action.kind} obligation already exists: do not open it again, a "
+                "timer or a request acts on the open one",
+            )
+        if isinstance(action, ScheduleTimer):
+            if _projected_obligation(action.kind, ctx, approved) is not None:
+                return None
+            fix = f"Stage a request for {action.kind} or open_obligation before it, or leave it out"
+        elif isinstance(action, DeferObligation | CloseObligation):
+            projected = _projected_obligation(action.kind, ctx, approved)
+            if projected is not None and _open_in_ledger(action.kind, ctx):
+                return None
+            fix = "Only an obligation the ledger shows open (get_ledger) can be deferred or closed"
+        else:
             return None
-        is_open = _projected_obligation(action.kind, ctx, approved) is not None
-        if not isinstance(action, ScheduleTimer):
-            is_open = is_open and _open_in_ledger(action.kind, ctx)
-        if is_open:
-            return None
-        return self._violation(index, f"{action.type} needs an open {action.kind} obligation")
+        return self._violation(
+            index, f"{action.type} needs an open {action.kind} obligation. {fix}"
+        )
 
 
 class DeferralWithinPolicy(_BaseRule):
@@ -245,7 +274,8 @@ class DeferralWithinPolicy(_BaseRule):
             return self._violation(
                 index,
                 f"a deferral of {action.minutes} minutes is over the "
-                f"{policy.max_minutes}-minute limit",
+                f"{policy.max_minutes}-minute limit. Defer by {policy.max_minutes} minutes "
+                "or less",
             )
         # A missing obligation is reported by obligation_exists.
         view = _projected_obligation(action.kind, ctx, approved)
@@ -253,7 +283,8 @@ class DeferralWithinPolicy(_BaseRule):
             return self._violation(
                 index,
                 f"the {action.kind} obligation already used its "
-                f"{policy.max_per_obligation} deferral(s)",
+                f"{policy.max_per_obligation} deferral(s). Do not defer it again: take the "
+                "SOP's next step instead",
             )
         return None
 
@@ -278,7 +309,9 @@ class AttemptCap(_BaseRule):
         return self._violation(
             index,
             f"{kind} was already requested {view.attempts} times (cap {cap}): its requests "
-            "are used up",
+            f"are used up. No further message may carry requests: {kind}. A message the "
+            "SOP calls for now (an escalation email, for instance) goes without requests, "
+            "with purpose escalation",
         )
 
 
@@ -295,7 +328,9 @@ class NoDuplicateAction(_BaseRule):
     ) -> Violation | None:
         if action not in approved:
             return None
-        return self._violation(index, f"the plan already has this {action.type}")
+        return self._violation(
+            index, f"the plan already has this {action.type}: it is staged, do not stage it again"
+        )
 
 
 # Heuristics tuned to miss load details (PO, MC, load ids, dates, times, weights).
@@ -344,7 +379,11 @@ class NoContactDetailsInText(_BaseRule):
         ]
         if not found:
             return None
-        return self._violation(index, f"outbound text contains {' and '.join(found)}")
+        return self._violation(
+            index,
+            f"outbound text contains {' and '.join(found)}. Leave contact details out of the "
+            "text: people are reached by contact id",
+        )
 
 
 # --- stage ----------------------------------------------------------------------------
@@ -379,16 +418,19 @@ class StageMovesForward(_BaseRule):
             return None
         current, target = _projected_stage(ctx, approved), action.stage
         if target is current:
-            message = f"the load is already {current}"
+            message = f"the load is already {current}: leave the stage as it is"
         elif target is Stage.DISPATCHED:
-            message = "the agent never sets a load to dispatched"
+            message = "the agent never sets a load to dispatched: set a later stage or none"
         elif current is Stage.DELIVERED:
-            message = "a delivered load does not change stage"
+            message = "a delivered load does not change stage: leave it delivered"
         elif (
             _LIFECYCLE.index(target) < _LIFECYCLE.index(current)
             and (current, target) not in _NEXT_STOP
         ):
-            message = f"cannot move back from {current} to {target}"
+            message = (
+                f"cannot move back from {current} to {target}: a stage only moves forward, "
+                "so set a later one or none"
+            )
         else:
             return None
         return self._violation(index, message)

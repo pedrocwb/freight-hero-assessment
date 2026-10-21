@@ -21,8 +21,12 @@ class RunStatus(StrEnum):
 
 
 class Usage(DomainModel):
+    """One model call. `provider` is the endpoint that served it, as the model's router
+    reports it (OpenRouter: "DeepInfra"); None when it does not say."""
+
     role: str
     model: str
+    provider: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0

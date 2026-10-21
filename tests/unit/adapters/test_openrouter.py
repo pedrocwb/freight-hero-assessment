@@ -11,9 +11,11 @@ import json
 import traceback
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import (
@@ -28,13 +30,16 @@ from langchain_core.messages.tool import invalid_tool_call, tool_call
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_openrouter import ChatOpenRouter
+from openrouter import components, errors
 from pydantic import Field, SecretStr
 
 from freight_agent.adapters.llm.models_config import (
+    FallbackConfig,
     ModelPricing,
     ModelsConfig,
     ProviderRouting,
     RoleConfig,
+    load_models_config,
 )
 from freight_agent.adapters.llm.openrouter import (
     OpenRouterModel,
@@ -54,11 +59,13 @@ from freight_agent.ports.llm import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    TransientLlmError,
     UserTurn,
 )
 
 pytestmark = pytest.mark.unit
 
+SHIPPED = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 KEY = "sk-or-v1-never-show-me-0123456789"
 ROLE = RoleConfig(model="acme/small", temperature=0, max_tokens=512)
 PRICING = ModelPricing(input=0.10, output=0.40, cached_input=0.01)
@@ -615,6 +622,18 @@ async def test_usage_is_priced_and_timed_for_the_one_call() -> None:
     assert usage.latency_ms == 250
 
 
+async def test_usage_names_the_provider_that_served_the_call() -> None:
+    """OpenRouter may route to another provider of the model: the run records which."""
+    served = answers("GateDecision", ACK)
+    served.response_metadata["provider"] = "DeepInfra"
+    model, _ = make_model(served, answers("GateDecision", ACK))
+
+    first = await model.generate(GATE, GateDecision)
+    second = await model.generate(GATE, GateDecision)
+
+    assert (first.usage.provider, second.usage.provider) == ("DeepInfra", None)
+
+
 async def test_each_call_reports_its_own_usage() -> None:
     model, _ = make_model(
         answers("GateDecision", ACK, usage=_usage(300, 20)),
@@ -741,6 +760,109 @@ async def test_a_long_provider_error_is_cut_after_the_key_is_redacted() -> None:
     assert len(str(caught.value)) < 600
 
 
+def _http_error(status: int, **headers: str) -> errors.OpenRouterError:
+    """An HTTP error as the OpenRouter SDK raises it when no specific class matches."""
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, headers=headers, text='{"error": {}}', request=request)
+    return errors.OpenRouterDefaultError("API error occurred", response)
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 529])
+async def test_a_rate_limit_or_an_overload_is_a_transient_error(status: int) -> None:
+    """The resilient wrapper retries these on the same model before falling back."""
+    model, _ = make_model(_http_error(status, **{"Retry-After": "2"}))
+
+    with pytest.raises(TransientLlmError) as caught:
+        await model.chat(round_request(), AgentOutcome)
+
+    assert caught.value.retry_after_s == 2.0
+    assert str(caught.value).startswith(f"acme/small (agent): provider error (HTTP {status}):")
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 404, 500])
+async def test_other_http_errors_are_not_transient(status: int) -> None:
+    model, _ = make_model(_http_error(status, **{"Retry-After": "2"}))
+
+    with pytest.raises(LlmError, match=rf"provider error \(HTTP {status}\)") as caught:
+        await model.generate(GATE, GateDecision)
+
+    assert not isinstance(caught.value, TransientLlmError)
+
+
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        ({}, None),
+        ({"Retry-After": "0.5"}, 0.5),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),  # a date: no wait taken
+        ({"Retry-After": "-3"}, None),
+        ({"Retry-After": "inf"}, None),
+    ],
+)
+async def test_retry_after_is_read_in_seconds(headers: dict[str, str], wait: float | None) -> None:
+    model, _ = make_model(_http_error(429, **headers))
+
+    with pytest.raises(TransientLlmError) as caught:
+        await model.generate(GATE, GateDecision)
+
+    assert caught.value.retry_after_s == wait
+
+
+def test_the_routing_summary_goes_with_the_reply_into_the_trace() -> None:
+    chat = openrouter_chat(ROLE, SecretStr(KEY))
+    assert isinstance(chat, ChatOpenRouter)
+
+    result = chat._create_chat_result(_completion(FINISH, DONE, "call_1"))  # pyright: ignore[reportPrivateUsage]
+
+    metadata = result.generations[0].message.response_metadata
+    assert metadata["provider"] == "Azure"
+    assert metadata["routing"] == {"summary": "available=2, selected=Azure", "attempt": 2}
+
+
+async def test_an_http_error_names_the_provider_that_answered_it() -> None:
+    body = json.dumps(
+        {"error": {"code": 429, "metadata": {"provider_name": "DeepInfra", "raw": "busy"}}}
+    )
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    limited = errors.OpenRouterDefaultError(
+        "Provider returned error", httpx.Response(429, text=body, request=request)
+    )
+    model, _ = make_model(limited)
+
+    with pytest.raises(TransientLlmError, match=r"provider error \(HTTP 429 from DeepInfra\)"):
+        await model.generate(GATE, GateDecision)
+
+
+async def test_a_rate_limit_from_the_real_chat_openrouter_is_transient() -> None:
+    """ChatOpenRouter lets the SDK's error through, so its status reaches the adapter."""
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    limited = errors.TooManyRequestsResponseError(
+        errors.TooManyRequestsResponseErrorData(
+            error=components.TooManyRequestsResponseErrorData(
+                code=429, message="openai/gpt-oss-120b is temporarily rate-limited upstream"
+            )
+        ),
+        httpx.Response(429, request=request),
+    )
+
+    class _Limited:
+        async def send_async(self, **_request: Any) -> dict[str, Any]:
+            raise limited
+
+    def factory(config: RoleConfig, key: SecretStr) -> BaseChatModel:
+        chat = openrouter_chat(config, key)
+        assert isinstance(chat, ChatOpenRouter)
+        chat.client = SimpleNamespace(chat=_Limited())
+        return chat
+
+    model = OpenRouterModel(ROLE, PRICING, SecretStr(KEY), chat_factory=factory)
+
+    with pytest.raises(TransientLlmError, match=r"HTTP 429.*rate-limited upstream") as caught:
+        await model.chat(round_request(), AgentOutcome)
+
+    assert caught.value.retry_after_s is None
+
+
 def test_an_empty_key_is_rejected_when_the_model_is_built() -> None:
     with pytest.raises(ValueError, match="key"):
         OpenRouterModel(ROLE, PRICING, SecretStr(" "), chat_factory=lambda _r, _k: FakeChat())
@@ -775,7 +897,9 @@ def test_the_default_factory_maps_the_role_settings_onto_chat_openrouter() -> No
 def test_models_for_role_builds_one_model_per_entry_of_the_chain() -> None:
     config = ModelsConfig(
         roles={
-            role: RoleConfig(model="acme/small", fallbacks=("acme/tiny",), max_tokens=64)
+            role: RoleConfig(
+                model="acme/small", fallbacks=(FallbackConfig(model="acme/tiny"),), max_tokens=64
+            )
             for role in ModelRole
         },
         pricing={
@@ -818,6 +942,17 @@ def _completion(name: str, args: dict[str, Any], call_id: str, **message: Any) -
     return {
         "id": f"gen-{call_id}",
         "model": "openai/gpt-4.1-nano",
+        "openrouter_metadata": {
+            "attempt": 2,
+            "summary": "available=2, selected=Azure",
+            "endpoints": {
+                "available": [
+                    {"model": "openai/gpt-4.1-nano", "provider": "OpenAI", "selected": False},
+                    {"model": "openai/gpt-4.1-nano", "provider": "Azure", "selected": True},
+                ],
+                "total": 3,
+            },
+        },
         "choices": [
             {
                 "finish_reason": "tool_calls",
@@ -903,3 +1038,66 @@ async def test_the_real_chat_openrouter_sends_the_expected_requests() -> None:
     assert tool["tool_call_id"] == "call_1"
     usage = second_reply.usage
     assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (300, 200, 40)
+    # The SDK's response model has no `provider`: the routing metadata names the endpoint.
+    assert first["x_open_router_metadata"] == "enabled"
+    assert usage.provider == "Azure"
+
+
+async def test_the_agents_claude_fallback_sends_its_own_settings_in_rounds_and_answers() -> None:
+    """The shipped agent chain: gpt-oss on its preferred provider first, then Claude Haiku
+    with no temperature, no reasoning and its own cap, whose rounds use `auto` (no
+    Anthropic endpoint takes `required`) and whose forced answers name the tool."""
+    completions = _StubCompletions(
+        [
+            _completion("read_sop_section", {"section_id": "escalation"}, "call_1"),
+            _completion(FINISH, DONE, "call_2"),
+            _completion("GateDecision", ACK, "call_3"),
+        ]
+    )
+
+    def factory(config: RoleConfig, key: SecretStr) -> BaseChatModel:
+        chat = openrouter_chat(config, key)
+        assert isinstance(chat, ChatOpenRouter)
+        chat.client = SimpleNamespace(chat=completions)
+        return chat
+
+    config = load_models_config(SHIPPED)
+    primary, claude, *_ = models_for_role(
+        config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory
+    )
+    assert primary.model_id == "openai/gpt-oss-120b"
+    assert claude.model_id == "anthropic/claude-haiku-5.5"
+
+    await claude.chat(round_request(), AgentOutcome)
+    await claude.chat(round_request(force_answer=True), AgentOutcome)
+    await claude.generate(GATE, GateDecision)
+
+    first, forced, answer = completions.requests
+    assert first["model"] == "anthropic/claude-haiku-5.5"
+    assert "temperature" not in first
+    assert "reasoning" not in first
+    assert first["max_tokens"] == 2048
+    assert first["provider"] == {"require_parameters": True}
+    assert first["tool_choice"] == "auto"
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": FINISH}}
+    assert answer["tool_choice"] == {"type": "function", "function": {"name": "GateDecision"}}
+
+
+def test_the_agents_primary_prefers_its_provider_and_may_be_served_by_another() -> None:
+    config = load_models_config(SHIPPED)
+    built: list[RoleConfig] = []
+
+    def factory(role: RoleConfig, _key: SecretStr) -> BaseChatModel:
+        built.append(role)
+        return FakeChat()
+
+    models_for_role(config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory)
+
+    routing = built[0].provider.as_openrouter()
+    assert routing == {
+        "order": ["deepinfra"],
+        "allow_fallbacks": True,
+        "require_parameters": True,
+        "quantizations": ["bf16"],
+    }
+    assert [r.model for r in built] == list(config.role(ModelRole.AGENT).models)

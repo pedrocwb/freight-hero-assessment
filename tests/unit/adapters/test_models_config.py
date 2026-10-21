@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from freight_agent.adapters.llm.models_config import (
+    FallbackConfig,
     ModelPricing,
     ModelsConfig,
     ProviderRouting,
@@ -62,7 +63,8 @@ def test_loads_a_valid_file(tmp_path: Path) -> None:
 
     gate = config.role(ModelRole.GATE)
     assert gate.model == "acme/small"
-    assert gate.fallbacks == ("acme/tiny",)
+    assert gate.fallbacks == (FallbackConfig(model="acme/tiny"),)
+    assert gate.models == ("acme/small", "acme/tiny")
     assert gate.temperature == 0
     assert gate.max_tokens == 256
 
@@ -136,7 +138,7 @@ def test_the_chain_pins_the_provider_for_the_primary_model_only() -> None:
     pinned = ProviderRouting(order=("google-ai-studio",), allow_fallbacks=False)
     role = RoleConfig(
         model="acme/small",
-        fallbacks=("acme/tiny", "acme/mid"),
+        fallbacks=(FallbackConfig(model="acme/tiny"), FallbackConfig(model="acme/mid")),
         temperature=0,
         max_tokens=300,
         provider=pinned,
@@ -149,6 +151,82 @@ def test_the_chain_pins_the_provider_for_the_primary_model_only() -> None:
     assert all(c.provider == ProviderRouting() for c in chain[1:])
     assert all(c.fallbacks == () for c in chain)
     assert all((c.temperature, c.max_tokens) == (0, 300) for c in chain)
+
+
+@pytest.mark.unit
+def test_a_fallback_mapping_overrides_only_the_settings_it_names(tmp_path: Path) -> None:
+    """A model that takes no temperature and should not reason, with a smaller cap; the
+    next fallback, a bare id, keeps every setting of the primary."""
+    raw = _config()
+    raw["roles"]["agent"] = {
+        "model": "acme/small",
+        "fallbacks": [
+            {
+                "model": "acme/mid",
+                "temperature": None,
+                "reasoning_effort": None,
+                "max_tokens": 128,
+                "provider": {"order": ["acme-cloud"]},
+            },
+            "acme/tiny",
+        ],
+        "temperature": 0,
+        "max_tokens": 256,
+        "reasoning_effort": "low",
+        "provider": {"order": ["acme-cloud"], "allow_fallbacks": True},
+    }
+
+    agent = load_models_config(_write(tmp_path, raw)).role(ModelRole.AGENT)
+    primary, mid, tiny = agent.chain()
+
+    assert agent.models == ("acme/small", "acme/mid", "acme/tiny")
+    assert (primary.temperature, primary.max_tokens, primary.reasoning_effort) == (0, 256, "low")
+    assert (mid.model, mid.temperature, mid.max_tokens, mid.reasoning_effort) == (
+        "acme/mid",
+        None,
+        128,
+        None,
+    )
+    assert mid.provider == ProviderRouting(order=("acme-cloud",))
+    assert (tiny.temperature, tiny.max_tokens, tiny.reasoning_effort) == (0, 256, "low")
+    assert tiny.provider == ProviderRouting()
+
+
+@pytest.mark.unit
+def test_a_fallback_mapping_keeps_unnamed_settings_of_the_primary() -> None:
+    role = RoleConfig.model_validate(
+        {
+            "model": "acme/small",
+            "fallbacks": [{"model": "acme/tiny", "max_tokens": 64}],
+            "temperature": 0.5,
+            "max_tokens": 256,
+            "reasoning_effort": "medium",
+        }
+    )
+
+    _, tiny = role.chain()
+
+    assert (tiny.temperature, tiny.max_tokens, tiny.reasoning_effort) == (0.5, 64, "medium")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("fallback", "named"),
+    [
+        ({"model": "acme/tiny", "max_tokens": None}, "max_tokens"),  # no cap is not a cap
+        ({"model": "acme/tiny", "temprature": 0}, "temprature"),
+        ({"model": "acme/small"}, "acme/small"),  # the primary again
+        ({"model": "acme/tiny", "reasoning_effort": "max"}, "reasoning_effort"),
+    ],
+)
+def test_a_broken_fallback_mapping_is_an_error_naming_it(
+    tmp_path: Path, fallback: dict[str, Any], named: str
+) -> None:
+    raw = _config()
+    raw["roles"]["agent"]["fallbacks"] = [fallback]
+
+    with pytest.raises(ValueError, match=named):
+        load_models_config(_write(tmp_path, raw))
 
 
 @pytest.mark.unit

@@ -121,7 +121,10 @@ def test_recipient_is_contact_drops_an_injected_sms_recipient(load: Load) -> Non
     violation = dropped(RecipientIsContact(), action, context(load))
 
     assert violation.severity is Severity.HIGH
-    assert "x@y.com" in violation.message
+    assert violation.message == (
+        "not a contact of load 481207: x@y.com. Only the load's contacts, named by contact "
+        "id, can receive a message: send nothing to another address"
+    )
 
 
 @pytest.mark.unit
@@ -159,6 +162,14 @@ def test_channel_allowed_drops_a_channel_the_contact_does_not_list(
 
     assert violation.severity is Severity.LOW
     assert contact_id in violation.message
+    assert violation.message.endswith(". Reach each contact only on a channel they have")
+
+
+@pytest.mark.unit
+def test_channel_allowed_names_the_channels_the_contact_has(load: Load) -> None:
+    violation = dropped(ChannelAllowed(), sms(DISPATCHER), context(load))
+
+    assert violation.message.startswith(f"sms is not a channel of {DISPATCHER} (has email). ")
 
 
 @pytest.mark.unit
@@ -195,7 +206,10 @@ def test_sms_rate_limit_drops_at_the_limit_counting_the_window_start(load: Load)
     violation = dropped(SmsRateLimit(), sms(DRIVER), context(load, recent_outbound=recent))
 
     assert violation.severity is Severity.LOW
-    assert DRIVER in violation.message
+    assert violation.message == (
+        f"{DRIVER} already has 3 SMS in the last 60 minutes (limit 3). Send them no more SMS "
+        "now: a timer can follow up later"
+    )
 
 
 @pytest.mark.unit
@@ -252,7 +266,29 @@ def test_obligation_exists_drops_ledger_actions_without_an_open_obligation(
     violation = dropped(ObligationExists(), action, context(load))
 
     assert violation.severity is Severity.LOW
-    assert "eta_request" in violation.message
+    assert violation.message.startswith(f"{action.type} needs an open eta_request obligation. ")
+
+
+@pytest.mark.unit
+def test_obligation_exists_says_how_a_timer_gets_its_obligation(load: Load) -> None:
+    timer = ScheduleTimer(kind=ETA, due_in_minutes=30)
+
+    assert dropped(ObligationExists(), timer, context(load)).message == (
+        "schedule_timer needs an open eta_request obligation. Stage a request for eta_request "
+        "or open_obligation before it, or leave it out"
+    )
+
+
+@pytest.mark.unit
+def test_obligation_exists_says_only_a_ledger_obligation_is_deferred_or_closed(
+    load: Load,
+) -> None:
+    close = CloseObligation(kind=ETA, status=CloseStatus.CANCELLED)
+
+    assert dropped(ObligationExists(), close, context(load), (eta_sms(),)).message == (
+        "close_obligation needs an open eta_request obligation. Only an obligation the ledger "
+        "shows open (get_ledger) can be deferred or closed"
+    )
 
 
 @pytest.mark.unit
@@ -333,14 +369,21 @@ def test_deferral_policy_drops_a_deferral_longer_than_the_limit(load: Load) -> N
     violation = dropped(DeferralWithinPolicy(), DeferObligation(kind=ETA, minutes=16), ctx)
 
     assert violation.severity is Severity.LOW
-    assert "15" in violation.message
+    assert violation.message == (
+        "a deferral of 16 minutes is over the 15-minute limit. Defer by 15 minutes or less"
+    )
 
 
 @pytest.mark.unit
 def test_deferral_policy_drops_a_deferral_beyond_the_allowed_count(load: Load) -> None:
     ctx = context(load, open_obligations=(eta_obligation(deferrals_used=1),))
 
-    dropped(DeferralWithinPolicy(), DeferObligation(kind=ETA, minutes=5), ctx)
+    violation = dropped(DeferralWithinPolicy(), DeferObligation(kind=ETA, minutes=5), ctx)
+
+    assert violation.message == (
+        "the eta_request obligation already used its 1 deferral(s). Do not defer it again: "
+        "take the SOP's next step instead"
+    )
 
 
 @pytest.mark.unit
@@ -394,8 +437,21 @@ def test_attempt_cap_drops_a_request_at_the_cap(load: Load) -> None:
 
     assert violation.severity is Severity.LOW
     assert violation.message == (
-        "eta_request was already requested 2 times (cap 2): its requests are used up"
+        "eta_request was already requested 2 times (cap 2): its requests are used up. No "
+        "further message may carry requests: eta_request. A message the SOP calls for now "
+        "(an escalation email, for instance) goes without requests, with purpose escalation"
     )
+
+
+@pytest.mark.unit
+def test_attempt_cap_lets_the_escalation_email_through_without_requests(load: Load) -> None:
+    """What the refusal tells the agent to stage instead passes the rule."""
+    ctx = context(load, open_obligations=(eta_obligation(attempts=2),))
+    tagged = SendEmail(to_contact_ids=(DISPATCHER,), body="No ETA yet.", requests=ETA)
+
+    dropped(AttemptCap(), tagged, ctx)
+    escalation = tagged.model_copy(update={"requests": None, "purpose": Purpose.ESCALATION})
+    assert check(AttemptCap(), escalation, ctx) is None
 
 
 @pytest.mark.unit
@@ -488,8 +544,13 @@ def test_known_obligation_kind_drops_a_kind_outside_the_catalog(load: Load, acti
 
     violation = dropped(KnownObligationKind(), action, ctx)
 
+    fix = (
+        "Name one of them, or leave requests out of a message that asks for something else"
+        if isinstance(action, SendSms | SendEmail)
+        else "Name one of them"
+    )
     assert violation.message == (
-        "pod is not an obligation kind of this broker (kinds: eta_request)"
+        f"pod is not an obligation kind of this broker (kinds: eta_request). {fix}"
     )
 
 
@@ -512,7 +573,7 @@ def test_known_obligation_kind_without_a_catalog_allows_any_kind(load: Load) -> 
 def test_known_obligation_kind_with_an_empty_catalog_says_none(load: Load) -> None:
     violation = dropped(KnownObligationKind(), eta_sms(), context(load, obligation_kinds=()))
 
-    assert violation.message.endswith("(kinds: none)")
+    assert "(kinds: none). " in violation.message
 
 
 # --- open_obligation ------------------------------------------------------------------
@@ -526,7 +587,10 @@ def test_obligation_exists_drops_opening_an_obligation_that_is_open(load: Load) 
         ObligationExists(), OpenObligation(kind="pod"), context(load, open_obligations=(pod,))
     )
 
-    assert violation.message == "an open pod obligation already exists"
+    assert violation.message == (
+        "an open pod obligation already exists: do not open it again, a timer or a request "
+        "acts on the open one"
+    )
     assert check(ObligationExists(), OpenObligation(kind="pod"), context(load)) is None
     dropped(
         ObligationExists(), OpenObligation(kind="pod"), context(load), (OpenObligation(kind="pod"),)
@@ -553,6 +617,9 @@ def test_no_duplicate_action_drops_an_action_already_approved(load: Load) -> Non
     violation = dropped(NoDuplicateAction(), sms(text="PO 55821"), context(load), approved)
 
     assert violation.severity is Severity.LOW
+    assert violation.message == (
+        "the plan already has this send_sms: it is staged, do not stage it again"
+    )
 
 
 # --- no_contact_details_in_text -------------------------------------------------------
@@ -610,8 +677,10 @@ def test_no_contact_details_names_every_kind_it_found(load: Load) -> None:
 
     message = dropped(NoContactDetailsInText(), action, context(load)).message
 
-    assert "email address" in message
-    assert "phone number" in message
+    assert message == (
+        "outbound text contains an email address and a phone number. Leave contact details "
+        "out of the text: people are reached by contact id"
+    )
 
 
 @pytest.mark.unit
@@ -670,6 +739,7 @@ def test_stage_moves_forward_drops_other_moves(
 
     assert violation.severity is Severity.LOW
     assert reason in violation.message
+    assert any(fix in violation.message for fix in ("leave", "set a later"))
 
 
 @pytest.mark.unit

@@ -111,9 +111,9 @@ src/freight_agent/
                  blobs, page reader, clock, tracer
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
                  (graph/), executor, escalations, runtime, document pipeline, prompt variables
-  adapters/      memory store, OpenRouter with fallbacks and circuit breakers, SOP files and
-                 lint, Prompt Hub and local prompts, pypdfium2 pages, blobs, LangSmith links,
-                 recording gateways
+  adapters/      memory store, OpenRouter with retries, fallbacks and circuit breakers, SOP
+                 files and lint, Prompt Hub and local prompts, pypdfium2 pages, blobs,
+                 LangSmith links, recording gateways
   evalkit/       scenario spec, player, graders, judge, LangSmith experiments, metadata
   api/           FastAPI platform: simulation, ingress, scenarios, SOPs, documents, stream
   bootstrap.py   the composition root: the only place that wires adapters to ports
