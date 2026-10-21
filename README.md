@@ -35,10 +35,11 @@ emails the dispatcher in the main thread and creates a Hero task. The scenario i
 one play costs about $0.003 on OpenRouter. Three ways to watch it:
 
 1. **The platform.** Start it (below), open http://localhost:5173, choose
-   `a_client_a_high_risk` on the Scenarios screen and press Run. Each step shows its
-   checks; each run links to the Load inspector (its path through the graph, its tool calls,
-   its actions, the ledger and timers) and to its LangSmith trace. The inspector's free
-   play lets you write as the driver instead.
+   `a_client_a_high_risk` on the Scenarios screen and press Run. Its load opens as a
+   conversation with each step's checks above it; click any message of the agent for why it
+   wrote it (what it understood, the SOP it followed, what it did, what it left open), with
+   the run graph, tool calls and LangSmith trace under Details. Or play the driver yourself:
+   write as the driver and press Send and wait, then save the conversation as a new scenario.
 2. **LangGraph Studio.** `make studio`, open the Studio URL it prints, and run the graph
    `scenario` with the input `{"scenario_id": "a_client_a_high_risk"}`. Each run of the
    load is a visit of the `run` node, with the run graph inside it.
@@ -90,7 +91,7 @@ uv run agent memory list --client northline   # every note of a client, by facil
 uv run agent memory list --load 481207        # the notes of each stop of a load
 ```
 
-The platform shows them per stop in the load inspector (`GET /api/loads/{id}/facility-memory`).
+The platform shows them per stop under Load facts (`GET /api/loads/{id}/facility-memory`).
 
 **With your own LangSmith workspace, publish the prompts once.** The runtime reads its
 prompt templates from the LangSmith Prompt Hub at the pins of `config/prompts.yaml`

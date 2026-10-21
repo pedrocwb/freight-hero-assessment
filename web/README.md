@@ -1,9 +1,9 @@
 # Platform (web)
 
-The page for testing the load agent: play the eval scenarios live and watch their checks,
-then open any load to read its story, event by event, with each run's path through the
-graph, its tool calls, its answer and the actions it took. LangSmith keeps the deep traces
-and the eval experiments; the page links to them.
+The page for testing the load agent: a load is a conversation. Write as its driver,
+dispatcher or broker, press Send and wait, and read what the agent answered; click an
+answer for why. Save a conversation as an eval scenario, and play the scenarios live.
+LangSmith keeps the deep traces and the eval experiments; the page links to them.
 
 React 18, TypeScript and Vite. No UI kit and no runtime CDN or web font: one stylesheet
 with CSS variables, light and dark through `prefers-color-scheme`. Mermaid draws the run
@@ -33,16 +33,16 @@ pnpm dev            # http://localhost:5173, /api is proxied to http://localhost
 
 | Screen | What it shows |
 |---|---|
-| Scenarios | The scenarios of `evals/scenarios/` by suite, with their tags, description and steps. Run plays one live on OpenRouter in a reset world; each step shows its time, note, status and checks (with the detail of a failure), the run's spend, and links to the runs it caused in the inspector. Disabled, with the reason, while the model has no key or another scenario plays. A link to the LangSmith project when tracing is on. |
-| Load inspector | One load (picked in the top bar): a timeline in load time where each inbound event (a message, a ping, a timer, a document) is followed by the run it caused. The open run shows its status, intent, gate, SOP sections, cost and tokens; its path on the run graph (visited nodes and edges highlighted, visit counts such as `agent ×3`); its trajectory (each tool call with its arguments and result, accepted or refused, in order); its answer; its actions by channel (SMS, email, broker Slack, TMS note, Hero task) with their delivery, the ledger changes and what the validator dropped; and its LangSmith trace. Beside it: free play (write as one of the load's contacts on one of their channels, attach a file, send a delay-risk ping, set the inbound latency), the ledger, the timers, the documents and the load's facts. New load creates one from a fixture. |
+| Conversation | One load (picked in its header when there are several): one line with its id, client, stage, delay risk and next stop, then the chat. Messages from the driver, dispatcher and broker on the left, the agent's SMS, emails and broker Slack messages on the right, each with its channel and local time; system events (a risk change, a timer that fired, a document read) and the agent's quiet work (a Hero task, a TMS note, a stage change, a run that did nothing) as small markers. The composer writes as one of the load's contacts on one of their channels, with a file if you like: Send and wait sends it, lets the latency pass, runs the agent and shows its answer, or says it decided to do nothing. Quieter: a location ping (low, medium, high) and "Skip to next timer". Clicking an agent message or marker opens "why" on the right: what the run understood (the event, the intent, the gate's call and its probability), the SOP sections it followed and the facility notes it saw, each action with a check or a cross and the rule's reason, what it left open, and its own one-line answer. Details, folded: the graph path and the run graph, the tool calls, the model calls, tokens, cost, latency and the LangSmith trace. Load facts (a drawer) has the requests, timers, documents, facility notes and the load. Save as scenario drafts the recorded steps with expectations from what happened; uncheck some, add forbid lines, edit the notes, save to `evals/scenarios/<suite>/<id>.yaml`. |
+| Scenarios | The scenarios of `evals/scenarios/` by suite, one line each with Run. Run plays one live in a reset world and opens its load's conversation, where each step's checks show as a pass or fail line (a failure opens to the checks that failed). |
 | SOPs | The sections that apply for a client, load types, intent and stage, the client's catalog, and the agent's SOP search. Read-only. |
 
-The clock sits beside every screen: +1, +5 and +30 minutes, "To next timer", tick and
-reset. It waits while a scenario plays, since the scenario moves it. Every time is shown
-in the current stop's timezone with its abbreviation, for example "07:31 PDT".
+The clock in the top bar is the simulation's, in the current stop's timezone. Times are
+local to the stop ("07:31 PDT"). Inputs wait while a scenario plays, since it moves the
+clock.
 
-Links carry their target in the hash: `#/inspector?load=481207&run=run_5626026aac1c`
-opens the inspector on that run, `#/scenarios?id=a_client_a_high_risk` on that scenario.
+Links carry their target in the hash: `#/load?load=481207&run=run_5626026aac1c` opens the
+conversation on that run's explanation (old `#/inspector` links still work).
 
 ## How it is built
 
@@ -56,10 +56,11 @@ opens the inspector on that run, `#/scenarios?id=a_client_a_high_risk` on that s
 - `src/state/sim.tsx`: the clock, the loads, the selected load's snapshot, and the
   scenario that plays or played last.
 - `src/lib/`: pure helpers, unit tested on typed fixtures of the contract
-  (`lib/testFixtures.ts`): the timeline (`timeline.ts`: events, their runs, the actions
-  by channel), the run's path on the graph (`graph.ts`: Mermaid with the highlight), the
-  scenarios and a run's progress (`scenarios.ts`), the trajectory table, time formatting
-  and the hash routes.
+  (`lib/testFixtures.ts`): the chat assembled from the event log and the outbox
+  (`conversation.ts`), the "why" of a run (`why.ts`), the send-and-wait state
+  (`sendFlow.ts`), the scenario drafted from a recording (`scenarioDraft.ts`), the run's
+  path on the graph (`graph.ts`: Mermaid with the highlight), the scenarios
+  (`scenarios.ts`), time formatting and the hash routes.
 - `src/screens/`: one file per screen; `src/components/`: their parts.
 
 Errors from the API (`{"detail": ...}`) show as toasts; a panel whose data fails to load
