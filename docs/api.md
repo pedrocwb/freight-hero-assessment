@@ -1,30 +1,31 @@
 # Platform API
 
-The backend of the platform: drive one simulated world through time, play every contact
-of a load, play an eval scenario live and follow its checks, and inspect every agent run.
-The code is in `src/freight_agent/api/`; the React UI in `web/` is built on this API.
+The backend of the platform. With it you can move one simulated world through time, play
+every contact of a load, play an eval scenario live and follow its checks, and inspect every
+agent run. The code is in `src/freight_agent/api/`; the React UI in `web/` uses this API.
 
 ```
 uv run agent serve                      # http://127.0.0.1:8000; --host and --port to change
 open http://127.0.0.1:8000/docs         # OpenAPI, generated from the same models
 ```
 
-Base path `/api`, JSON everywhere. Domain objects are serialized as they are
-(`model_dump(mode="json")`); datetimes are ISO 8601 with their offset, in the
-simulation's timezone, and a request time without an offset is read in that timezone.
+All paths start with `/api`, and every body is JSON. Domain objects are returned as they
+are (`model_dump(mode="json")`). Datetimes are ISO 8601 with their offset, in the
+simulation's timezone; a request time without an offset is read in that timezone.
 
-The API runs **one simulation in process**: the same `AgentRuntime` as the evals and the
-CLI, built by the composition root, on a virtual clock, the store `PERSISTENCE` names (in
-memory by default; Postgres in Docker Compose, where loads, runs, the ledger and the
-facility notes survive a restart) and recording gateways (nothing is sent anywhere). The model is always the live one on OpenRouter: every
-run that reaches a model spends from `OPENROUTER_API_KEY`. Without the key the platform
-starts, `SimState.model_ready` is false, scenarios cannot start (503), and a run that
-needs the model escalates to a Hero. With `LANGSMITH_TRACING=true` and its key, each run
-has a LangSmith trace and `trace_url`.
+**One simulation per process.** The API runs the same runtime as the evals and the CLI, on
+a virtual clock, with recording gateways (nothing is sent anywhere). It uses the store that
+`PERSISTENCE` names: in memory by default, Postgres in Docker Compose, where loads, runs, the
+ledger and the facility notes survive a restart.
 
-Writes (anything that moves the clock or feeds the agent) are serialized by one lock;
-reads are never blocked by a run that is thinking. While a scenario plays, every write
-from a client is refused with 409.
+**The model is always the live one on OpenRouter**, so every run that reaches a model spends
+from `OPENROUTER_API_KEY`. Without the key the platform still starts, `SimState.model_ready`
+is false, scenarios cannot start (503), and a run that needs the model escalates to a Hero.
+With `LANGSMITH_TRACING=true` and its key, each run has a LangSmith trace and a `trace_url`.
+
+**Writes take turns.** Anything that moves the clock or feeds the agent waits for one lock.
+Reads are never blocked by a run that is thinking. While a scenario plays, every write from
+a client is refused with 409.
 
 ## Simulation and clock
 
@@ -36,15 +37,14 @@ from a client is refused with 409.
 | POST | `/api/sim/tick` | | `StepResult` |
 
 - A new app, and `reset` without `start`, starts at `2026-10-13T06:55` in
-  `America/Los_Angeles`, five minutes before the assignment's ping; a new app on a
-  Postgres store that holds loads starts at the latest time they hold instead. `reset`
-  clears the loads, runs, documents, blobs and facility notes (on Postgres, every domain
-  table and the facility memory's items). An unknown timezone is a 400 and the old simulation
-  stays.
-- `advance` moves time as the scenario player does: it stops at every pending timer due
-  on the way, in due order, sets the clock there and ticks (timers fire with zero
-  latency); then it sets the target time and ticks once more. A target before now is a
-  400.
+  `America/Los_Angeles`, five minutes before the assignment's ping. A new app on a Postgres
+  store that holds loads starts at the latest time they hold instead.
+- `reset` clears the loads, runs, documents, blobs and facility notes (on Postgres, every
+  domain table and the facility memory's items). An unknown timezone is a 400, and the old
+  simulation stays.
+- `advance` moves time as the scenario player does. It stops at every pending timer due on
+  the way, in order, sets the clock there and ticks (timers fire with no delay). Then it sets
+  the target time and ticks once more. A target before now is a 400.
 - `tick` fires due timers, reads pending documents, runs the queue and delivers the
   outbox, without moving the clock.
 
@@ -127,11 +127,12 @@ The contract with the integration layer.
 | POST | `/api/loads/{load_id}/attachments` | multipart: `file`, and the message that carries it: `sender_contact_id`, `body`, `channel` (`sms`, `email`, `slack`; default `sms`), `message_id`, `occurred_at`, `wait` (default false) | `{"attachment_id", "document_id", "event_id", "runs"}` (201); 400 for an empty file; 409 for a message id already received; 413 over 20 MB |
 | GET | `/api/loads/{load_id}/documents` | | `[Document]`, oldest first; 404 for an unknown load |
 
-An upload stores the bytes, ingests a message with that attachment and saves its document
-as `pending`; nothing runs yet, unless `wait` is true: then `latency_seconds` (query,
-default 60) pass, the API ticks and `runs` lists what ran. The next tick (`POST /api/sim/tick`, or any input) reads
-the document before it runs the queue, then runs the message (which does not act on the
-document) and the document's `document_processed` event (which does).
+An upload stores the file, takes in a message with that attachment and saves its document
+as `pending`. Nothing runs yet, unless `wait` is true: then `latency_seconds` (query,
+default 60) pass, the API ticks, and `runs` lists what ran. The next tick
+(`POST /api/sim/tick`, or any input) reads the document before it runs the queue. Then it
+runs the message, which does not act on the document, and the document's
+`document_processed` event, which does.
 
 `Document` = `{"document_id", "load_id", "attachment_id", "broker_id", "filename",
 "content_type", "status": "pending" | "processed" | "needs_review" | "failed", "type_id",
@@ -195,9 +196,9 @@ event with the current `SimState`, then every change, one JSON object per `data:
 | `clock` | `SimState` | after every change, last |
 | `scenario` | `ScenarioRun` | a scenario started, a step started or finished, the run ended |
 
-A comment (`: heartbeat`) goes out after 15 s of silence. Each subscriber has a bounded
-queue of 256 messages and loses its oldest ones when it falls behind, so a client refetches
-what it shows on the next `clock` event.
+A comment (`: heartbeat`) goes out after 15 s of silence. Each subscriber has a queue of at
+most 256 messages and loses the oldest ones when it falls behind, so a client should fetch
+again what it shows on the next `clock` event.
 
 ## Errors and CORS
 
