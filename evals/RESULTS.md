@@ -5,7 +5,7 @@ number comes from a LangSmith experiment: one row per scenario repetition, the e
 scores, and the run records in each row (tokens, cost, latency, model and provider of every
 model call). The links open in the LangSmith workspace the experiments ran in, so they need
 access to it. To reproduce a figure on your own keys, run the command next to it (see the
-[README](../README.md#commands)). pass^k means a scenario passes only if all k repetitions
+[docs/development.md](../docs/development.md#commands)). pass^k means a scenario passes only if all k repetitions
 pass.
 
 What was measured:
