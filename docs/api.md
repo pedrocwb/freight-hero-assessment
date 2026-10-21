@@ -55,7 +55,10 @@ from a client is refused with 409.
 
 `Run` = the run record plus `cost_usd`, its total model cost: `run_id`, `event_id`,
 `load_id`, `started_at`, `finished_at`, `status` (`skipped`, `noop`, `acted`,
-`escalated`, `failed`), `gate` (`{"intent", "act", "reason"}`), `intent`,
+`escalated`, `failed`), `gate` (`{"intent", "act", "reason"}`), `gate_engine` (`llm`
+or `jev`: what read the message; null when code gave the intent), `gate_scores` (on the
+jev engine: `{"model", "intents" (intent to probability), "act" (the probability that the
+message needs the agent now), "threshold", "intent_confidence"}`, else null), `intent`,
 `sop_section_ids`, `sections_searched`, `sop_version`, `plan` (`{"rationale", "actions"}`:
 every action the agent proposed, refused ones included), `violations`, `trajectory`
 (`[{"tool", "args", "result", "accepted" (true, false, or null for a read tool),

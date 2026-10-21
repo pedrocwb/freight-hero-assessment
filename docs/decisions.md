@@ -126,11 +126,18 @@ fits its kind; a requirement names a known type and kind, and `within_minutes` n
 | `document_processed` | `document_processed` | none |
 | `attachment_received`, or a message with attachments and no text | `document` | none |
 | `hero_update` | `other`, no action | none |
-| `inbound_message` | from the gate model | `gate` role, one forced structured call |
+| `inbound_message` | from the gate's engine | one call: a forced structured answer (`llm`) or one decision (`jev`) |
 
-The run goes on to the agent when the gate says `act`, or when the intent is `must_act` in
-the client's catalog; otherwise it ends as `noop` after one model call. A message can only
-have a message intent of the catalog: any other answer becomes `other`, which acts.
+`GATE_ENGINE` chooses what reads a message. `llm` (the default): the gate's chat model
+answers intent, act and reason, and the run goes on to the agent when it says `act`, or
+when the intent is `must_act` in the client's catalog; otherwise it ends as `noop`. `jev`:
+a decision model (`decisions.gate` in `config/models.yaml`) answers two questions in one
+call, a choice over the catalog's message intents and the probability that the message
+needs the agent now (`application/gate_decision.py`); the run ends as `noop` only when the
+intent is `noop_eligible` and not `must_act` and that probability is under
+`GATE_ACT_THRESHOLD` (0.2), so an uncertain reading goes on to the agent. On either engine
+a message can only have a message intent of the catalog: any other answer becomes
+`other`, which acts.
 
 Only a confirmed transition into or out of `high` becomes an event (`domain/ping_filter.py`:
 an upgrade is confirmed by 1 ping, a downgrade by 2). `medium` is tracked but does not wake
@@ -304,9 +311,12 @@ Studio:
 
 ## Prompts and their versions
 
-- Four templates, one per model role: `gate`, `agent`, `extract`, `judge`. Each is a chat
-  template of a system and a user message (`ports/prompts.py`), stored in the LangSmith
-  Prompt Hub as `freight-agent-<role>` with a reviewable copy in `prompts/<role>.yaml`.
+- Five templates, one per model role: `gate`, `agent`, `extract`, `judge`, and
+  `gate_decision` (the jev gate's texts: the two messages are the parts of the state the
+  decision model reads, and the template's `tools` hold its questions' instructions and
+  criteria). Each is a chat template of a system and a user message (`ports/prompts.py`),
+  stored in the LangSmith Prompt Hub as `freight-agent-<role>` with a reviewable copy in
+  `prompts/<role>.yaml`.
 - `config/prompts.yaml` pins each role to a reference: `<name>:<tag>` (`prod` is what runs)
   or `<name>:<commit>`. `PROMPTS_TAG` (or `agent eval run --prompt-tag`) runs every role at
   another tag.
@@ -315,8 +325,9 @@ Studio:
   `PROMPTS_SOURCE=local`, the runtime reads `prompts/`, with a warning.
 - A version is the Hub commit's first 12 hex digits, or `local:<sha256 prefix>` for the
   repository copy. Every run records the version of each prompt it sent
-  (`RunRecord.prompts`); the run's trace carries `prompt_gate` and `prompt_agent`; an
-  experiment's metadata carries every role's version and reference.
+  (`RunRecord.prompts`); the run's trace carries `gate_engine`, `prompt_gate` (or
+  `prompt_gate_decision`) and `prompt_agent`; an experiment's metadata carries every role's
+  version and reference, and the gate's engine.
 - Code computes the variables (`application/prompts.py`): the system message from the
   client alone (the catalog's intents, kinds, limits), the user message from the run.
   Each service checks at build time that its template names only variables it computes,
