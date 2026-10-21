@@ -152,6 +152,7 @@ def _run(
     from freight_agent.adapters.knowledge.memory import MemorySopIndex
     from freight_agent.bootstrap import (
         BootstrapError,
+        build_embeddings,
         build_llm,
         build_prompts,
         build_runtime_config,
@@ -183,6 +184,7 @@ def _run(
     except BootstrapError as exc:
         raise UsageProblem(str(exc)) from exc
     config = build_runtime_config(settings)
+    embeddings = build_embeddings(settings)  # the facility memory's index, for every trial
     # The examples' traces carry each graph node and model round: LangChain traces them
     # into the experiment through LangSmith's context.
     enable_native_tracing(settings)
@@ -208,6 +210,7 @@ def _run(
         meter=CostMeter(cap_usd=cost_cap_usd),
         config=config,
         decisions=decisions,
+        embeddings=embeddings,
     )
     client = Client(
         api_key=langsmith_key.get_secret_value(),
@@ -235,6 +238,9 @@ def _run(
     except LangSmithUnavailable as exc:
         raise UsageProblem(f"LangSmith: {exc}; nothing was run") from exc
     typer.echo(render_table(run, k))
+    spent = getattr(embeddings, "spent_usd", None)
+    if isinstance(spent, float) and spent:
+        typer.echo(f"facility memory embeddings: ${spent:.6f} (not in the cost cap)")
     return exit_code(run)
 
 

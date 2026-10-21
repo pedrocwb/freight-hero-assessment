@@ -41,7 +41,9 @@ three parts so that each run is a node visit of its own:
   conversation, the staged proposals, the trajectory, the validation, the verdict). The
   state after `run` holds the event, the run record and the ledger, timers and outbox
   after the commit.
-- `deliver`: the outbox dispatched; `sent` is what the recording gateways took.
+- `deliver`: the outbox dispatched, then the facility memory extraction of the loads
+  delivered so far (`AgentRuntime.process_background`); `sent` is what the recording
+  gateways took.
 - `check`: the step's checks, as the eval graders judge them (`evalkit.graders`), the
   judge included for a step with a rubric, and after the last step the invariants.
 
@@ -457,9 +459,11 @@ class _Nodes:
     async def deliver(self, state: StudioState) -> StudioState:
         world = self._worlds.move(state)
         sent = await world.runtime.dispatch_outbox()
+        extracted = await world.runtime.process_background()  # facility memory, delivered loads
+        learned = f"; facility notes of {len(extracted)} load(s) extracted" if extracted else ""
         update: StudioState = {
             "moves": world.moves,
-            "note": f"{world.time_of()}: {sent} outbox item(s) delivered",
+            "note": f"{world.time_of()}: {sent} outbox item(s) delivered{learned}",
             "sent": [
                 {"channel": d.channel, "idempotency_key": d.idempotency_key, **d.payload}
                 for d in world.gateways.log.deliveries

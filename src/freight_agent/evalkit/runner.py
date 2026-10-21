@@ -26,12 +26,15 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from langchain_core.embeddings import Embeddings
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.documents.pdfium import PdfiumPageReader
+from freight_agent.adapters.memory.embeddings import HashEmbeddings, embeddings_dims, memory_store
+from freight_agent.adapters.memory.store import StoreFacilityMemory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.contracts import (
@@ -41,10 +44,12 @@ from freight_agent.application.contracts import (
     LocationPing,
 )
 from freight_agent.application.documents import DocumentPipeline
-from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
+from freight_agent.application.memory import MemoryExtractor
+from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps, StopFacts
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Load
+from freight_agent.domain.memory import FacilityFact, facility_key
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.runs import RunRecord, Usage
 from freight_agent.evalkit.counting import CountingModel
@@ -55,6 +60,7 @@ from freight_agent.interfaces.decisions import DecisionModel
 from freight_agent.interfaces.documents import BlobStore
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.memory import FacilityMemory
 from freight_agent.interfaces.prompts import Prompts
 
 # Each tick fires every due timer, so a timer still due after this many ticks at
@@ -76,6 +82,11 @@ class RuntimeLike(Protocol):
     async def next_timer_due_at(self) -> datetime | None: ...
 
     async def snapshot(self, load_id: str) -> LoadSnapshot: ...
+
+    @property
+    def facility_memory(self) -> FacilityMemory | None: ...
+
+    async def facility_facts(self, load_id: str) -> list[StopFacts]: ...
 
 
 class RunnerError(Exception):
@@ -183,7 +194,16 @@ class ScenarioPlayer:
         self.judge_usage: list[Usage] = []
 
     async def start(self) -> None:
+        """Register the load, and write the scenario's facility notes into the runtime's
+        facility memory (`RunnerError` when the runtime has none)."""
         await self._runtime.register_load(self.load)
+        if not self.scenario.memories:
+            return
+        memory = self._runtime.facility_memory
+        if memory is None:
+            raise RunnerError("the scenario seeds facility notes, and the runtime has no memory")
+        for client, facts in seed_facts(self.scenario, self.load).items():
+            await memory.apply(client, upserts=facts)
 
     async def play(self, index: int) -> StepObservation:
         """Play step `index`: a tick at every instant `next_tick` stops at, then what the
@@ -235,6 +255,7 @@ class ScenarioPlayer:
         before, after = progress.before, await self._runtime.snapshot(self.load.load_id)
         outbox = _created(before.outbox, after.outbox, key=lambda item: item.outbox_id)
         llm_calls = self._model.calls - progress.llm_calls_before  # the judge is apart
+        notes = await self._runtime.facility_facts(self.load.load_id)
         return StepObservation(
             step_index=progress.index,
             at=progress.at,
@@ -243,6 +264,7 @@ class ScenarioPlayer:
             llm_calls=llm_calls,
             snapshot=after,
             judge=await self._judged(step, outbox),
+            memories=tuple(f for stop in notes for f in stop.facts),
         )
 
     async def _judged(self, step: Step, outbox: Sequence[OutboxItem]) -> JudgeResult | None:
@@ -329,12 +351,44 @@ class Played(BaseModel):
         return sum(u.cost_usd for u in (*self.usage, *self.judge_usage))
 
 
+def seed_facts(scenario: Scenario, load: Load) -> dict[str, list[FacilityFact]]:
+    """The scenario's facility notes, by client: each on its stop's facility, told at
+    09:00 on its day (in the scenario's timezone). `ScenarioSetupError` for a stop the
+    load does not have."""
+    stops = {s.sequence: s for s in load.stops}
+    tz = scenario_timezone(scenario)
+    seeded: dict[str, list[FacilityFact]] = {}
+    for number, seed in enumerate(scenario.memories, 1):
+        stop = stops.get(seed.stop)
+        if stop is None:
+            raise ScenarioSetupError(f"memories[{number - 1}] names stop {seed.stop}, not a stop")
+        told = local_time(seed.learned_on, "09:00", tz)
+        client = seed.client or load.broker_id
+        seeded.setdefault(client, []).append(
+            FacilityFact(
+                fact_id=f"seed-{number}",
+                client_id=client,
+                facility_key=facility_key(stop),
+                facility_name=stop.name,
+                text=seed.text,
+                kind=seed.kind,
+                source_load_id=seed.load_id,
+                source_event_id=f"seed:{number}",
+                source_at=told,
+                created_at=told,
+                updated_at=told,
+            )
+        )
+    return seeded
+
+
 @dataclass(frozen=True)
 class TrialRuntime:
     runtime: AgentRuntime
     clock: VirtualClock
     model: CountingModel
     blobs: MemoryBlobStore
+    memory: StoreFacilityMemory
 
 
 def build_trial_runtime(
@@ -345,15 +399,19 @@ def build_trial_runtime(
     *,
     config: RuntimeConfig | None = None,
     decisions: DecisionModel | None = None,
+    embeddings: Embeddings | None = None,
 ) -> TrialRuntime:
     """The product runtime on a fresh memory store, with a virtual clock at `start`,
-    recording gateways, deterministic ids, the document pipeline, the experiment's prompt
-    templates and no trace links (in an experiment the runs nest under the example's own
-    trace). `config` sets the gate's engine; `decisions` is the jev engine's model,
-    counted with the model's calls."""
+    recording gateways, deterministic ids, the document pipeline, a fresh facility memory
+    and its extraction, the experiment's prompt templates and no trace links (in an
+    experiment the runs nest under the example's own trace). `config` sets the gate's
+    engine; `decisions` is the jev engine's model, counted with the model's calls;
+    `embeddings` index the facility memory (default: the offline hash)."""
     clock = VirtualClock(start)
     counted = CountingModel(model, decisions)
     blobs = MemoryBlobStore()
+    embeddings = embeddings or HashEmbeddings()
+    memory = StoreFacilityMemory(memory_store(embeddings, embeddings_dims(embeddings)))
     deps = RuntimeDeps(
         uow_factory=MemoryStore().unit_of_work,
         clock=clock,
@@ -368,6 +426,8 @@ def build_trial_runtime(
         # failed run that the scenario then reports as the agent's.
         config=replace(config or RuntimeConfig(), reraise_unexpected=True),
         decisions=counted if decisions is not None else None,
+        memory=memory,
+        memory_queue=memory,
     )
     pipeline = DocumentPipeline(
         uow_factory=deps.uow_factory,
@@ -380,8 +440,18 @@ def build_trial_runtime(
         prompt=prompts.extract,
         timeout_s=deps.config.llm_timeout_s,
     )
-    deps = replace(deps, documents=pipeline)
-    return TrialRuntime(AgentRuntime(deps), clock, counted, blobs)
+    extraction = MemoryExtractor(
+        uow_factory=deps.uow_factory,
+        clock=clock,
+        ids=deps.ids,
+        llm=counted,
+        memory=memory,
+        queue=memory,
+        prompt=prompts.memory,
+        timeout_s=deps.config.llm_timeout_s,
+    )
+    deps = replace(deps, documents=pipeline, memory_extraction=extraction)
+    return TrialRuntime(AgentRuntime(deps), clock, counted, blobs, memory)
 
 
 async def play_scenario(
@@ -394,10 +464,11 @@ async def play_scenario(
     on_step: Callable[[StepObservation], None] | None = None,
     config: RuntimeConfig | None = None,
     decisions: DecisionModel | None = None,
+    embeddings: Embeddings | None = None,
 ) -> Played:
-    """Play every step of `scenario` on a fresh trial runtime (`config` and `decisions`:
-    see `build_trial_runtime`). An error stops the play there; the steps already played
-    are kept, so the graders still show how far it got."""
+    """Play every step of `scenario` on a fresh trial runtime (`config`, `decisions` and
+    `embeddings`: see `build_trial_runtime`). An error stops the play there; the steps
+    already played are kept, so the graders still show how far it got."""
     try:
         load = read_load(evals_dir, scenario)
         files = read_attachments(evals_dir, scenario)
@@ -408,6 +479,7 @@ async def play_scenario(
             prompts,
             config=config,
             decisions=decisions,
+            embeddings=embeddings,
         )
     except ScenarioSetupError as exc:
         return Played(scenario_id=scenario.id, error=str(exc))
