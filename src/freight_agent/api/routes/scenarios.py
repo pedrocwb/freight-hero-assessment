@@ -6,6 +6,7 @@ body (`api.scenarios.ScenarioRun`); the load endpoints show the scenario's load.
 
 from fastapi import APIRouter, Request
 
+from freight_agent.api.scenario_files import SavedScenario, ScenarioDraft
 from freight_agent.api.scenarios import ScenarioInfo, ScenarioRun, ScenarioRunner, ScenarioStarted
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
@@ -18,6 +19,14 @@ def _runner(request: Request) -> ScenarioRunner:
 @router.get("")
 async def scenarios(request: Request) -> list[ScenarioInfo]:
     return _runner(request).scenarios()
+
+
+@router.post("", status_code=201)
+async def save(request: Request, draft: ScenarioDraft) -> SavedScenario:
+    """Save a load's conversation as a scenario file: the recorded steps
+    (`GET /api/loads/{id}/recording`) with the draft's notes and expectations. 409 for an
+    id that exists, 422 for a scenario the spec refuses."""
+    return await _runner(request).save(draft)
 
 
 @router.post("/{scenario_id}/run", status_code=202)

@@ -24,7 +24,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from freight_agent.api import scenario_files
 from freight_agent.api.errors import ApiError, BadRequest, Conflict, NotFound
+from freight_agent.api.recording import Recording
 from freight_agent.api.simulation import Session, SimulationService
 from freight_agent.domain.load import Load
 from freight_agent.evalkit.graders import StepCheck, check_invariants, step_checks
@@ -140,6 +142,24 @@ class ScenarioRunner:
 
     def scenarios(self) -> list[ScenarioInfo]:
         return [info(s) for s in catalog(self.settings.evals_dir)]
+
+    async def save(self, draft: scenario_files.ScenarioDraft) -> scenario_files.SavedScenario:
+        """Write the load's recorded conversation as a scenario (`api.scenario_files`)."""
+        if self._service.playing is not None:
+            raise Conflict(f"the scenario {self._service.playing} is playing: save after it")
+        session = self._service.session
+        snapshot = await self._service.snapshot(draft.load_id)  # 404 for an unknown load
+        evals_dir = self.settings.evals_dir
+        return await scenario_files.save(
+            draft,
+            session.recordings.get(draft.load_id) or Recording(),
+            evals_dir=evals_dir,
+            metadata=session.load_metadata.get(draft.load_id),
+            start=session.start,
+            broker=snapshot.load.broker_name,
+            blobs=session.blobs,
+            known_ids=[s.id for s in catalog(evals_dir)],
+        )
 
     async def start(self, scenario_id: str) -> ScenarioStarted:
         """Reset the simulation for the scenario and start playing it in the background."""
