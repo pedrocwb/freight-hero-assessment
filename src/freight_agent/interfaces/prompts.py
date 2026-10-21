@@ -1,4 +1,4 @@
-"""The prompt port: the template each model role renders its prompts from.
+"""The prompt interface: the template each model role renders its prompts from.
 
 Every prompt a model reads is a chat template of two messages, system then user, whose
 fixed text is versioned in the LangSmith Prompt Hub, with a reviewable copy in the

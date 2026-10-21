@@ -1,8 +1,8 @@
-"""The composition root: the only place that wires adapters to ports.
+"""The composition root: the only place that wires adapters to interfaces.
 
 The API, the worker, the CLI and the eval harness all build the agent here, from one
 `Settings`, so they run the same `AgentRuntime` and differ only in the adapters chosen.
-Nothing else imports adapters into the core, and `application`, `domain` and `ports`
+Nothing else imports adapters into the core, and `application`, `domain` and `interfaces`
 never import this module (the import-linter contracts forbid it).
 
 The model is always the live one on OpenRouter, per role (`config/models.yaml`), behind
@@ -293,7 +293,7 @@ def build_blobs(settings: Settings) -> BlobStore:
 
 
 def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
-    """The document pipeline over the runtime's own ports, once card W3-DOC provides it;
+    """The document pipeline over the runtime's own interfaces, once card W3-DOC provides it;
     until then a processor that reads nothing."""
     pipeline, pages = DOCUMENT_PIPELINE.load(), PAGE_READER.load()
     if pipeline is None or pages is None:
@@ -327,7 +327,7 @@ def build_runtime_deps(
     prompts: Prompts | None = None,
     decisions: DecisionModel | None = None,
 ) -> RuntimeDeps:
-    """Every port of the runtime, from the settings; what the caller passes wins.
+    """Every interface of the runtime, from the settings; what the caller passes wins.
 
     `gateways` defaults to recording fakes: this build has no real integrations, so
     deliveries are recorded, not sent. `prompts` default to `build_prompts`. The

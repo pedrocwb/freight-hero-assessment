@@ -1,5 +1,5 @@
 """`BlobStore` on the filesystem (`BLOBS_DIR`, default `blobs/`): one file per blob,
-named by the sha256 of its bytes. S3 later, behind the same port.
+named by the sha256 of its bytes. S3 later, behind the same interface.
 
 Owner: card W3-DOC (C0 wrote a working version). The folder is created on the first
 `put`, so building the store writes nothing.
@@ -16,7 +16,7 @@ _HEX = frozenset("0123456789abcdef")
 
 
 class FsBlobStore:
-    """Implements `ports.documents.BlobStore`. Writes are atomic (a temporary file, then
+    """Implements `interfaces.documents.BlobStore`. Writes are atomic (a temporary file, then
     a rename), so a crash never leaves half a blob under its final name."""
 
     def __init__(self, root: Path) -> None:

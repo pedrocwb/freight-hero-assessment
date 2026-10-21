@@ -4,7 +4,7 @@ Owner: card W3-DOC.
 
 A message's attachment is saved as a `pending` document in the unit of work that logs
 the message (`AgentRuntime.ingest_message`). The document pipeline
-(`application.documents`, `ports.documents.DocumentProcessor`) reads its pages, asks the
+(`application.documents`, `interfaces.documents.DocumentProcessor`) reads its pages, asks the
 `extract` model for the type and the values of the broker's `DocumentTypeDef`
 (`Extraction`, the structured output), and this module turns that answer into a
 `Reading`: each value in its field's kind, each value checked against the load in code

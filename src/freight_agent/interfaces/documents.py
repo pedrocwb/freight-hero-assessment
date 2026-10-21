@@ -1,4 +1,4 @@
-"""Document ports: where attachment bytes live, how pages are read, the document rows,
+"""Document interfaces: where attachment bytes live, how pages are read, the document rows,
 and the pipeline the runtime ticks.
 
 Owner: card W3-DOC. C0 wrote the contracts; the memory implementations are

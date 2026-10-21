@@ -3,7 +3,7 @@
 System events (risk change, timer, attachment, processed document) get their intent
 from code; a timer's intent is the follow-up intent of its obligation kind in the
 broker's catalog. Only inbound messages call the gate model, on the gate's template
-(`ports.prompts`, `prompts/gate.yaml`) rendered with the broker's message intents
+(`interfaces.prompts`, `prompts/gate.yaml`) rendered with the broker's message intents
 (`prompts.gate_system_variables`) and the message. The catalog says
 which intents a message can have and which must act (`IntentDef.must_act`): those always
 go on to the agent, whatever the model said, so a weak model cannot drop a required

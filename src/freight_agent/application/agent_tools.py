@@ -17,7 +17,7 @@ stages it (`application.agent.stage`), which checks it with
 code executes the staged plan after the run.
 
 `finish` is the answer tool: `AgentOutcome`, whose schema title is `finish`, offered by
-the adapter next to these tools (`ports.llm.LanguageModel.chat`).
+the adapter next to these tools (`interfaces.llm.LanguageModel.chat`).
 """
 
 import json

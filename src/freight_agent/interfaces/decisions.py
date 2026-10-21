@@ -1,4 +1,4 @@
-"""The decision model port: a typed decision about a state, not text.
+"""The decision model interface: a typed decision about a state, not text.
 
 A decision model (TypeSafe's Jev, on OpenRouter's Decisions API) reads a state (text
 parts and images) and answers named questions with probabilities. It writes no prose and
@@ -14,7 +14,7 @@ The caller turns the probabilities into what happens, with a policy in code (the
 threshold, `application/gate_decision.py`), so a run records what the model weighed next
 to what code decided. A request's texts (the state's preamble, each question's
 instructions and criteria) are prompt text: they come from the role's prompt template
-(`ports.prompts`), whose version the request carries (`prompt_version`).
+(`interfaces.prompts`), whose version the request carries (`prompt_version`).
 
 The adapter (`adapters/decisions/openrouter.py`) translates a request into the provider's
 body and the reply back into answers. Every failure is a `DecisionError`, a kind of

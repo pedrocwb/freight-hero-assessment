@@ -208,7 +208,7 @@ class SimulationService:
     def settings(self) -> Settings:
         return self._settings
 
-    # The current session's ports, for the routes the runtime facade does not cover
+    # The current session's interfaces, for the routes the runtime facade does not cover
     # (documents, the SOP viewer). A reset replaces them: read them per request.
 
     @property

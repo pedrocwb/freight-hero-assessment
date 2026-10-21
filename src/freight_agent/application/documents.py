@@ -2,7 +2,7 @@
 
 Owner: card W3-DOC.
 
-`DocumentPipeline` implements `ports.documents.DocumentProcessor`. The composition root
+`DocumentPipeline` implements `interfaces.documents.DocumentProcessor`. The composition root
 builds it by these names (`bootstrap.build_documents`):
 
     DocumentPipeline(
@@ -91,7 +91,7 @@ _REASON_LIMIT = 200
 
 
 class NullDocumentProcessor:
-    """Implements `ports.documents.DocumentProcessor` by reading nothing: every pending
+    """Implements `interfaces.documents.DocumentProcessor` by reading nothing: every pending
     document stays pending (the runtime before wave 3, and the eval harness)."""
 
     async def process_pending(self, limit: int = 10) -> list[Event]:
@@ -108,7 +108,7 @@ class _Inputs:
 
 
 class DocumentPipeline:
-    """Implements `ports.documents.DocumentProcessor`; see the module docstring.
+    """Implements `interfaces.documents.DocumentProcessor`; see the module docstring.
 
     `ids` is part of the composition root's contract; the pipeline derives the one id it
     writes (`doc:{document_id}`) and needs no new one.

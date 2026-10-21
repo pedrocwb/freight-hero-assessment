@@ -1,7 +1,7 @@
 """The variables of the gate's (triage) and the agent's prompts, rendered through their
 templates, and the text the agent's read tools return.
 
-The prompts' fixed text is in their templates (`ports.prompts`: the LangSmith Hub, with
+The prompts' fixed text is in their templates (`interfaces.prompts`: the LangSmith Hub, with
 the repository copy in `prompts/gate.yaml` and `prompts/agent.yaml`); this module
 computes the parts that depend on the broker or the run and renders each message with
 them. A variable holds what code knows: a list from the broker's catalog (its intents,

@@ -33,8 +33,8 @@ run reached the agent loop, failed calls included.
 The gate's engine is the process's (`RuntimeConfig.gate_engine`): `jev`, the decision
 model on `RuntimeDeps.decisions` with the policy of `gate_decision.py` (the process
 default, `GATE_ENGINE`), or `llm`, the gate model on `RuntimeDeps.llm` (this class's own
-default, the engine that needs no other port). The run record names the engine that read a message
-(`RunRecord.gate_engine`) and keeps the jev engine's probabilities (`gate_scores`).
+default, the engine that needs no other interface). The run record names the engine that
+read a message (`RunRecord.gate_engine`) and keeps the jev engine's probabilities (`gate_scores`).
 
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
@@ -176,7 +176,7 @@ class _Finished:
 
 
 def graph_deps(deps: RuntimeDeps) -> GraphDeps:
-    """The run graph's services on the runtime's ports and prompt templates: what the
+    """The run graph's services on the runtime's interfaces and prompt templates: what the
     runtime streams, and what another entry point (LangGraph Studio) can compile."""
     timeout_s = deps.config.llm_timeout_s
     return GraphDeps(
@@ -733,7 +733,7 @@ def _flag(value: object) -> bool:
 
 
 async def _all_events(events: EventLog, load_id: str) -> list[Event]:
-    """Every event of the load, oldest first, through the paged `recent` port."""
+    """Every event of the load, oldest first, through the paged `recent` interface."""
     size = 256
     while len(page := await events.recent(load_id, size)) >= size:
         size *= 2

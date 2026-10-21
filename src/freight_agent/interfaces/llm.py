@@ -1,4 +1,4 @@
-"""The language model port: one model round. LangChain and OpenRouter live behind it, in
+"""The language model interface: one model round. LangChain and OpenRouter live behind it, in
 adapters.
 
 A round is one request and one reply. There are two kinds:
@@ -11,7 +11,7 @@ A round is one request and one reply. There are two kinds:
   caller's job: the loop lives in the run graph (`application/graph`), so every round and
   every tool call is a step of its own in a trace.
 
-The port never runs a tool, so a reply has no side effect: the graph runs the read tools
+The interface never runs a tool, so a reply has no side effect: the graph runs the read tools
 and stages the action tools through the rules, and code executes the staged plan after
 the run, through the outbox.
 """
@@ -98,7 +98,7 @@ class ImageInput:
 @dataclass(frozen=True)
 class LlmRequest:
     """`system` and `user` are rendered from the role's prompt template, whose version
-    (`ports.prompts.ChatPrompt.version`) the call's trace carries as `prompt_version`.
+    (`interfaces.prompts.ChatPrompt.version`) the call's trace carries as `prompt_version`.
     `answer_description` is what the model reads about the answer tool when the template
     sets it (the agent's `finish`); None leaves the schema's docstring."""
 

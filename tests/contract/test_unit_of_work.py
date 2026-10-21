@@ -3,7 +3,7 @@
 The memory store (unit tests, evals, the simulation) must pass it, each test on a fresh,
 empty store.
 
-It pins down what the port docstrings leave implicit: the order of every list and its
+It pins down what the interface docstrings leave implicit: the order of every list and its
 tie-break, a rejected duplicate that leaves the unit of work usable, queue state that
 outlives the unit of work that changed it, and a transaction that commits or rolls back
 as a whole. Rows are referentially whole (an event's load exists, so do a timer's

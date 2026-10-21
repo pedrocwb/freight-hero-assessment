@@ -341,7 +341,7 @@ class OpenRouterDecisions:
 
 
 def _answer(question: Question, raw: _Noul | _Choice | _Score | None) -> Answer | None:
-    """The port's answer to `question`, or None when `raw` is not of its kind."""
+    """The interface's answer to `question`, or None when `raw` is not of its kind."""
     match question, raw:
         case YesNo(), _Noul():
             return YesNoAnswer(yes=raw.noul)

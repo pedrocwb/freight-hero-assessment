@@ -1,7 +1,7 @@
 """The fallback chain, its circuit breakers and its retries, over fake models on a virtual
 clock, with the backoff's waits on a fake timer.
 
-Both methods of the port walk the chain the same way: a forced answer (`generate`) and
+Both methods of the interface walk the chain the same way: a forced answer (`generate`) and
 an agent round (`chat`) share each model's breaker.
 """
 

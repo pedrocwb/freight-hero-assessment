@@ -5,7 +5,7 @@ reader can judge: whether an SMS is polite, whether a Hero task says what the He
 to do. A step that sets `expect.judge {rubric, min_score}` gets one call on the `judge`
 role, with the rubric and every text the step created (SMS, emails, Slack posts, Hero
 tasks, TMS notes), and passes when the verdict's score reaches `min_score`. The grading
-instructions are the judge's template (`ports.prompts`, `prompts/judge.yaml`); the
+instructions are the judge's template (`interfaces.prompts`, `prompts/judge.yaml`); the
 rubric and the texts are its variables.
 
 The player calls the judge right after the step, on the uncounted model, never through

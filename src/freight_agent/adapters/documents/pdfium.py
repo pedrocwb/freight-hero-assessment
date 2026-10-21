@@ -45,7 +45,7 @@ class UnsupportedDocument(ValueError):
 
 
 class PdfiumPageReader:
-    """Implements `ports.documents.PageReader`."""
+    """Implements `interfaces.documents.PageReader`."""
 
     def __init__(
         self,

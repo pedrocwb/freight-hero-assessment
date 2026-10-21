@@ -163,7 +163,7 @@ DecisionOutput = Mapping[str, Answer] | Exception
 
 @dataclass
 class FakeDecisions:
-    """A fake decision model (`ports.decisions`): it answers, call by call, the answers a
+    """A fake decision model (`interfaces.decisions`): it answers, call by call, the answers a
     test queues (`push`), by question name; an exception in the queue is raised at that
     call. Every request is recorded, and a call with nothing queued raises a
     `DecisionError` (an `LlmError`, so a run escalates as on a real failure)."""

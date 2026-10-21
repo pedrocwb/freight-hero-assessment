@@ -11,7 +11,7 @@ _TEXT_TYPES = frozenset({"text/plain", "text/markdown"})
 
 
 class FakePageReader:
-    """Implements `ports.documents.PageReader`."""
+    """Implements `interfaces.documents.PageReader`."""
 
     def pages(self, data: bytes, content_type: str) -> list[Page]:
         kind = content_type.split(";", 1)[0].strip().lower()

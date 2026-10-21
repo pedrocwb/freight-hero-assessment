@@ -15,7 +15,7 @@ def blob_ref(data: bytes) -> str:
 
 
 class MemoryBlobStore:
-    """Implements `ports.documents.BlobStore`."""
+    """Implements `interfaces.documents.BlobStore`."""
 
     def __init__(self) -> None:
         self._blobs: dict[str, bytes] = {}

@@ -614,8 +614,8 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
     built: list[dict[str, Any]] = []
 
     class Pipeline:
-        def __init__(self, **ports: Any) -> None:
-            built.append(ports)
+        def __init__(self, **given: Any) -> None:
+            built.append(given)
 
         async def process_pending(self, limit: int = 10) -> list[Any]:
             return []
@@ -629,8 +629,8 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
     deps = build_runtime_deps(_settings(), llm=FakeModel())
 
     assert isinstance(deps.documents, Pipeline)
-    (ports,) = built
-    assert set(ports) == {
+    (given,) = built
+    assert set(given) == {
         "uow_factory",
         "clock",
         "ids",
@@ -641,11 +641,11 @@ def test_the_document_pipeline_is_built_once_its_card_provides_it(
         "prompt",
         "timeout_s",
     }
-    assert (ports["blobs"], ports["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
-    assert ports["prompt"] is deps.prompts.extract
-    assert ports["knowledge"] is deps.knowledge
-    assert ports["llm"] is deps.llm
-    assert isinstance(ports["pages"], Pages)
+    assert (given["blobs"], given["timeout_s"]) == (deps.blobs, deps.config.llm_timeout_s)
+    assert given["prompt"] is deps.prompts.extract
+    assert given["knowledge"] is deps.knowledge
+    assert given["llm"] is deps.llm
+    assert isinstance(given["pages"], Pages)
 
 
 @pytest.mark.parametrize("missing", ["pipeline", "pages"])

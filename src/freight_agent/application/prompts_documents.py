@@ -5,7 +5,7 @@ Owner: card W3-DOC.
 
 The answer schema is generic (`domain.documents.Extraction`: a type id, a confidence and
 `{name, value}` pairs), so it is the same for every broker. The extract template
-(`ports.prompts`, `prompts/extract.yaml`) holds the job and the format of each field
+(`interfaces.prompts`, `prompts/extract.yaml`) holds the job and the format of each field
 kind; code renders into it the broker's `DocumentTypeDef`s, with their fields, and the
 document: its pages' text between markers and, for pages whose text is too thin (a scan,
 a photo), which pages come as images (`LlmRequest.images`).

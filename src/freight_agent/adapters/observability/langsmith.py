@@ -55,7 +55,7 @@ def langsmith_client_factory(api_key: str, api_url: str | None = None) -> Callab
 
 
 class LangSmithLinks:
-    """Implements `ports.tracing.Tracer` for the traces of one LangSmith project."""
+    """Implements `interfaces.tracing.Tracer` for the traces of one LangSmith project."""
 
     def __init__(
         self,

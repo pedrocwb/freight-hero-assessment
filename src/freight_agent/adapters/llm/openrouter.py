@@ -4,7 +4,7 @@ The only module that calls a real model; LangChain stays in `adapters/llm` (the
 import-linter keeps it there). One instance serves one model id. The role's fallback
 list is walked by the resilient wrapper (`adapters/llm/resilient.py`) over one instance
 per model (`models_for_role`), so retries, fallbacks and the circuit breaker live in one
-place and this class stays a plain translation between the port and the provider.
+place and this class stays a plain translation between the interface and the provider.
 
 Every method is one model call:
 
@@ -379,7 +379,7 @@ def _message(turn: Turn) -> BaseMessage:
 
 
 def _turn(reply: AIMessage) -> AssistantTurn:
-    """The reply as the port's turn: every call, the broken ones with their error. A call
+    """The reply as the interface's turn: every call, the broken ones with their error. A call
     with no id gets a fresh one, unique in the loop's history, so its answer can name it."""
     calls = [
         ToolCall(id=c["id"] or _new_call_id(), name=c["name"], args=dict(c["args"]))

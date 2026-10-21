@@ -155,7 +155,7 @@ _PROCESS_CACHE: dict[tuple[PromptRole, str], ChatPrompt] = {}
 
 
 class LangSmithPromptRegistry:
-    """Implements `ports.prompts.PromptRegistry`: each role's pin, pulled from the Hub
+    """Implements `interfaces.prompts.PromptRegistry`: each role's pin, pulled from the Hub
     once (`cache`: the process's by default) and kept."""
 
     def __init__(

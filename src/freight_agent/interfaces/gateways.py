@@ -1,4 +1,4 @@
-"""Outbound ports, one per integration service (interface segregation).
+"""Outbound interfaces, one per integration service (interface segregation).
 
 Every call carries an idempotency key; implementations must ignore a repeated key.
 The agent addresses people by contact id; resolving phone numbers and emails is

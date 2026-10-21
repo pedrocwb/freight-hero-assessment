@@ -284,7 +284,7 @@ class FileSopRepository:
     Reads the disk on every call, so an edited SOP or catalog applies to the next run,
     and the version recorded with a run matches what that run read. Only the files a
     client can see are read: a broken file of one client never blocks the others. (The
-    runtime reads them through `ports.knowledge.SopIndex`, see
+    runtime reads them through `interfaces.knowledge.SopIndex`, see
     `adapters/knowledge/memory.py`.)
     """
 

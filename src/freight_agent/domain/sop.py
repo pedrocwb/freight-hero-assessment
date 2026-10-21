@@ -6,7 +6,7 @@ the section or extends it (its body is appended after the inherited body).
 This is how "the standard procedure applies to all clients until a client
 changes it" is enforced: a client only ever writes the sections it changes.
 
-Intents are string ids of the broker's catalog (`domain.broker`); `ports.knowledge`
+Intents are string ids of the broker's catalog (`domain.broker`); `interfaces.knowledge`
 indexes the sections for the agent.
 """
 

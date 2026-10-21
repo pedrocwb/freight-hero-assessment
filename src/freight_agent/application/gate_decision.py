@@ -1,7 +1,7 @@
 """The gate on a decision model (the `jev` engine): probabilities in, a policy in code.
 
 The `llm` engine (`gate.Gate`) asks a chat model to write its decision. This one asks a
-decision model (`ports.decisions`: TypeSafe's Jev) two questions about the same context
+decision model (`interfaces.decisions`: TypeSafe's Jev) two questions about the same context
 the gate prompt renders (the load, the open obligations, the recent events, the
 message), in one call:
 

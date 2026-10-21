@@ -1,7 +1,7 @@
 """Fixtures shared by the contract suites of this folder.
 
 `uow_factory` gives each test a fresh, empty memory store (`uow_factories.open_memory`),
-so a suite written against the ports pins down what the port docstrings leave implicit.
+so a suite written against the interfaces pins down what the interface docstrings leave implicit.
 The wave 3 suites (brokers, documents) use it as `test_unit_of_work.py` does.
 """
 

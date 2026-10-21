@@ -61,7 +61,7 @@ def word_search(sections: Sequence[ResolvedSection], query: str, k: int) -> tupl
 
 
 class MemorySopIndex:
-    """Implements `ports.knowledge.SopIndex` over a fixed set of sections of every layer,
+    """Implements `interfaces.knowledge.SopIndex` over a fixed set of sections of every layer,
     merged by the domain, and of catalogs. `version` defaults to a hash of the sections.
 
     A subclass changes where the sections and the catalogs come from (`sections_for`,

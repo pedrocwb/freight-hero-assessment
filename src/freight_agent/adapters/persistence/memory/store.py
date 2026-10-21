@@ -287,7 +287,7 @@ class MemoryUnitOfWork:
         self._store = store
         self._snapshot: _State | None = None
         self._committed = False
-        # Typed as the ports: the protocol's attributes are invariant, so a concrete
+        # Typed as the interfaces: the protocol's attributes are invariant, so a concrete
         # annotation would keep this unit of work from satisfying `UnitOfWork`.
         self.loads: LoadRepository = MemoryLoadRepository(store)
         self.events: EventLog = MemoryEventLog(store)

@@ -1,4 +1,4 @@
-"""Persistence ports, implemented by the memory store (`adapters/persistence/memory/`)."""
+"""Persistence interfaces, implemented by the memory store (`adapters/persistence/memory/`)."""
 
 from collections.abc import Callable
 from datetime import datetime

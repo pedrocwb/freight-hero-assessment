@@ -1,4 +1,4 @@
-"""Tracing port: the link to a run's trace. Implementations must fail open: tracing
+"""Tracing interface: the link to a run's trace. Implementations must fail open: tracing
 never breaks a run.
 
 The trace itself is LangGraph's and LangChain's own tracing (each graph node, each model

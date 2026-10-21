@@ -137,7 +137,7 @@ def _check_tags(template: str, where: str) -> None:
 
 
 class _Message:
-    """Implements `ports.prompts.MessageTemplate` with the message's LangChain template."""
+    """Implements `interfaces.prompts.MessageTemplate` with the message's LangChain template."""
 
     def __init__(self, template: PromptTemplate, where: str) -> None:
         self._template = template
@@ -152,7 +152,7 @@ class _Message:
 
 
 def chat_prompt(file: PromptFile, *, role: PromptRole, ref: str, version: str) -> ChatPrompt:
-    """The port's view of a checked template, rendered by LangChain."""
+    """The interface's view of a checked template, rendered by LangChain."""
     template = to_langchain(file)
     system, user = (cast(SystemMessagePromptTemplate, m).prompt for m in template.messages)
     return ChatPrompt(

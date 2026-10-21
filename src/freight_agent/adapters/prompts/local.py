@@ -20,7 +20,7 @@ def local_version(file: PromptFile) -> str:
 
 
 class LocalPromptRegistry:
-    """Implements `ports.prompts.PromptRegistry` from `prompts_dir`, read on every `get`."""
+    """Implements `interfaces.prompts.PromptRegistry` from `prompts_dir`, read on every `get`."""
 
     def __init__(self, prompts_dir: Path) -> None:
         self.prompts_dir = prompts_dir
