@@ -62,14 +62,6 @@ export function formatTime(iso: string | null | undefined, timeZone: string): st
   return `${p.hour}:${p.minute} ${p.timeZoneName}`;
 }
 
-/** "07:31:20 PDT", for run timings. */
-export function formatTimeSeconds(iso: string | null | undefined, timeZone: string): string {
-  const date = parse(iso);
-  if (!date) return "--:--:--";
-  const p = parts(date, timeZone, { ...TIME, second: "2-digit" });
-  return `${p.hour}:${p.minute}:${p.second} ${p.timeZoneName}`;
-}
-
 /** "Tue, Oct 13". */
 export function formatDay(iso: string | null | undefined, timeZone: string): string {
   const date = parse(iso);

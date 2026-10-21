@@ -1,7 +1,6 @@
 import clsx from "clsx";
 import type { ReactNode } from "react";
 
-import type { DelayRisk, RunStatus } from "../api";
 import { useToasts } from "../state/toasts";
 
 export function ScreenHead(props: { title: string; lede?: ReactNode; actions?: ReactNode }) {
@@ -59,26 +58,6 @@ export function InlineError(props: { message: string; onRetry?: () => void }) {
         </button>
       ) : null}
     </div>
-  );
-}
-
-const RUN_STATUS_LABEL: Record<RunStatus, string> = {
-  acted: "Acted",
-  noop: "No action",
-  skipped: "Skipped",
-  escalated: "Escalated",
-  failed: "Failed",
-};
-
-export function StatusChip({ status }: { status: RunStatus }) {
-  return <span className={clsx("chip", `chip--${status}`)}>{RUN_STATUS_LABEL[status] ?? status}</span>;
-}
-
-export function RiskChip({ risk }: { risk: DelayRisk }) {
-  return (
-    <span className={clsx("chip", `chip--risk-${risk}`)} title="Delay risk">
-      {`${risk.charAt(0).toUpperCase()}${risk.slice(1)} risk`}
-    </span>
   );
 }
 

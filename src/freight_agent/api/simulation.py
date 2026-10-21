@@ -47,6 +47,17 @@ from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.api import views
 from freight_agent.api.bus import EventBus, sse_message
 from freight_agent.api.errors import BadRequest, Conflict, NotFound
+from freight_agent.api.recording import (
+    RecordedAttachment,
+    RecordedMessage,
+    RecordedPing,
+    RecordedStep,
+    Recording,
+    StepKind,
+    calls_for,
+    changes,
+    merged,
+)
 from freight_agent.api.schemas import (
     AdvanceRequest,
     AttachmentUploadResult,
@@ -59,6 +70,7 @@ from freight_agent.api.schemas import (
     SimState,
     StepResult,
     StopNotesView,
+    TurnResult,
 )
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
 from freight_agent.bootstrap import (
@@ -112,6 +124,10 @@ class Session:
     inner_model: LanguageModel  # the same model uncounted, for the judge
     knowledge: SopIndex  # the SOP index the session's runs read
     blobs: BlobStore  # the session's attachment bytes, gone with a reset
+    start: datetime  # when the session's clock started
+    # The metadata each load was created from, and what was done with it (`api.recording`).
+    load_metadata: dict[str, dict[str, Any]] = field(default_factory=dict[str, dict[str, Any]])
+    recordings: dict[str, Recording] = field(default_factory=dict[str, Recording])
     published_outbox: dict[str, OutboxStatus] = field(default_factory=dict)
     published_loads: dict[str, LoadSummary] = field(default_factory=dict)
 
@@ -192,6 +208,7 @@ def open_session(
         inner_model=inner,
         knowledge=knowledge,
         blobs=blobs,
+        start=start.astimezone(timezone),
     )
 
 
@@ -322,8 +339,10 @@ class SimulationService:
                 raise BadRequest(
                     f"the clock cannot move backwards: the simulation is at {now.isoformat()}"
                 )
+            before, calls = await self._before(session), session.model.calls
             runs = await self._run_timers_until(session, target)
             runs += await session.simulation.runtime.tick()
+            await self._record_clock_move(session, before, calls, runs, at=target)
             state = await self._publish(session, runs)
         return StepResult(state=state, runs=tuple(RunView.of(r) for r in runs))
 
@@ -331,7 +350,9 @@ class SimulationService:
         self._writable()
         async with self._lock:
             session = self._session
+            before, calls = await self._before(session), session.model.calls
             runs = await session.simulation.runtime.tick()
+            await self._record_clock_move(session, before, calls, runs, at=None)
             state = await self._publish(session, runs)
         return StepResult(state=state, runs=tuple(RunView.of(r) for r in runs))
 
@@ -355,9 +376,56 @@ class SimulationService:
     async def play_step(
         self, session: Session, player: ScenarioPlayer, index: int
     ) -> StepObservation:
-        """One step of a scenario, then what changed goes out on the bus, as for any input."""
+        """One step of a scenario, then what changed goes out on the bus, as for any input.
+        The step is recorded as a client's input is, so a played scenario can be saved
+        again as a new one."""
         async with self._lock:
+            before = await self._before(session, player.load.load_id)
             observation = await player.play(index)
+            step = player.scenario.steps[index]
+            message = step.message
+            recorded = RecordedStep.model_validate(
+                {
+                    "index": index,
+                    "at": session.local(observation.at),
+                    "kind": step.kind,
+                    "message": None
+                    if message is None
+                    else RecordedMessage(
+                        channel=message.channel,
+                        sender=message.sender,
+                        body=message.body,
+                        attachments=tuple(
+                            RecordedAttachment(filename=a.filename, content_type=a.content_type)
+                            for a in message.attachments
+                        ),
+                    ),
+                    "ping": None
+                    if step.ping is None
+                    else RecordedPing(
+                        delay_risk=step.ping.delay_risk, lat=step.ping.lat, lon=step.ping.lon
+                    ),
+                    "latency_seconds": None
+                    if step.kind == "wait"
+                    else player.scenario.run_latency_seconds,
+                    "llm_calls": observation.llm_calls,
+                    **changes(
+                        before.get(player.load.load_id),
+                        observation.snapshot,
+                        session.timezone,
+                        await _caps(session, observation.snapshot),
+                    ),
+                }
+            )
+            recording = session.recordings.setdefault(player.load.load_id, Recording())
+            recording.steps.append(recorded)
+            for number, attachment in enumerate(message.attachments if message else ()):
+                ref = await session.blobs.put(
+                    player.files[attachment.fixture],
+                    attachment.content_type,
+                    name=attachment.filename,
+                )  # the same bytes give the reference the player stored them under
+                recording.blob_refs[(index, number)] = ref
             await self._publish(session, observation.runs)
         return observation
 
@@ -391,6 +459,7 @@ class SimulationService:
                     "another load_id"
                 )
             await session.simulation.runtime.register_load(load)
+            session.load_metadata[load.load_id] = dict(metadata)
             await self._publish(session, ())
         return views.load_summary(await self.snapshot(load.load_id))
 
@@ -426,10 +495,16 @@ class SimulationService:
     async def ingest_message(self, message: MessageIn, latency_s: float) -> IngestResult:
         """A redelivered message (a message id already logged) changes nothing: the
         runtime reports it as a duplicate, and the clock neither moves nor ticks."""
+        return (await self.message_turn(message, latency_s)).ingest()
+
+    async def message_turn(self, message: MessageIn, latency_s: float) -> TurnResult:
+        """The message, then its run `latency_s` later: what the agent did about it is in
+        the result's runs (`POST /api/loads/{load_id}/messages`)."""
         self._writable()
         async with self._lock:
             session = self._session
             await self._require_load(session, message.load_id)
+            before, calls = await self._before(session, message.load_id), session.model.calls
             message_id = message.message_id or str(uuid.uuid4())
             runs, at = await self._arrive(
                 session, message.occurred_at, move=not await _logged(session, message_id)
@@ -438,16 +513,37 @@ class SimulationService:
             result = await session.simulation.runtime.ingest_message(contract)
             if not result.duplicate:
                 runs += await self._settle(session, latency_s)
-            await self._publish(session, runs)
-        return result
+                recorded = RecordedMessage(
+                    channel=message.channel,
+                    sender=message.sender_contact_id,
+                    body=message.body,
+                )
+                await self._record_input(
+                    session,
+                    message.load_id,
+                    before,
+                    calls,
+                    runs,
+                    at=at,
+                    kind="message",
+                    latency_s=latency_s,
+                    message=recorded,
+                )
+            state = await self._publish(session, runs)
+        return TurnResult.of(result, runs, state)
 
     async def ingest_ping(self, ping: PingIn, latency_s: float) -> IngestResult:
         """A redelivered ping (an id the load's risk tracker remembers) changes nothing,
         the clock included."""
+        return (await self.ping_turn(ping, latency_s)).ingest()
+
+    async def ping_turn(self, ping: PingIn, latency_s: float) -> TurnResult:
+        """The ping, then the run it causes, if any (`POST /api/loads/{load_id}/pings`)."""
         self._writable()
         async with self._lock:
             session = self._session
             await self._require_load(session, ping.load_id)
+            before, calls = await self._before(session, ping.load_id), session.model.calls
             ping_id = ping.ping_id or str(uuid.uuid4())
             runs, at = await self._arrive(
                 session, ping.occurred_at, move=not await _pinged(session, ping.load_id, ping_id)
@@ -456,17 +552,38 @@ class SimulationService:
             result = await session.simulation.runtime.ingest_ping(contract)
             if not result.duplicate:
                 runs += await self._settle(session, latency_s)
-            await self._publish(session, runs)
-        return result
+                recorded = RecordedPing(delay_risk=ping.delay_risk, lat=ping.lat, lon=ping.lon)
+                await self._record_input(
+                    session,
+                    ping.load_id,
+                    before,
+                    calls,
+                    runs,
+                    at=at,
+                    kind="ping",
+                    latency_s=latency_s,
+                    ping=recorded,
+                )
+            state = await self._publish(session, runs)
+        return TurnResult.of(result, runs, state)
 
-    async def upload_attachment(self, upload: AttachmentUpload) -> AttachmentUploadResult:
+    def recording(self, load_id: str) -> list[RecordedStep]:
+        """What was done with the load on the platform, step by step (`api.recording`)."""
+        recording = self._session.recordings.get(load_id)
+        return list(recording.steps) if recording else []
+
+    async def upload_attachment(
+        self, upload: AttachmentUpload, *, wait: bool = False, latency_s: float = 0
+    ) -> AttachmentUploadResult:
         """A file sent to the load: its bytes go to the session's blob store, then it
         arrives as a message with that attachment, through `ingest_message`, which saves
         its document as pending (card W3-DOC).
 
-        Nothing runs yet: the next tick (`POST /api/sim/tick`, or any input) reads the
-        document first, then runs the message and the document's `document_processed`
-        event. A message id already logged is a 409, before anything is stored.
+        Without `wait` nothing runs yet: the next tick (`POST /api/sim/tick`, or any
+        input) reads the document first, then runs the message and the document's
+        `document_processed` event. With `wait` that tick happens `latency_s` later, as
+        for a message, and the result carries its runs. A message id already logged is a
+        409, before anything is stored.
         """
         self._writable()
         async with self._lock:
@@ -475,6 +592,7 @@ class SimulationService:
             message_id = upload.message_id or str(uuid.uuid4())
             if await _logged(session, message_id):
                 raise Conflict(f"message {message_id!r} was already received")
+            before, calls = await self._before(session, upload.load_id), session.model.calls
             ref = await session.blobs.put(upload.data, upload.content_type, name=upload.filename)
             attachment = Attachment(
                 attachment_id=f"att_{uuid.uuid4().hex[:12]}",
@@ -497,6 +615,28 @@ class SimulationService:
                 document = await uow.documents.for_attachment(
                     upload.load_id, attachment.attachment_id
                 )
+            if wait:
+                runs += await self._settle(session, latency_s)
+            recorded = RecordedMessage(
+                channel=upload.channel,
+                sender=upload.sender_contact_id,
+                body=upload.body,
+                attachments=(
+                    RecordedAttachment(filename=upload.filename, content_type=upload.content_type),
+                ),
+            )
+            await self._record_input(
+                session,
+                upload.load_id,
+                before,
+                calls,
+                runs,
+                at=at,
+                kind="attachment",
+                latency_s=latency_s,
+                message=recorded,
+                blobs=(ref,),
+            )
             await self._publish(session, runs)
         if document is None or result.event_id is None:  # pragma: no cover - checked above
             raise RuntimeError(f"the upload of {upload.filename!r} saved no document")
@@ -504,6 +644,7 @@ class SimulationService:
             attachment_id=attachment.attachment_id,
             document_id=document.document_id,
             event_id=result.event_id,
+            runs=tuple(RunView.of(r) for r in runs) if wait else (),
         )
 
     async def _arrive(
@@ -525,6 +666,89 @@ class SimulationService:
         due in that window fires on the same tick, after the input's run."""
         session.clock.advance(timedelta(seconds=latency_s))
         return await session.simulation.runtime.tick()
+
+    # --- recording (api.recording) -------------------------------------------------------
+
+    async def _before(
+        self, session: Session, load_id: str | None = None
+    ) -> dict[str, LoadSnapshot]:
+        """The snapshots a step's changes are counted from: one load's, or every load's."""
+        runtime = session.simulation.runtime
+        ids = [load_id] if load_id is not None else await self._load_ids(session)
+        return {i: await runtime.snapshot(i) for i in ids}
+
+    async def _record_input(
+        self,
+        session: Session,
+        load_id: str,
+        before: Mapping[str, LoadSnapshot],
+        calls_before: int,
+        runs: Sequence[RunRecord],
+        *,
+        at: datetime,
+        kind: StepKind,
+        latency_s: float,
+        message: RecordedMessage | None = None,
+        ping: RecordedPing | None = None,
+        blobs: Sequence[str] = (),
+    ) -> None:
+        after = await session.simulation.runtime.snapshot(load_id)
+        recording = session.recordings.setdefault(load_id, Recording())
+        index = len(recording.steps)
+        delta = session.model.calls - calls_before
+        recording.steps.append(
+            RecordedStep.model_validate(
+                {
+                    "index": index,
+                    "at": session.local(at),
+                    "kind": kind,
+                    "message": message,
+                    "ping": ping,
+                    "latency_seconds": latency_s,
+                    "llm_calls": calls_for([r.load_id for r in runs], load_id, delta),
+                    **changes(
+                        before.get(load_id), after, session.timezone, await _caps(session, after)
+                    ),
+                }
+            )
+        )
+        for number, ref in enumerate(blobs):
+            recording.blob_refs[(index, number)] = ref
+
+    async def _record_clock_move(
+        self,
+        session: Session,
+        before: Mapping[str, LoadSnapshot],
+        calls_before: int,
+        runs: Sequence[RunRecord],
+        *,
+        at: datetime | None,
+    ) -> None:
+        """A clock move is a step of each load it made the agent run on. A tick without
+        a move (`at` None) adds its runs to the load's last step instead: they are the
+        runs of the file that step sent."""
+        ran = [r.load_id for r in runs]
+        delta = session.model.calls - calls_before
+        for load_id in dict.fromkeys(ran):
+            recording = session.recordings.setdefault(load_id, Recording())
+            if at is None and not recording.steps:
+                continue
+            after = await session.simulation.runtime.snapshot(load_id)
+            step = RecordedStep.model_validate(
+                {
+                    "index": len(recording.steps),
+                    "at": session.local(at or session.now()),
+                    "kind": "wait",
+                    "llm_calls": calls_for(ran, load_id, delta),
+                    **changes(
+                        before.get(load_id), after, session.timezone, await _caps(session, after)
+                    ),
+                }
+            )
+            if at is None:
+                recording.steps[-1] = merged(recording.steps[-1], step)
+            else:
+                recording.steps.append(step)
 
     async def _require_load(self, session: Session, load_id: str) -> None:
         if load_id not in await self._load_ids(session):
@@ -603,6 +827,12 @@ def _latest(snapshots: Sequence[LoadSnapshot]) -> datetime | None:
         )
     ]
     return max(times, key=lambda moment: moment.astimezone(UTC)) if times else None
+
+
+async def _caps(session: Session, snapshot: LoadSnapshot) -> dict[str, int]:
+    """The attempt cap of each obligation kind of the load's broker."""
+    broker = await session.knowledge.broker(snapshot.load.broker_id)
+    return dict(broker.validation_config().max_attempts)
 
 
 async def _logged(session: Session, event_id: str) -> bool:

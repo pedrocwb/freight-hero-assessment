@@ -457,8 +457,9 @@ idempotency key) and asserts that exactly that evaluator fails.
 intents the gate cannot skip, the prefilter, the escalation paths, idempotent delivery.
 
 **After a release.** Built: every run has a LangSmith trace (each node and model round,
-with the prompt version of each role) and its link in the run record; the platform's load
-inspector shows each run's path, tool calls and actions. **Designed, not built:**
+with the prompt version of each role) and its link in the run record; the platform's
+conversation explains each run (what it understood, followed, did and left open), with its
+path, tool calls and trace under Details. **Designed, not built:**
 
 | Signal | Alert |
 |---|---|

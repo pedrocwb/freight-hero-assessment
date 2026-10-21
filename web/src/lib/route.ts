@@ -1,10 +1,12 @@
 /**
- * Routes live in the hash, so a link to a load's run opens it: `#/inspector?load=481207&run=run_1`.
+ * Routes live in the hash, so a link to a load's run opens it: `#/load?load=481207&run=run_1`.
+ * The old `#/inspector` links open the conversation too.
  */
 
-export const SCREENS = ["scenarios", "inspector", "sops"] as const;
+export const SCREENS = ["load", "scenarios", "sops"] as const;
 export type ScreenId = (typeof SCREENS)[number];
-const DEFAULT_SCREEN: ScreenId = "scenarios";
+const DEFAULT_SCREEN: ScreenId = "load";
+const ALIASES: Record<string, ScreenId> = { inspector: "load" };
 
 export interface Route {
   screen: ScreenId;
@@ -13,11 +15,12 @@ export interface Route {
 
 export function parseHash(hash: string): Route {
   const [path = "", query = ""] = hash.replace(/^#\/?/, "").split("?");
-  const screen = (SCREENS as readonly string[]).includes(path) ? (path as ScreenId) : DEFAULT_SCREEN;
+  const named = ALIASES[path] ?? path;
+  const screen = (SCREENS as readonly string[]).includes(named) ? (named as ScreenId) : DEFAULT_SCREEN;
   return { screen, params: new URLSearchParams(query) };
 }
 
-/** `#/inspector?load=481207&run=run_1`; empty values are left out. */
+/** `#/load?load=481207&run=run_1`; empty values are left out. */
 export function href(screen: ScreenId, params: Record<string, string | null | undefined> = {}): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) if (value) query.set(key, value);
@@ -25,7 +28,7 @@ export function href(screen: ScreenId, params: Record<string, string | null | un
   return `#/${screen}${qs ? `?${qs}` : ""}`;
 }
 
-/** The inspector on a load, opened at one of its runs. */
-export function inspectorHref(loadId: string, runId?: string | null): string {
-  return href("inspector", { load: loadId, run: runId });
+/** The conversation of a load, opened on one of its runs. */
+export function loadHref(loadId: string, runId?: string | null): string {
+  return href("load", { load: loadId, run: runId });
 }

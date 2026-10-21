@@ -9,12 +9,13 @@ their routes: the cards build their routes on them and the web UI its types, so 
 change only with every user of them.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from freight_agent.application.contracts import InboundMessage, LocationPing
+from freight_agent.application.contracts import InboundMessage, IngestResult, LocationPing
 from freight_agent.domain.documents import Document, DocumentStatus, FieldCheck
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.load import Channel, DelayRisk, Stage, StopType
@@ -92,6 +93,35 @@ class StepResult(_Body):
     runs: tuple[RunView, ...]
 
 
+class TurnResult(_Body):
+    """An input to one load and what it caused (`POST /api/loads/{load_id}/messages` and
+    `/pings`): the ingest result, the runs of the step (none for a duplicate, or a ping
+    that changed no risk band), and the clock after them."""
+
+    accepted: bool
+    duplicate: bool
+    event_id: str | None
+    reason: str | None
+    runs: tuple[RunView, ...]
+    state: SimState
+
+    @classmethod
+    def of(cls, result: IngestResult, runs: Sequence[RunRecord], state: SimState) -> "TurnResult":
+        return cls(
+            **result.model_dump(),
+            runs=tuple(RunView.of(r) for r in runs),
+            state=state,
+        )
+
+    def ingest(self) -> IngestResult:
+        return IngestResult(
+            accepted=self.accepted,
+            duplicate=self.duplicate,
+            event_id=self.event_id,
+            reason=self.reason,
+        )
+
+
 # --- ingress ----------------------------------------------------------------------------------
 
 
@@ -139,6 +169,34 @@ class PingIn(_Body):
         )
 
 
+class LoadMessageIn(_Body):
+    """A message to one load (`POST /api/loads/{load_id}/messages`): `MessageIn` without
+    the load id, which the path gives."""
+
+    message_id: str | None = Field(default=None, description="Default: a new uuid")
+    channel: Channel
+    sender_contact_id: str | None = None
+    body: str
+    occurred_at: datetime | None = Field(default=None, description="Default: simulation now")
+
+    def for_load(self, load_id: str) -> MessageIn:
+        return MessageIn(load_id=load_id, **self.model_dump())
+
+
+class LoadPingIn(_Body):
+    """A location ping of one load (`POST /api/loads/{load_id}/pings`); the position
+    defaults to the assignment's pickup, Stockton, CA."""
+
+    ping_id: str | None = Field(default=None, description="Default: a new uuid")
+    delay_risk: DelayRisk
+    lat: float = 37.9577
+    lon: float = -121.2908
+    occurred_at: datetime | None = Field(default=None, description="Default: simulation now")
+
+    def for_load(self, load_id: str) -> PingIn:
+        return PingIn(load_id=load_id, **self.model_dump())
+
+
 # --- fixtures ---------------------------------------------------------------------------------
 
 
@@ -171,6 +229,9 @@ class AttachmentUploadResult(_Body):
     attachment_id: str
     document_id: str
     event_id: str
+    runs: tuple[RunView, ...] = Field(
+        default=(), description="With `wait`: the runs of the tick that read the file"
+    )
 
 
 class DocumentView(_Body):

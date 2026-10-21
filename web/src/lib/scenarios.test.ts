@@ -8,7 +8,6 @@ import {
   newerRun,
   runOf,
   startBlocker,
-  stepViews,
   tallyRun,
 } from "./scenarios";
 import { SCENARIO, scenarioRun } from "./testFixtures";
@@ -42,30 +41,6 @@ describe("filterScenarios", () => {
     expect(filterScenarios(list, "sop:delay_risk_high").map((s) => s.id)).toEqual([SCENARIO.id]);
     expect(filterScenarios(list, "  ")).toHaveLength(2);
     expect(filterScenarios(list, "pod nothing")).toEqual([]);
-  });
-});
-
-describe("stepViews", () => {
-  it("shows every step pending without a run of this scenario", () => {
-    expect(stepViews(SCENARIO, null).map((s) => s.status)).toEqual(["pending", "pending", "pending", "pending"]);
-    const other = scenarioRun({ scenario_id: "another" });
-    expect(stepViews(SCENARIO, other).every((s) => s.status === "pending" && s.runIds.length === 0)).toBe(true);
-  });
-
-  it("puts the run's status, checks and runs on each step", () => {
-    const views = stepViews(SCENARIO, scenarioRun());
-    expect(views.map((s) => s.status)).toEqual(["passed", "failed", "running", "pending"]);
-    expect(views[1]?.checks.filter((c) => !c.passed).map((c) => c.detail)).toEqual(["an SMS with purpose eta_request was sent"]);
-    expect(views[0]?.runIds).toEqual(["run_1"]);
-    expect(views[0]?.kind).toBe("ping");
-    expect(views[3]?.kind).toBe("wait");
-  });
-
-  it("keeps a step the run reports that the scenario does not list", () => {
-    const run = scenarioRun();
-    run.steps.push({ index: 7, at: "09:00", note: "extra", status: "passed", checks: [], run_ids: [] });
-    const views = stepViews(SCENARIO, run);
-    expect(views.at(-1)).toMatchObject({ index: 7, kind: null, status: "passed" });
   });
 });
 

@@ -78,6 +78,17 @@ to template version), `skip_reason`, `error`, `broker_id`, `trace_url`.
 | GET | `/api/loads/{load_id}/runs` | | `[Run]`, oldest first |
 | GET | `/api/loads/{load_id}/facility-memory` | | one entry per stop, in order: `{sequence, type, name, address, facility_key, facts}`, the client's notes on that place, most recent first; 404 for an unknown load |
 | GET | `/api/fixtures` | | `[{"name", "metadata"}]` |
+| POST | `/api/loads/{load_id}/messages?latency_seconds=60` | `{"message_id"?, "channel", "sender_contact_id", "body", "occurred_at"?}` | `TurnResult` = `IngestResult` fields plus `"runs"` (the runs the message caused) and `"state"` (`SimState` after them); 404 for an unknown load |
+| POST | `/api/loads/{load_id}/pings?latency_seconds=60` | `{"ping_id"?, "delay_risk", "lat"?, "lon"?, "occurred_at"?}` | `TurnResult`; no run when the risk band did not change |
+| GET | `/api/loads/{load_id}/recording` | | `[RecordedStep]`: every input sent to the load and every clock move that ran the agent on it, with what it changed |
+
+`messages` and `pings` are the ingress below on one load, answering with what the input
+caused, so a client can send and wait in one request (the web UI's "Send and wait").
+`RecordedStep` = `{"index", "at", "kind": "message" | "ping" | "attachment" | "wait",
+"message"?, "ping"?, "latency_seconds", "run_ids", "run_statuses", "outbox_ids",
+"llm_calls", "obligations": {kind: {"status", "attempts"}}, "timers": {"pending",
+"due_at"}}`, measured as the scenario player measures a step; `llm_calls` is null when
+another load ran in the same step. A reset drops the recording.
 
 The list of loads is in `SimState.loads`. The fixtures are every `evals/fixtures/*.json`
 (`load_481207`: Northline, Client A) plus two variants with their own load ids, so the
@@ -113,11 +124,12 @@ The contract with the integration layer.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | `/api/loads/{load_id}/attachments` | multipart: `file`, and the message that carries it: `sender_contact_id`, `body`, `channel` (`sms`, `email`, `slack`; default `sms`), `message_id`, `occurred_at` | `{"attachment_id", "document_id", "event_id"}` (201); 400 for an empty file; 409 for a message id already received; 413 over 20 MB |
+| POST | `/api/loads/{load_id}/attachments` | multipart: `file`, and the message that carries it: `sender_contact_id`, `body`, `channel` (`sms`, `email`, `slack`; default `sms`), `message_id`, `occurred_at`, `wait` (default false) | `{"attachment_id", "document_id", "event_id", "runs"}` (201); 400 for an empty file; 409 for a message id already received; 413 over 20 MB |
 | GET | `/api/loads/{load_id}/documents` | | `[Document]`, oldest first; 404 for an unknown load |
 
 An upload stores the bytes, ingests a message with that attachment and saves its document
-as `pending`; nothing runs yet. The next tick (`POST /api/sim/tick`, or any input) reads
+as `pending`; nothing runs yet, unless `wait` is true: then `latency_seconds` (query,
+default 60) pass, the API ticks and `runs` lists what ran. The next tick (`POST /api/sim/tick`, or any input) reads
 the document before it runs the queue, then runs the message (which does not act on the
 document) and the document's `document_processed` event (which does).
 
@@ -133,6 +145,15 @@ document) and the document's `document_processed` event (which does).
 | GET | `/api/scenarios` | `[{"id", "title", "suite", "tags", "description", "steps": [{"index", "at", "note", "kind"}]}]`, every scenario of `evals/scenarios/`, by suite then id |
 | POST | `/api/scenarios/{scenario_id}/run` | `{"scenario_id", "load_id"}` (202); 404 unknown scenario; 409 while one is playing; 503 without `OPENROUTER_API_KEY` |
 | GET | `/api/scenarios/run` | `ScenarioRun`, the one playing or the last one; `null` before the first |
+| POST | `/api/scenarios` | `{"load_id", "id", "title", "suite"?, "tags"?, "description"?, "steps": [{"index", "note"?, "expect"?, "forbid"?}]}` | `{"id", "suite", "path"}` (201); 400 for a bad id or suite name or an unknown step; 404 when nothing was recorded; 409 for an id that exists; 422 for a scenario the spec refuses |
+
+`POST /api/scenarios` saves a load's recorded conversation as a scenario: each chosen
+recorded step (its injection and load time) with the given note, `expect` and `forbid`
+(the shapes of `evalkit/spec.py`), on the fixture the load was created from
+(`load_overrides` for the keys that differ). It writes
+`evals/scenarios/<suite>/<id>.yaml` with a header comment, after the spec validates it,
+and copies a file a step sent to `evals/fixtures/recorded/<id>/`. The scenario is then in
+this list, in `agent eval list` and in the suite's next LangSmith experiment.
 
 `run` resets the simulation at the scenario's start, in its timezone, registers its load
 and plays its steps in the background, live, with the player the LangSmith experiments

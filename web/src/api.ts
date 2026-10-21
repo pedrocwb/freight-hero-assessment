@@ -258,6 +258,18 @@ export interface RunRecord {
   nodes: string[];
   /** The facility notes the agent's prompt showed: the load's current and next stop. */
   facility_facts?: FacilityFact[];
+  /** What read the message at the gate: "llm" or "jev"; null when code decided. */
+  gate_engine?: string | null;
+  /** The jev engine's probabilities: each intent's, and P(act now). */
+  gate_scores?: GateScores | null;
+}
+
+export interface GateScores {
+  model: string;
+  intents: Record<string, number>;
+  act: number;
+  threshold: number;
+  intent_confidence?: number | null;
 }
 
 // --- facility memory (api/routes/loads.py) -------------------------------------------
@@ -421,6 +433,8 @@ export interface AttachmentUploadResult {
   attachment_id: string;
   document_id: string;
   event_id: string;
+  /** With `wait`: the runs of the tick that read the file. */
+  runs?: RunRecord[];
 }
 
 // --- run graph and scenarios ----------------------------------------------------------
@@ -488,6 +502,67 @@ export interface ScenarioRun {
   steps: ScenarioRunStep[];
 }
 
+// --- conversation (api/routes/loads.py) and its recording (api/recording.py) ------------
+
+/** `POST /api/loads/{id}/messages` and `/pings`: the input, the runs it caused, the clock. */
+export interface TurnResult extends IngestResult {
+  runs: RunRecord[];
+  state: SimState;
+}
+
+export interface LoadMessage {
+  channel: ConversationChannel;
+  sender_contact_id: string | null;
+  body: string;
+  message_id?: string;
+  occurred_at?: string;
+}
+
+export interface ObligationState {
+  status: ObligationStatus;
+  attempts: number;
+  max_attempts: number | null;
+}
+
+/** One step of a load's recording (`GET /api/loads/{id}/recording`). */
+export interface RecordedStep {
+  index: number;
+  at: string;
+  kind: ScenarioStepKind;
+  message: {
+    channel: ConversationChannel;
+    sender: string | null;
+    body: string;
+    attachments: { filename: string; content_type: string }[];
+  } | null;
+  ping: { delay_risk: DelayRisk; lat: number; lon: number } | null;
+  latency_seconds: number | null;
+  run_ids: string[];
+  run_statuses: RunStatus[];
+  outbox_ids: string[];
+  /** Null when another load ran in the same step. */
+  llm_calls: number | null;
+  obligations: Record<string, ObligationState>;
+  timers: { pending: number; due_at: string | null };
+}
+
+/** `POST /api/scenarios`: the expectations use the shapes of `evalkit/spec.py`. */
+export interface ScenarioDraft {
+  load_id: string;
+  id: string;
+  title: string;
+  suite: string;
+  tags: string[];
+  description: string;
+  steps: { index: number; note: string; expect: Record<string, unknown>; forbid: Record<string, unknown>[] }[];
+}
+
+export interface SavedScenario {
+  id: string;
+  suite: string;
+  path: string;
+}
+
 // --- ingress ---------------------------------------------------------------------------
 
 /** `InboundMessage`; the API fills `message_id` when it is left out. */
@@ -519,7 +594,8 @@ export interface IngestResult {
 }
 
 export interface ResetRequest {
-  start: string;
+  /** Default: 06:55 on the assignment's day. */
+  start?: string;
 }
 
 export type AdvanceBy = { minutes: number } | { to: string };
@@ -567,7 +643,7 @@ export function buildRequest(base: string, spec: RequestSpec): { url: string; in
 }
 
 /** The multipart form of an attachment upload: the file plus the message it came with. */
-export function attachmentForm(upload: AttachmentUpload): FormData {
+export function attachmentForm(upload: AttachmentUpload, wait = false): FormData {
   const form = new FormData();
   const name = upload.filename ?? (upload.file instanceof File ? upload.file.name : "attachment");
   form.append("file", upload.file, name);
@@ -575,6 +651,7 @@ export function attachmentForm(upload: AttachmentUpload): FormData {
   if (upload.senderContactId) form.append("sender_contact_id", upload.senderContactId);
   form.append("body", upload.body.trim());
   form.append("occurred_at", upload.at);
+  if (wait) form.append("wait", "true");
   return form;
 }
 
@@ -701,6 +778,26 @@ export function createApi(fetcher: Fetcher, base = "/api") {
       }),
 
     runs: (loadId: string) => call<RunRecord[]>({ method: "GET", path: `${load(loadId)}/runs` }),
+
+    /** Send a message to the load and wait for the runs it causes. */
+    sendTurn: (loadId: string, message: LoadMessage, latencySeconds?: number) =>
+      call<TurnResult>({
+        method: "POST",
+        path: `${load(loadId)}/messages`,
+        query: { latency_seconds: latencySeconds },
+        body: message,
+      }),
+    /** A location ping, and the run it causes when the risk band changes. */
+    pingTurn: (loadId: string, risk: DelayRisk, latencySeconds?: number) =>
+      call<TurnResult>({
+        method: "POST",
+        path: `${load(loadId)}/pings`,
+        query: { latency_seconds: latencySeconds },
+        body: { delay_risk: risk },
+      }),
+    recording: (loadId: string) => call<RecordedStep[]>({ method: "GET", path: `${load(loadId)}/recording` }),
+    /** 409 for a taken id, 422 for a scenario the spec refuses. */
+    saveScenario: (draft: ScenarioDraft) => call<SavedScenario>({ method: "POST", path: "/scenarios", body: draft }),
     sops: (clientId: string, loadTypes: readonly string[]) =>
       call<SopSections>({
         method: "GET",
@@ -741,12 +838,12 @@ export function createApi(fetcher: Fetcher, base = "/api") {
     scenarioRun: () => orNull(call<ScenarioRun | null>({ method: "GET", path: "/scenarios/run" })),
 
     // Attachments and the documents the pipeline made of them.
-    uploadAttachment: (loadId: string, upload: AttachmentUpload, latencySeconds?: number) =>
+    uploadAttachment: (loadId: string, upload: AttachmentUpload, latencySeconds?: number, wait = false) =>
       call<AttachmentUploadResult>({
         method: "POST",
         path: `${load(loadId)}/attachments`,
         query: { latency_seconds: latencySeconds },
-        form: attachmentForm(upload),
+        form: attachmentForm(upload, wait),
       }),
     loadDocuments: (loadId: string) =>
       call<DocumentView[]>({ method: "GET", path: `${load(loadId)}/documents` }),
