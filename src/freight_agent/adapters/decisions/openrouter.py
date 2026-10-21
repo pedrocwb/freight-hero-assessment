@@ -25,8 +25,9 @@ served the call (`typesafe/jev-1.14-20261014`). An error reply is
   `timeout_s`. The resilient wrapper serves chat models only, so the adapter runs the
   policy itself. Any other status, the budget running out, or a reply that does not
   answer every question with its kind is a `DecisionError` naming the model and the role.
-  The key is only in the request headers: it is never logged and is scrubbed from every
-  error text.
+  Each retry is logged as the chat models' are (`...; retry 1 of 2 in 0.5 s`). The key
+  is only in the request headers: it is never logged and is scrubbed from every error
+  text.
 - A call's cost is the provider's `usage.cost`; without one, its tokens at the configured
   price. Its `Usage.provider` is the reply's `provider`.
 - Each call is an `llm` span in LangSmith when tracing is on, under the graph node that
@@ -36,6 +37,7 @@ served the call (`typesafe/jev-1.14-20261014`). An error reply is
 """
 
 import asyncio
+import logging
 import random
 import time
 import weakref
@@ -64,6 +66,8 @@ from freight_agent.ports.decisions import (
     YesNo,
     YesNoAnswer,
 )
+
+logger = logging.getLogger(__name__)
 
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 _APP_TITLE = "freight-agent"
@@ -272,6 +276,9 @@ class OpenRouterDecisions:
             if delay is None:
                 tried = f" (attempt {attempt} of {self._config.max_attempts})"
                 raise self._error(request, cause + tried) from None
+            retries = self._config.max_attempts - 1
+            error = self._error(request, cause)
+            logger.warning("%s; retry %d of %d in %.1f s", error, attempt, retries, delay)
             await self._sleep(delay)
 
     def _client(self) -> httpx.AsyncClient:

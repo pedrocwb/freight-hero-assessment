@@ -8,6 +8,7 @@ with the cost in USD.
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
@@ -262,15 +263,23 @@ def test_a_score_with_no_level_weighed_is_its_rounded_score() -> None:
 # --- retries and errors ------------------------------------------------------------------
 
 
-async def test_a_rate_limit_and_an_overload_are_sent_again_with_a_doubled_backoff() -> None:
+async def test_a_rate_limit_and_an_overload_are_sent_again_with_a_doubled_backoff(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     sleeps: list[float] = []
-    script = Script(httpx.Response(429), httpx.Response(503), ok())
+    body = {"error": {"message": f"slow down {KEY}"}}
+    script = Script(httpx.Response(429, json=body), httpx.Response(503), ok())
 
-    response = await adapter(script, sleeps=sleeps).decide(REQUEST)
+    with caplog.at_level(logging.WARNING, logger="freight_agent.adapters.decisions.openrouter"):
+        response = await adapter(script, sleeps=sleeps).decide(REQUEST)
 
     assert response.answer("matches", YesNoAnswer).yes == 0.97
     assert len(script.requests) == 3
     assert sleeps == [0.5, 1.0]
+    assert [r.getMessage() for r in caplog.records] == [
+        f"{MODEL} (gate): HTTP 429: slow down [redacted]; retry 1 of 2 in 0.5 s",
+        f"{MODEL} (gate): HTTP 503: (empty body); retry 2 of 2 in 1.0 s",
+    ]
 
 
 async def test_a_short_retry_after_is_the_least_wait_and_a_long_one_is_no_retry() -> None:
