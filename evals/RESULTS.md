@@ -70,6 +70,11 @@ loop, to `gemini-2.5-flash-lite`, the role's fallback. That model is weaker on t
 | `p1`, `p3`, `p2` (5 trials) | The agent call failed on both models with 429. Each run escalated with "Agent failed on an event: handle it by hand", as designed, so the scenario's expected actions never happened. |
 | `p2_pod_exceptions_needs_review` (1 trial, primary only) | The Hero task for the POD that needs review did not quote the PO found on the POD (55812), which the scenario requires. The same check failed in 1 of 3 trials of `docs-k1-234da102`. |
 
+A single-scenario run of `a_client_a_high_risk` a few minutes later
+([`core-k3-b601cb1d`](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/1323a82c-f83a-4404-8872-65a907007dd8/compare?selectedSessions=c13e3b2e-df5a-4ffe-94e1-4cf672301ced),
+$0.011) repeated it: 2 of 3, every row with fallback rounds, and the failing trial again
+lost the dispatcher email at 08:01 on the fallback after the same `attempt_cap` refusal.
+
 What this shows: the guardrails held in every failure (no message to a stranger, no
 request over the cap, every model outage reached a Hero), but a mixed-model loop is less
 reliable than the primary alone. Two changes follow from it, not made here: retry a 429
@@ -153,5 +158,6 @@ of the tool loop; none passed group A.
 
 ## Spend
 
-The k = 3 round above cost $0.146 (core $0.111, agent $0.003, docs $0.032). The cost
-cap of each run (`--cost-cap-usd`) bounds what one experiment can spend.
+The k = 3 round above cost $0.146 (core $0.111, agent $0.003, docs $0.032), and the
+single-scenario run $0.011. The cost cap of each run (`--cost-cap-usd`) bounds what one
+experiment can spend.
