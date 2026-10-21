@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import (
@@ -29,6 +30,7 @@ from langchain_core.messages.tool import invalid_tool_call, tool_call
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_openrouter import ChatOpenRouter
+from openrouter import components, errors
 from pydantic import Field, SecretStr
 
 from freight_agent.adapters.llm.models_config import (
@@ -57,6 +59,7 @@ from freight_agent.ports.llm import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    TransientLlmError,
     UserTurn,
 )
 
@@ -755,6 +758,84 @@ async def test_a_long_provider_error_is_cut_after_the_key_is_redacted() -> None:
 
     assert KEY[:8] not in str(caught.value)
     assert len(str(caught.value)) < 600
+
+
+def _http_error(status: int, **headers: str) -> errors.OpenRouterError:
+    """An HTTP error as the OpenRouter SDK raises it when no specific class matches."""
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, headers=headers, text='{"error": {}}', request=request)
+    return errors.OpenRouterDefaultError("API error occurred", response)
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 529])
+async def test_a_rate_limit_or_an_overload_is_a_transient_error(status: int) -> None:
+    """The resilient wrapper retries these on the same model before falling back."""
+    model, _ = make_model(_http_error(status, **{"Retry-After": "2"}))
+
+    with pytest.raises(TransientLlmError) as caught:
+        await model.chat(round_request(), AgentOutcome)
+
+    assert caught.value.retry_after_s == 2.0
+    assert str(caught.value).startswith(f"acme/small (agent): provider error (HTTP {status}):")
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 404, 500])
+async def test_other_http_errors_are_not_transient(status: int) -> None:
+    model, _ = make_model(_http_error(status, **{"Retry-After": "2"}))
+
+    with pytest.raises(LlmError, match=rf"provider error \(HTTP {status}\)") as caught:
+        await model.generate(GATE, GateDecision)
+
+    assert not isinstance(caught.value, TransientLlmError)
+
+
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        ({}, None),
+        ({"Retry-After": "0.5"}, 0.5),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),  # a date: no wait taken
+        ({"Retry-After": "-3"}, None),
+        ({"Retry-After": "inf"}, None),
+    ],
+)
+async def test_retry_after_is_read_in_seconds(headers: dict[str, str], wait: float | None) -> None:
+    model, _ = make_model(_http_error(429, **headers))
+
+    with pytest.raises(TransientLlmError) as caught:
+        await model.generate(GATE, GateDecision)
+
+    assert caught.value.retry_after_s == wait
+
+
+async def test_a_rate_limit_from_the_real_chat_openrouter_is_transient() -> None:
+    """ChatOpenRouter lets the SDK's error through, so its status reaches the adapter."""
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    limited = errors.TooManyRequestsResponseError(
+        errors.TooManyRequestsResponseErrorData(
+            error=components.TooManyRequestsResponseErrorData(
+                code=429, message="openai/gpt-oss-120b is temporarily rate-limited upstream"
+            )
+        ),
+        httpx.Response(429, request=request),
+    )
+
+    class _Limited:
+        async def send_async(self, **_request: Any) -> dict[str, Any]:
+            raise limited
+
+    def factory(config: RoleConfig, key: SecretStr) -> BaseChatModel:
+        chat = openrouter_chat(config, key)
+        assert isinstance(chat, ChatOpenRouter)
+        chat.client = SimpleNamespace(chat=_Limited())
+        return chat
+
+    model = OpenRouterModel(ROLE, PRICING, SecretStr(KEY), chat_factory=factory)
+
+    with pytest.raises(TransientLlmError, match=r"HTTP 429.*rate-limited upstream") as caught:
+        await model.chat(round_request(), AgentOutcome)
+
+    assert caught.value.retry_after_s is None
 
 
 def test_an_empty_key_is_rejected_when_the_model_is_built() -> None:

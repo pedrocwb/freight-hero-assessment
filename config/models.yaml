@@ -12,11 +12,12 @@
 # Role settings:
 #   model             OpenRouter model id (primary)
 #   fallbacks         ordered; walked by the resilient wrapper (adapters/llm/resilient.py),
-#                     one OpenRouterModel per entry. An entry is a model id, which runs
-#                     with the primary's settings, or a mapping with `model` and the
-#                     settings below it changes (temperature, max_tokens, reasoning_effort,
-#                     provider). Pick another provider family for availability, and a
-#                     model that passes the suites on its settings.
+#                     one OpenRouterModel per entry, once the model before it failed (its
+#                     retries included). An entry is a model id, which runs with the
+#                     primary's settings, or a mapping with `model` and the settings below
+#                     it changes (temperature, max_tokens, reasoning_effort, provider).
+#                     Pick another provider family for availability, and a model that
+#                     passes the suites on its settings.
 #   temperature       null: not sent. Some reasoning models (Claude Haiku 5.5, GPT-6 Luna)
 #                     take no temperature; with require_parameters on, sending one leaves
 #                     them no endpoint, so a role or a fallback on such a model sets null.
@@ -33,6 +34,11 @@
 #                     (`Usage.provider`, as OpenRouter reports it). require_parameters
 #                     defaults to true: only endpoints that honour every parameter we send
 #                     (notably tool_choice).
+#
+# A call the provider rate limits or reports overloaded (HTTP 429, 502, 503, 529) is
+# retried on the same model first: at most twice, after about 1 s then 2 s with jitter, or
+# the provider's Retry-After when it is 8 s or less, and always within the call's timeout
+# (RetryPolicy in adapters/llm/resilient.py). Then the next fallback serves it.
 
 roles:
   gate:

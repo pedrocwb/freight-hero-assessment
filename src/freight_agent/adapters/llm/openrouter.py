@@ -24,13 +24,18 @@ Each call's `Usage` names the provider that served it, as OpenRouter reports it:
 lists its preferred provider first and may let OpenRouter serve the model elsewhere.
 
 Any provider error, timeout (`request.timeout_s`, for the call) or answer that does not
-fit the schema becomes `LlmError`, named after the model. Each call is a LangChain run,
-named after its role and model, so a LangSmith trace shows it under its graph node, with
-the version of the prompt template it was rendered from (`prompt_version`).
+fit the schema becomes `LlmError`, named after the model. A rate limit or an overloaded
+provider (`_TRANSIENT_STATUSES`) becomes `TransientLlmError`, with the provider's
+`Retry-After`: the resilient wrapper retries it on the same model before falling back,
+while this class sends each call once (`max_retries=0` on the client). Each call is a
+LangChain run, named after its role and model, so a LangSmith trace shows it under its
+graph node, with the version of the prompt template it was rendered from
+(`prompt_version`).
 """
 
 import asyncio
 import base64
+import math
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -42,6 +47,7 @@ from langchain_core.messages.tool import ToolCall as LcToolCall
 from langchain_core.runnables import RunnableConfig
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_openrouter import ChatOpenRouter
+from openrouter.errors import OpenRouterError  # the SDK under ChatOpenRouter: HTTP errors
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from freight_agent.adapters.llm.models_config import ModelPricing, ModelsConfig, RoleConfig
@@ -58,6 +64,7 @@ from freight_agent.ports.llm import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    TransientLlmError,
     Turn,
     UserTurn,
 )
@@ -71,6 +78,9 @@ _REQUIRED = "required"  # tool choice: call some tool, prose is not an option
 _AUTO = "auto"  # tool choice: a tool or prose, as the model likes
 # What a reply carries for the next round: OpenRouter's reasoning text and details.
 _PROVIDER_KEYS = ("reasoning_content", "reasoning_details")
+# HTTP statuses after which the same call may succeed shortly: a rate limit (429), the
+# model's providers down or overloaded behind OpenRouter (502, 503) or saying so (529).
+_TRANSIENT_STATUSES = frozenset({429, 502, 503, 529})
 
 # Model id prefixes whose tool rounds use `auto`: OpenRouter has no Anthropic endpoint that
 # takes `tool_choice: "required"` (a 404 for Claude Haiku 5.5), while a forced call to one
@@ -182,7 +192,10 @@ class OpenRouterModel:
         except Exception as exc:  # the SDK, httpx and LangChain raise many types
             text = f"{type(exc).__name__}: {exc}"
             redacted = self._redact(text)  # before the cut, which could split the key
-            error = self._error(request, f"provider error: {redacted[:_MAX_CAUSE]}")
+            status = f" (HTTP {exc.status_code})" if isinstance(exc, OpenRouterError) else ""
+            error = self._error(request, f"provider error{status}: {redacted[:_MAX_CAUSE]}")
+            if _transient(exc):
+                error = TransientLlmError(str(error), retry_after_s=_retry_after_s(exc))
             # An error that quotes the key stays out of the chain, so no traceback logs it.
             raise error from (exc if redacted == text else None)
         if not isinstance(reply, AIMessage):
@@ -239,6 +252,20 @@ def models_for_role(
         OpenRouterModel(entry, config.pricing_for(entry.model), api_key, chat_factory)
         for entry in config.role(role).chain()
     )
+
+
+def _transient(exc: Exception) -> bool:
+    return isinstance(exc, OpenRouterError) and exc.status_code in _TRANSIENT_STATUSES
+
+
+def _retry_after_s(exc: Exception) -> float | None:
+    """The provider's `Retry-After`, in seconds; None without one or for an HTTP date."""
+    value = exc.headers.get("retry-after") if isinstance(exc, OpenRouterError) else None
+    try:
+        seconds = float(value) if value is not None else math.nan
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def answer_tool(schema: type[BaseModel], description: str | None = None) -> dict[str, Any]:
