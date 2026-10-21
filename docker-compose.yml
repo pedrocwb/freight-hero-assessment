@@ -1,21 +1,32 @@
 # The whole platform, local. Needs Docker with Compose v2.24 or later.
 #
-#   docker compose up --build        # http://localhost:8000: the web UI and the API
+#   docker compose up --build        # http://localhost:8000 (web UI and API) and the Agent
+#                                    # Server for LangGraph Studio on http://127.0.0.1:2024
+#   docker compose up --build app    # only the platform
 #   docker compose down
 #
-#   app       the Dockerfile's image: the API on :8000, serving the built UI. Uploaded
-#             attachments go to the `blobs` volume (BLOBS_DIR).
+#   app       the Dockerfile's default image: the API on :8000, serving the built UI.
+#             Uploaded attachments go to the `blobs` volume (BLOBS_DIR).
+#   studio    the Dockerfile's `studio` stage: the `scenario` graph of langgraph.json for
+#             LangGraph Studio. Open
+#             https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+#             logged in to LangSmith (Chrome; Safari blocks localhost there).
 #
-# The port is published on 127.0.0.1 only: the platform has no login. Opening it to the
+# Both read the keys from .env (OPENROUTER_API_KEY for the model, LANGSMITH_API_KEY for the
+# Prompt Hub and tracing); a key reaches the container here, never the image. Every play,
+# run or scenario calls the model live and costs money.
+#
+# The ports are published on 127.0.0.1 only: the platform has no login. Opening them to the
 # network (dropping the 127.0.0.1) is a deliberate change, not a default.
 name: freight-agent
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: app
     image: freight-agent:local
-    # Optional: the app starts with the defaults when there is no .env. A key in .env
-    # (OPENROUTER_API_KEY, the live model) reaches the container here, never the image.
+    # Optional: the app starts with the defaults when there is no .env.
     env_file:
       - path: .env
         required: false
@@ -26,6 +37,18 @@ services:
       - blobs:/app/blobs
     ports:
       - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  studio:
+    build:
+      context: .
+      target: studio
+    image: freight-agent-studio:local
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:2024:2024"
     restart: unless-stopped
 
 volumes:

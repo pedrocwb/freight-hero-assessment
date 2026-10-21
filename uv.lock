@@ -373,6 +373,10 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
+studio = [
+    { name = "langgraph-api" },
+    { name = "langgraph-cli", extra = ["inmem"] },
+]
 
 [package.metadata]
 requires-dist = [
@@ -404,6 +408,10 @@ dev = [
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "types-pyyaml" },
+]
+studio = [
+    { name = "langgraph-api", specifier = ">=0.16" },
+    { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.37" },
 ]
 
 [[package]]

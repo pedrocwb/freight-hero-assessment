@@ -80,3 +80,33 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
 # The `agent` CLI of the venv, so `docker compose run --rm app eval list` works too.
 ENTRYPOINT ["agent"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]
+
+# --- stage 3: the Agent Server for LangGraph Studio ---------------------------------------
+# The app plus the `studio` dependency group, serving the `scenario` graph of
+# langgraph.json on port 2024 (`docker compose up studio`). Studio, in the LangSmith UI,
+# connects to it from the browser at http://127.0.0.1:2024.
+FROM app AS studio
+
+USER root
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --group studio
+# The server's config without `env: .env`: in a container the settings come from the
+# environment (compose's env_file), and there is no .env file to read.
+COPY langgraph.json ./
+RUN python -c "import json; c = json.load(open('langgraph.json')); c.pop('env', None); json.dump(c, open('langgraph.docker.json', 'w'), indent=2)" \
+    && mkdir -p .langgraph_api \
+    && chown app:app .langgraph_api
+USER app
+
+EXPOSE 2024
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2024/ok', timeout=4)"]
+
+# --allow-blocking: the scenario catalog and the SOP files are read synchronously.
+ENTRYPOINT ["langgraph"]
+CMD ["dev", "--config", "langgraph.docker.json", "--host", "0.0.0.0", "--port", "2024", \
+     "--no-browser", "--no-reload", "--allow-blocking"]
+
+# --- the default image: the platform ------------------------------------------------------
+# `docker build .` builds the last stage, so the platform comes last.
+FROM app

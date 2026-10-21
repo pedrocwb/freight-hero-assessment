@@ -97,7 +97,7 @@ by the API. `.env.example` lists every setting with its default.
 | `cd web && pnpm dev` | The UI on http://localhost:5173, proxying `/api` to port 8000 | |
 | `cd web && pnpm build`, then `uv run agent serve` | The API serves the built UI on port 8000 | |
 | `make studio` | The local LangGraph Agent Server for Studio, on port 2024 (`STUDIO_ARGS=--tunnel` for Safari) | each play spends on the model |
-| `docker compose up --build` | UI and API on http://localhost:8000; keys from `.env` | runs spend on the model |
+| `docker compose up --build` | UI and API on http://localhost:8000, and the Agent Server for Studio on port 2024 (open `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`); keys from `.env`. `docker compose up --build app` for the platform only | runs and plays spend on the model |
 
 `agent eval run` exit codes: 0 every regression scenario passed pass^k, 1 one failed, 2 the
 run could not start (a bad scenario, a missing key, LangSmith down), 3 the cost cap stopped
