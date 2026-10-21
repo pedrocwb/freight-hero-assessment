@@ -376,9 +376,56 @@ class SimulationService:
     async def play_step(
         self, session: Session, player: ScenarioPlayer, index: int
     ) -> StepObservation:
-        """One step of a scenario, then what changed goes out on the bus, as for any input."""
+        """One step of a scenario, then what changed goes out on the bus, as for any input.
+        The step is recorded as a client's input is, so a played scenario can be saved
+        again as a new one."""
         async with self._lock:
+            before = await self._before(session, player.load.load_id)
             observation = await player.play(index)
+            step = player.scenario.steps[index]
+            message = step.message
+            recorded = RecordedStep.model_validate(
+                {
+                    "index": index,
+                    "at": session.local(observation.at),
+                    "kind": step.kind,
+                    "message": None
+                    if message is None
+                    else RecordedMessage(
+                        channel=message.channel,
+                        sender=message.sender,
+                        body=message.body,
+                        attachments=tuple(
+                            RecordedAttachment(filename=a.filename, content_type=a.content_type)
+                            for a in message.attachments
+                        ),
+                    ),
+                    "ping": None
+                    if step.ping is None
+                    else RecordedPing(
+                        delay_risk=step.ping.delay_risk, lat=step.ping.lat, lon=step.ping.lon
+                    ),
+                    "latency_seconds": None
+                    if step.kind == "wait"
+                    else player.scenario.run_latency_seconds,
+                    "llm_calls": observation.llm_calls,
+                    **changes(
+                        before.get(player.load.load_id),
+                        observation.snapshot,
+                        session.timezone,
+                        await _caps(session, observation.snapshot),
+                    ),
+                }
+            )
+            recording = session.recordings.setdefault(player.load.load_id, Recording())
+            recording.steps.append(recorded)
+            for number, attachment in enumerate(message.attachments if message else ()):
+                ref = await session.blobs.put(
+                    player.files[attachment.fixture],
+                    attachment.content_type,
+                    name=attachment.filename,
+                )  # the same bytes give the reference the player stored them under
+                recording.blob_refs[(index, number)] = ref
             await self._publish(session, observation.runs)
         return observation
 
@@ -659,7 +706,9 @@ class SimulationService:
                     "ping": ping,
                     "latency_seconds": latency_s,
                     "llm_calls": calls_for([r.load_id for r in runs], load_id, delta),
-                    **changes(before.get(load_id), after, session.timezone),
+                    **changes(
+                        before.get(load_id), after, session.timezone, await _caps(session, after)
+                    ),
                 }
             )
         )
@@ -691,7 +740,9 @@ class SimulationService:
                     "at": session.local(at or session.now()),
                     "kind": "wait",
                     "llm_calls": calls_for(ran, load_id, delta),
-                    **changes(before.get(load_id), after, session.timezone),
+                    **changes(
+                        before.get(load_id), after, session.timezone, await _caps(session, after)
+                    ),
                 }
             )
             if at is None:
@@ -776,6 +827,12 @@ def _latest(snapshots: Sequence[LoadSnapshot]) -> datetime | None:
         )
     ]
     return max(times, key=lambda moment: moment.astimezone(UTC)) if times else None
+
+
+async def _caps(session: Session, snapshot: LoadSnapshot) -> dict[str, int]:
+    """The attempt cap of each obligation kind of the load's broker."""
+    broker = await session.knowledge.broker(snapshot.load.broker_id)
+    return dict(broker.validation_config().max_attempts)
 
 
 async def _logged(session: Session, event_id: str) -> bool:

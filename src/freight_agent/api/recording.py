@@ -12,7 +12,7 @@ turns the record and the chosen expectations into a scenario file. The recording
 in the simulation's session: a reset or a scenario drops it.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
@@ -54,6 +54,7 @@ class RecordedPing(_Body):
 class ObligationState(_Body):
     status: ObligationStatus
     attempts: int
+    max_attempts: int | None = None  # the broker's cap for the kind, when it has one
 
 
 class TimerState(_Body):
@@ -89,7 +90,10 @@ class Recording:
 
 
 def changes(
-    before: LoadSnapshot | None, after: LoadSnapshot, timezone: ZoneInfo
+    before: LoadSnapshot | None,
+    after: LoadSnapshot,
+    timezone: ZoneInfo,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """What a step changed on one load, as `RecordedStep` fields: the runs and outbox
     items it created, in the snapshot's order, and the ledger at its end."""
@@ -100,17 +104,21 @@ def changes(
         "run_ids": tuple(r.run_id for r in runs),
         "run_statuses": tuple(r.status for r in runs),
         "outbox_ids": tuple(o.outbox_id for o in after.outbox if o.outbox_id not in old_items),
-        **ledger(after, timezone),
+        **ledger(after, timezone, caps or {}),
     }
 
 
-def ledger(snapshot: LoadSnapshot, timezone: ZoneInfo) -> dict[str, object]:
+def ledger(
+    snapshot: LoadSnapshot, timezone: ZoneInfo, caps: Mapping[str, int]
+) -> dict[str, object]:
     """The latest obligation of each kind and the pending timers, as the graders read them
     (`evalkit.graders`)."""
     latest: dict[str, ObligationState] = {}
     for obligation in sorted(snapshot.obligations, key=lambda o: (o.opened_at, o.obligation_id)):
         latest[obligation.kind] = ObligationState(
-            status=obligation.status, attempts=obligation.attempts
+            status=obligation.status,
+            attempts=obligation.attempts,
+            max_attempts=caps.get(obligation.kind),
         )
     pending = sorted(
         (t for t in snapshot.timers if t.status is TimerStatus.PENDING),

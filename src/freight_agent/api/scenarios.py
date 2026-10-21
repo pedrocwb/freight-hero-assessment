@@ -37,6 +37,7 @@ from freight_agent.evalkit.runner import (
     ScenarioSetupError,
     read_attachments,
     read_load,
+    scenario_metadata,
     scenario_start,
     scenario_timezone,
 )
@@ -194,6 +195,7 @@ class ScenarioRunner:
                 judge=Judge(session.inner_model, session.simulation.runtime.prompts.judge),
             )
             await self._service.start_scenario(session, player)
+            session.load_metadata[load.load_id] = scenario_metadata(evals_dir, scenario)
         except BaseException:
             self._service.playing = None
             raise

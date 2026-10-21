@@ -150,6 +150,7 @@ async def test_each_input_and_clock_move_is_recorded_with_what_it_changed(api: A
         ("wait", local(7, 31), 1, ["acted"]),
     ]
     assert [s["obligations"]["eta_request"]["attempts"] for s in steps] == [1, 1, 2]
+    assert steps[0]["obligations"]["eta_request"]["max_attempts"] == 2
     assert [s["timers"] for s in steps] == [
         {"pending": 1, "due_at": "07:31"},
         {"pending": 1, "due_at": "07:31"},
@@ -237,6 +238,24 @@ async def test_a_conversation_saved_as_a_scenario_is_listed_and_plays_back(
     await start(api, SCENARIO_ID)
     run = await finished(api)
     assert run["status"] == "passed", run
+
+
+async def test_a_played_scenario_is_recorded_and_saves_again_as_a_new_one(api: Api) -> None:
+    await play(api)
+    await post(api, "/api/scenarios", draft(), status=201)
+    queue(api.model)
+    await start(api, SCENARIO_ID)
+    await finished(api)
+
+    steps = await api.get(f"/api/loads/{LOAD_ID}/recording")
+    again = await post(api, "/api/scenarios", draft(id="recorded_po_question_again"), status=201)
+
+    assert [(s["kind"], s["llm_calls"]) for s in steps] == [
+        ("ping", 1),
+        ("message", 2),
+        ("wait", 1),
+    ]
+    assert again["id"] == "recorded_po_question_again"
 
 
 async def test_a_taken_id_is_refused(api: Api, evals: Path) -> None:

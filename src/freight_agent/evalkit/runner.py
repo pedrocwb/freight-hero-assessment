@@ -116,6 +116,15 @@ def scenario_start(scenario: Scenario) -> datetime:
 def read_load(evals_dir: Path, scenario: Scenario) -> Load:
     """The scenario's load: its fixture with `load_overrides` merged over the top-level
     keys."""
+    metadata = scenario_metadata(evals_dir, scenario)
+    try:
+        return Load.from_metadata(metadata)
+    except DomainError as exc:
+        raise ScenarioSetupError(f"{scenario.load}: {exc}") from exc
+
+
+def scenario_metadata(evals_dir: Path, scenario: Scenario) -> dict[str, Any]:
+    """The metadata the scenario's load is built from: its fixture, overrides merged."""
     try:
         with (evals_dir / scenario.load).open(encoding="utf-8") as handle:
             data: Any = json.load(handle)
@@ -125,11 +134,7 @@ def read_load(evals_dir: Path, scenario: Scenario) -> Load:
         raise ScenarioSetupError(f"cannot read load fixture {scenario.load}: {exc}") from exc
     if not isinstance(data, dict):
         raise ScenarioSetupError(f"load fixture {scenario.load} must be a JSON object")
-    metadata = {**cast(dict[str, Any], data), **scenario.load_overrides}
-    try:
-        return Load.from_metadata(metadata)
-    except DomainError as exc:
-        raise ScenarioSetupError(f"{scenario.load}: {exc}") from exc
+    return {**cast(dict[str, Any], data), **scenario.load_overrides}
 
 
 def read_attachments(evals_dir: Path, scenario: Scenario) -> dict[str, bytes]:
@@ -189,7 +194,7 @@ class ScenarioPlayer:
         self._clock = clock
         self._model = model
         self._blobs = blobs
-        self._files = files
+        self.files = files  # the attachment fixtures' bytes, by fixture path
         self._judge = judge
         self.times = [local_time(scenario.date, step.at, tz) for step in scenario.steps]
         self.judge_usage: list[Usage] = []
@@ -312,7 +317,7 @@ class ScenarioPlayer:
         attachments: list[Attachment] = []
         for number, spec in enumerate(step.message.attachments, 1):
             ref = await self._blobs.put(
-                self._files[spec.fixture], spec.content_type, name=spec.filename
+                self.files[spec.fixture], spec.content_type, name=spec.filename
             )
             attachments.append(
                 Attachment(
