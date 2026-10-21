@@ -808,6 +808,31 @@ async def test_retry_after_is_read_in_seconds(headers: dict[str, str], wait: flo
     assert caught.value.retry_after_s == wait
 
 
+def test_the_routing_summary_goes_with_the_reply_into_the_trace() -> None:
+    chat = openrouter_chat(ROLE, SecretStr(KEY))
+    assert isinstance(chat, ChatOpenRouter)
+
+    result = chat._create_chat_result(_completion(FINISH, DONE, "call_1"))  # pyright: ignore[reportPrivateUsage]
+
+    metadata = result.generations[0].message.response_metadata
+    assert metadata["provider"] == "Azure"
+    assert metadata["routing"] == {"summary": "available=2, selected=Azure", "attempt": 2}
+
+
+async def test_an_http_error_names_the_provider_that_answered_it() -> None:
+    body = json.dumps(
+        {"error": {"code": 429, "metadata": {"provider_name": "DeepInfra", "raw": "busy"}}}
+    )
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    limited = errors.OpenRouterDefaultError(
+        "Provider returned error", httpx.Response(429, text=body, request=request)
+    )
+    model, _ = make_model(limited)
+
+    with pytest.raises(TransientLlmError, match=r"provider error \(HTTP 429 from DeepInfra\)"):
+        await model.generate(GATE, GateDecision)
+
+
 async def test_a_rate_limit_from_the_real_chat_openrouter_is_transient() -> None:
     """ChatOpenRouter lets the SDK's error through, so its status reaches the adapter."""
     request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
@@ -917,7 +942,17 @@ def _completion(name: str, args: dict[str, Any], call_id: str, **message: Any) -
     return {
         "id": f"gen-{call_id}",
         "model": "openai/gpt-4.1-nano",
-        "provider": "OpenAI",
+        "openrouter_metadata": {
+            "attempt": 2,
+            "summary": "available=2, selected=Azure",
+            "endpoints": {
+                "available": [
+                    {"model": "openai/gpt-4.1-nano", "provider": "OpenAI", "selected": False},
+                    {"model": "openai/gpt-4.1-nano", "provider": "Azure", "selected": True},
+                ],
+                "total": 3,
+            },
+        },
         "choices": [
             {
                 "finish_reason": "tool_calls",
@@ -1003,7 +1038,9 @@ async def test_the_real_chat_openrouter_sends_the_expected_requests() -> None:
     assert tool["tool_call_id"] == "call_1"
     usage = second_reply.usage
     assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (300, 200, 40)
-    assert usage.provider == "OpenAI"
+    # The SDK's response model has no `provider`: the routing metadata names the endpoint.
+    assert first["x_open_router_metadata"] == "enabled"
+    assert usage.provider == "Azure"
 
 
 async def test_the_agents_claude_fallback_sends_its_own_settings_in_rounds_and_answers() -> None:
