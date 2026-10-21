@@ -13,6 +13,11 @@ key it falls back to no tracing, with a warning that names no secret. Without
 `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run that needs the
 model escalates to a Hero, saying the key is missing.
 
+The gate's engine is `GATE_ENGINE` (`build_runtime_config`). On `jev` the gate runs on the
+decision model of `config/models.yaml` (`decisions.gate`), through OpenRouter's Decisions
+API (`build_decisions`); without the key it is a decision model whose every call fails
+saying so, as for the chat models.
+
 The prompt templates come from the LangSmith Prompt Hub, at the references
 `config/prompts.yaml` pins (`build_prompts`), resolved once per process and checked
 against the code that renders them before anything runs. Without `LANGSMITH_API_KEY`, or
@@ -44,6 +49,8 @@ from pydantic import SecretStr
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
+from freight_agent.adapters.decisions.unavailable import UnavailableDecisions
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
@@ -58,8 +65,10 @@ from freight_agent.adapters.prompts.hub import LangSmithPromptRegistry, langsmit
 from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.prompts.pins import load_pins
 from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.gate import GateEngine
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.ports.clock import Clock
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
@@ -159,6 +168,37 @@ def _models_config(path: Path) -> ModelsConfig:
             f"the models config {path} does not exist: set MODELS_CONFIG, or run from the "
             "repository root"
         ) from None
+
+
+def build_decisions(settings: Settings) -> DecisionModel:
+    """The gate's decision model on OpenRouter (`decisions.gate` of `config/models.yaml`),
+    or without `OPENROUTER_API_KEY` one whose every call fails saying so. A models file
+    without a `decisions.gate` entry is a `BootstrapError`."""
+    config = _models_config(settings.models_config)
+    entry = config.decisions.get(ModelRole.GATE)
+    if entry is None:
+        raise BootstrapError(
+            f"GATE_ENGINE=jev, and {settings.models_config} has no decisions.gate entry: add "
+            "one (the decision model), or set GATE_ENGINE=llm"
+        )
+    try:
+        key = settings.require_openrouter_key()
+    except MissingSetting as exc:
+        return UnavailableDecisions(str(exc))
+    return OpenRouterDecisions(entry, config.pricing_for(entry.model), key)
+
+
+def gate_decisions(settings: Settings) -> DecisionModel | None:
+    """`build_decisions` when the gate runs on it (`GATE_ENGINE=jev`), else None."""
+    return build_decisions(settings) if settings.gate_engine == GateEngine.JEV else None
+
+
+def build_runtime_config(settings: Settings) -> RuntimeConfig:
+    """The process's runtime settings: the gate's engine and its act threshold."""
+    return RuntimeConfig(
+        gate_engine=GateEngine(settings.gate_engine),
+        gate_act_threshold=settings.gate_act_threshold,
+    )
 
 
 # --- persistence ---------------------------------------------------------------
@@ -284,16 +324,20 @@ def build_runtime_deps(
     blobs: BlobStore | None = None,
     tracer: Tracer | None = None,
     prompts: Prompts | None = None,
+    decisions: DecisionModel | None = None,
 ) -> RuntimeDeps:
     """Every port of the runtime, from the settings; what the caller passes wins.
 
     `gateways` defaults to recording fakes: this build has no real integrations, so
-    deliveries are recorded, not sent. `prompts` default to `build_prompts`.
+    deliveries are recorded, not sent. `prompts` default to `build_prompts`. The
+    decision model is built only for the jev gate engine (`build_decisions`).
     """
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
     if knowledge is None:
         knowledge = build_knowledge(settings)
+    if decisions is None:
+        decisions = gate_decisions(settings)
     deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=clock,
@@ -304,7 +348,8 @@ def build_runtime_deps(
         tracer=build_tracer(settings) if tracer is None else tracer,
         blobs=build_blobs(settings) if blobs is None else blobs,
         prompts=build_prompts(settings) if prompts is None else prompts,
-        config=RuntimeConfig(),
+        config=build_runtime_config(settings),
+        decisions=decisions,
     )
     return replace(deps, documents=build_documents(deps))
 
@@ -320,6 +365,7 @@ def build_runtime(
     blobs: BlobStore | None = None,
     tracer: Tracer | None = None,
     prompts: Prompts | None = None,
+    decisions: DecisionModel | None = None,
 ) -> AgentRuntime:
     """The agent, wired from the settings (see `build_runtime_deps`)."""
     return AgentRuntime(
@@ -333,6 +379,7 @@ def build_runtime(
             blobs=blobs,
             tracer=tracer,
             prompts=prompts,
+            decisions=decisions,
         )
     )
 

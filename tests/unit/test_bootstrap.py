@@ -21,6 +21,8 @@ from freight_agent import bootstrap
 from freight_agent.adapters.channels.fakes import recording
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
+from freight_agent.adapters.decisions.unavailable import UnavailableDecisions
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
@@ -35,30 +37,35 @@ from freight_agent.adapters.prompts.hub import HubClient, LangSmithPromptRegistr
 from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
+from freight_agent.application.gate import GateEngine
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.bootstrap import (
     BootstrapError,
     LazyAdapter,
     Simulation,
+    build_decisions,
     build_llm,
     build_prompt_registry,
     build_prompts,
     build_runtime,
+    build_runtime_config,
     build_runtime_deps,
     build_simulation,
     build_tracer,
     enable_native_tracing,
+    gate_decisions,
     openrouter_chain,
     platform_llm,
 )
 from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Load
+from freight_agent.ports.decisions import DecisionError, DecisionRequest
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
 from freight_agent.ports.prompts import PromptRole
 from freight_agent.settings import MissingSetting, Settings
-from tests.fakes import FakeModel
+from tests.fakes import FakeDecisions, FakeModel
 from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
@@ -655,3 +662,55 @@ def test_no_document_is_read_until_both_document_adapters_exist(
     deps = build_runtime_deps(_settings(), llm=FakeModel())
 
     assert isinstance(deps.documents, NullDocumentProcessor)
+
+
+# --- the gate's engine -----------------------------------------------------------------
+
+
+def test_the_gate_runs_on_its_chat_model_by_default() -> None:
+    deps = build_runtime_deps(_settings(), llm=FakeModel())
+
+    assert deps.config.gate_engine is GateEngine.LLM
+    assert deps.decisions is None
+    assert gate_decisions(_settings()) is None
+
+
+def test_on_jev_the_runtime_gets_the_decision_model_of_the_models_file() -> None:
+    settings = _settings(gate_engine="jev", gate_act_threshold=0.3, openrouter_api_key=KEY)
+
+    deps = build_runtime_deps(settings, llm=FakeModel())
+
+    assert (deps.config.gate_engine, deps.config.gate_act_threshold) == (GateEngine.JEV, 0.3)
+    assert isinstance(deps.decisions, OpenRouterDecisions)
+    assert deps.decisions.model_id == "typesafe/jev-1.14"
+    assert KEY not in repr(deps.decisions)
+    assert build_runtime_config(settings) == deps.config
+
+
+async def test_on_jev_without_the_key_every_decision_says_so() -> None:
+    deps = build_runtime_deps(_settings(gate_engine="jev"), llm=FakeModel())
+
+    assert isinstance(deps.decisions, UnavailableDecisions)
+    with pytest.raises(DecisionError, match="OPENROUTER_API_KEY is not set"):
+        await deps.decisions.decide(
+            DecisionRequest(role=ModelRole.GATE, state=("ok",), questions={})
+        )
+
+
+def test_a_decision_model_the_caller_passes_wins() -> None:
+    fake = FakeDecisions()
+
+    deps = build_runtime_deps(_settings(gate_engine="jev"), llm=FakeModel(), decisions=fake)
+
+    assert deps.decisions is fake
+
+
+def test_on_jev_a_models_file_without_the_gates_decision_model_stops_the_build(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "models.yaml"
+    text = MODELS_YAML.read_text(encoding="utf-8")
+    models.write_text(text.split("\ndecisions:")[0], encoding="utf-8")
+
+    with pytest.raises(BootstrapError, match=r"no decisions\.gate entry"):
+        build_decisions(_settings(models_config=models, openrouter_api_key=KEY))

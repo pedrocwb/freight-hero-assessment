@@ -8,7 +8,7 @@ from pydantic import Field
 
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.base import DomainModel
-from freight_agent.domain.intents import GateDecision
+from freight_agent.domain.intents import GateDecision, GateScores
 from freight_agent.domain.validation import Violation
 
 
@@ -77,6 +77,12 @@ class RunRecord(DomainModel):
     # LangSmith Hub commit, or `local:<sha256 prefix>` of the repository copy. Only the
     # roles the run called (the gate for a message it triaged, the agent once its loop ran).
     prompts: dict[str, str] = Field(default_factory=dict[str, str])
+    # What read the message at the gate: `llm` (a chat model writes the decision) or
+    # `jev` (a decision model's probabilities, and a policy in code). None when code
+    # decided (a system event, a broker without triage).
+    gate_engine: str | None = None
+    # The jev engine's probabilities: each intent's, and P(act now).
+    gate_scores: GateScores | None = None
 
     @property
     def cost_usd(self) -> float:

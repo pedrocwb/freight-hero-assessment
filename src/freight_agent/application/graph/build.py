@@ -32,9 +32,10 @@ run graph becomes the node's subgraph, streamed and checkpointed under it. That 
 `RunGraph.stream` names no thread: a thread id would make it a graph of its own again,
 and alone it has no checkpointer for a thread to address.
 
-A run's root span carries, next to its ids, the version of the gate's and the agent's
-prompt templates (`prompt_gate`, `prompt_agent`); LangChain hands that metadata down to
-every node and model call of the trace.
+A run's root span carries, next to its ids, the gate's engine (`gate_engine`: `llm` or
+`jev`) and the version of the gate's and the agent's prompt templates (`prompt_gate`, or
+`prompt_gate_decision` on the jev engine, and `prompt_agent`); LangChain hands that
+metadata down to every node and model call of the trace.
 """
 
 from collections.abc import AsyncIterator, Callable, Hashable, Mapping, Sequence
@@ -47,7 +48,7 @@ from langgraph.graph import END, START, StateGraph  # pyright: ignore[reportMiss
 
 from freight_agent.application.agent import Agent
 from freight_agent.application.context import RunContext
-from freight_agent.application.gate import Gate
+from freight_agent.application.gate import Triage
 from freight_agent.application.graph.nodes import (
     Node,
     agent_node,
@@ -118,7 +119,7 @@ class GraphDeps:
     """`rules` are the validator's; the agent's staging uses `agent.rules` (the same by
     default), and the validate node logs any action the two judge differently."""
 
-    gate: Gate
+    gate: Triage
     agent: Agent
     knowledge: SopIndex
     rules: Sequence[Rule] = field(default_factory=default_rules)
@@ -126,9 +127,13 @@ class GraphDeps:
     def prompt_versions(self) -> dict[str, str]:
         """Role -> the version of the prompt template the graph's model calls render."""
         return {
-            PromptRole.GATE.value: self.gate.prompt.version,
+            self.gate.prompt.role.value: self.gate.prompt.version,
             PromptRole.AGENT.value: self.agent.prompt.version,
         }
+
+    def trace_metadata(self) -> dict[str, str]:
+        """What every run's root span carries besides its ids and the prompt versions."""
+        return {"gate_engine": self.gate.engine.value}
 
 
 class RunGraph:
@@ -141,10 +146,17 @@ class RunGraph:
     node that failed is the last one.
     """
 
-    def __init__(self, compiled: _Compiled, prompts: Mapping[str, str] | None = None) -> None:
-        """`prompts`: role -> prompt template version, for each run's trace metadata."""
+    def __init__(
+        self,
+        compiled: _Compiled,
+        prompts: Mapping[str, str] | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> None:
+        """`prompts`: role -> prompt template version, and `metadata`, for each run's
+        trace metadata."""
         self._compiled = compiled
         self._prompts = dict(prompts or {})
+        self._metadata = dict(metadata or {})
 
     async def stream(
         self, ctx: RunContext, *, run_id: str, trace_id: UUID | None = None
@@ -164,6 +176,7 @@ class RunGraph:
                 "event_type": ctx.event.type.value,
                 "load_id": load.load_id,
                 "broker_id": load.broker_id,
+                **self._metadata,
                 **{f"prompt_{role}": version for role, version in self._prompts.items()},
             },
             "tags": [f"load:{load.load_id}", f"broker:{load.broker_id}"],
@@ -219,7 +232,7 @@ def compile_graph(deps: GraphDeps) -> _Compiled:
 
 
 def build_graph(deps: GraphDeps) -> RunGraph:
-    return RunGraph(compile_graph(deps), deps.prompt_versions())
+    return RunGraph(compile_graph(deps), deps.prompt_versions(), deps.trace_metadata())
 
 
 def _unless_decided(node: str, next_node: str) -> Callable[[RunState], str]:

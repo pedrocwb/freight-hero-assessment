@@ -278,3 +278,17 @@ def test_a_blank_key_counts_as_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_model_is_ready_only_with_an_openrouter_key(key: str | None, ready: bool) -> None:
     """What the platform shows (`SimState.model_ready`): without it, runs escalate."""
     assert _settings(openrouter_api_key=key).model_ready is ready
+
+
+def test_the_gate_runs_on_its_chat_model_unless_told_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (_settings().gate_engine, _settings().gate_act_threshold) == ("llm", 0.2)
+
+    monkeypatch.setenv("GATE_ENGINE", "jev")
+    monkeypatch.setenv("GATE_ACT_THRESHOLD", "0.35")
+    assert (_settings().gate_engine, _settings().gate_act_threshold) == ("jev", 0.35)
+
+    monkeypatch.setenv("GATE_ACT_THRESHOLD", "1.5")
+    with pytest.raises(ValidationError):
+        _settings()

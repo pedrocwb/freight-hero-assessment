@@ -632,6 +632,17 @@ async def test_each_runs_trace_carries_the_version_of_its_prompts(load: Load) ->
     assert (config["metadata"]["run_id"], states) == ("run_1", [])
 
 
+async def test_each_runs_trace_carries_the_gates_engine(load: Load) -> None:
+    compiled = _Recorded()
+    graph = RunGraph(compiled, {"gate_decision": "local:abc"}, {"gate_engine": "jev"})
+
+    _ = [s async for s in graph.stream(context(load, message("ok")), run_id="run_1")]
+
+    (config,) = compiled.configs
+    assert config["metadata"]["gate_engine"] == "jev"
+    assert config["metadata"]["prompt_gate_decision"] == "local:abc"
+
+
 def test_the_graph_names_the_prompts_of_its_gate_and_agent() -> None:
     model, knowledge = FakeModel(), FakeSop()
     deps = GraphDeps(

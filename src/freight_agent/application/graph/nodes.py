@@ -1,6 +1,6 @@
 """The run graph's nodes. Each factory takes the services it needs and returns the node.
 
-Nodes are thin: the work lives in the services (`prefilter`, `Gate`, the knowledge
+Nodes are thin: the work lives in the services (`prefilter`, the gate, the knowledge
 index, `Agent`, `domain.validation`). A node adapts their results to the run state and
 decides whether the run ends here, by writing a `Verdict`. Errors are not caught:
 the runtime turns a model failure or the deadline into an escalation and anything
@@ -19,7 +19,7 @@ from freight_agent.application.agent import (
     validation_context,
 )
 from freight_agent.application.context import RunContext
-from freight_agent.application.gate import Gate
+from freight_agent.application.gate import Triage
 from freight_agent.application.graph.state import RunState, RunUpdate, Verdict, need
 from freight_agent.application.prefilter import PrefilterResult, prefilter
 from freight_agent.domain.actions import Plan
@@ -51,7 +51,7 @@ def _prefilter_verdict(ctx: RunContext, result: PrefilterResult) -> Verdict:
     return Verdict.escalated(escalation.unknown_sender(ctx, result.detail))
 
 
-def triage_node(gate: Gate) -> Node:
+def triage_node(gate: Triage) -> Node:
     """The event's intent, on the broker's catalog. A run whose triage does not act ends
     as a no-op."""
 

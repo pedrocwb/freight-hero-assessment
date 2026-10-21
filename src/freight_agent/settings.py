@@ -18,7 +18,7 @@ working directory, which is the repository root for `uv run agent` and the API.
 from pathlib import Path
 from typing import Literal, TypeGuard
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # auto: the Hub when LANGSMITH_API_KEY is set, else the copy; local: the copy
     prompts_source: Literal["auto", "local"] = "auto"
     prompts_tag: str | None = None  # every role at this Hub tag instead of its pin
+
+    # The gate: llm (the gate's chat model writes its decision) or jev (the decision model
+    # of config/models.yaml `decisions.gate` gives probabilities, and code decides). On
+    # jev, a quiet intent ends the run only when P(act now) is under the threshold.
+    gate_engine: Literal["llm", "jev"] = "llm"
+    gate_act_threshold: float = Field(default=0.2, ge=0, le=1)
 
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "the agent's model")

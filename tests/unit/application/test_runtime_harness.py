@@ -35,6 +35,7 @@ from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
@@ -168,8 +169,10 @@ class World:
         knowledge: SopIndex | None = None,
         tracer: Tracer | None = None,
         wrap_gateways: Callable[[Gateways], Gateways] | None = None,
+        decisions: DecisionModel | None = None,
     ) -> None:
-        """`wrap_gateways` puts test gateways in front of the recording ones."""
+        """`wrap_gateways` puts test gateways in front of the recording ones; `decisions`
+        is the jev gate engine's model (with `config.gate_engine`)."""
         self.load = load
         self.store = MemoryStore()
         self.clock = VirtualClock(at(6, 55))
@@ -188,6 +191,7 @@ class World:
             blobs=MemoryBlobStore(),
             prompts=PROMPTS,
             config=config or RuntimeConfig(),
+            decisions=decisions,
         )
         self.runtime = AgentRuntime(self.deps)
 

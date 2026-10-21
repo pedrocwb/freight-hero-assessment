@@ -30,6 +30,11 @@ for the process. The run record keeps the version of each one the run sent to a 
 (`RunRecord.prompts`): the gate's when the triage called its model, the agent's when the
 run reached the agent loop, failed calls included.
 
+The gate's engine is the process's (`RuntimeConfig.gate_engine`): `llm`, the gate model
+on `RuntimeDeps.llm`, or `jev`, the decision model on `RuntimeDeps.decisions` with the
+policy of `gate_decision.py`. The run record names the engine that read a message
+(`RunRecord.gate_engine`) and keeps the jev engine's probabilities (`gate_scores`).
+
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
 runs and its `document_processed` event is queued behind the message.
@@ -54,7 +59,8 @@ from freight_agent.application.contracts import (
 )
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.executor import ExecutionResult, Executor
-from freight_agent.application.gate import Gate
+from freight_agent.application.gate import Gate, GateEngine, Triage
+from freight_agent.application.gate_decision import DEFAULT_ACT_THRESHOLD, DecisionGate
 from freight_agent.application.graph import (
     GraphDeps,
     RunGraph,
@@ -79,6 +85,7 @@ from freight_agent.domain.ping_filter import (
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.clock import Clock, IdGenerator
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import DeliveryError, Gateways
 from freight_agent.ports.knowledge import SopIndex
@@ -111,6 +118,10 @@ class RuntimeConfig:
     # harness error (a bug) ends the trial with its own message; the event is still
     # released first. Domain errors are failed attempts either way.
     reraise_unexpected: bool = False
+    # What reads an inbound message at the gate, and, on the jev engine, the P(act) under
+    # which a quiet intent ends the run (`gate_decision.py`).
+    gate_engine: GateEngine = GateEngine.LLM
+    gate_act_threshold: float = DEFAULT_ACT_THRESHOLD
 
     @property
     def effective_claim_lease_s(self) -> float:
@@ -136,6 +147,7 @@ class RuntimeDeps:
     prompts: Prompts  # every role's template, resolved for the process
     documents: DocumentProcessor = field(default_factory=NullDocumentProcessor)
     config: RuntimeConfig = field(default_factory=RuntimeConfig)
+    decisions: DecisionModel | None = None  # the jev gate engine's model
 
 
 @dataclass
@@ -167,10 +179,26 @@ def graph_deps(deps: RuntimeDeps) -> GraphDeps:
     runtime streams, and what another entry point (LangGraph Studio) can compile."""
     timeout_s = deps.config.llm_timeout_s
     return GraphDeps(
-        gate=Gate(deps.llm, deps.prompts.gate, timeout_s=timeout_s),
+        gate=build_gate(deps),
         agent=Agent(deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=timeout_s),
         knowledge=deps.knowledge,
     )
+
+
+def build_gate(deps: RuntimeDeps) -> Triage:
+    """The gate of `RuntimeConfig.gate_engine`. `ValueError` for the jev engine without a
+    decision model."""
+    config = deps.config
+    if config.gate_engine is GateEngine.JEV:
+        if deps.decisions is None:
+            raise ValueError("the jev gate engine needs a decision model (RuntimeDeps.decisions)")
+        return DecisionGate(
+            deps.decisions,
+            deps.prompts.gate_decision,
+            act_threshold=config.gate_act_threshold,
+            timeout_s=config.llm_timeout_s,
+        )
+    return Gate(deps.llm, deps.prompts.gate, timeout_s=config.llm_timeout_s)
 
 
 class AgentRuntime:
@@ -486,6 +514,8 @@ class AgentRuntime:
             rejections=state.rejections if state else 0,
             nodes=state.nodes if state else (),
             prompts=self._prompts_used(state),
+            gate_engine=state.gate.engine if state and state.gate else None,
+            gate_scores=state.gate.scores if state and state.gate else None,
         )
 
     def _prompts_used(self, state: RunState | None) -> dict[str, str]:
@@ -495,7 +525,7 @@ class AgentRuntime:
             return {}
         used: dict[str, str] = {}
         if TRIAGE in state.nodes and self._gate.calls_model(state.ctx):
-            used[PromptRole.GATE.value] = self._gate.prompt.version
+            used[self._gate.prompt.role.value] = self._gate.prompt.version
         if AGENT in state.nodes:
             used[PromptRole.AGENT.value] = self._agent.prompt.version
         return used
