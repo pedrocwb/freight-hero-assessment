@@ -48,12 +48,13 @@ export function WhyPanel(props: {
         {why.understood.intent ? (
           <p className="why-sub">
             Read as <strong>{why.understood.intent}</strong>
+            {why.understood.intentProbability !== null ? ` (${percent(why.understood.intentProbability)})` : ""}
           </p>
         ) : null}
         {why.understood.gate ? (
           <p className="why-sub">
             {why.understood.gate}
-            {why.understood.actProbability !== null ? ` (${percent(why.understood.actProbability)} sure it needs acting on)` : ""}
+            {why.understood.actProbability !== null ? `, ${percent(why.understood.actProbability)} sure it should act now` : ""}
           </p>
         ) : null}
       </section>

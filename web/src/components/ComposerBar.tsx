@@ -53,11 +53,15 @@ export function ComposerBar(props: {
 
   async function submit() {
     if (!canSend || !voice) return;
-    const sent = await props.onSend(voice, text.trim(), file);
-    if (sent) {
-      setText("");
-      setFile(null);
-      if (fileInput.current) fileInput.current.value = "";
+    // The message moves into the chat at once; it comes back here if it was not sent.
+    const sentText = text.trim();
+    const sentFile = file;
+    setText("");
+    setFile(null);
+    if (fileInput.current) fileInput.current.value = "";
+    if (!(await props.onSend(voice, sentText, sentFile))) {
+      setText(sentText);
+      setFile(sentFile);
     }
   }
 

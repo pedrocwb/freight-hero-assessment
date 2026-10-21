@@ -32,6 +32,8 @@ export interface WhySummary {
     gate: string | null;
     /** P(act now) when the gate engine gives one, 0 to 1. */
     actProbability: number | null;
+    /** The probability of the intent it read, when the gate engine gives one. */
+    intentProbability: number | null;
   };
   followed: { id: string; title: string; layer: string }[];
   notes: string[];
@@ -54,6 +56,11 @@ export function layerOf(sources: readonly string[]): string {
   if (sources.some((s) => s.includes("/types/"))) return "load type";
   if (sources.some((s) => s.includes("clients/"))) return sources.some((s) => s.includes("standard/")) ? "standard, extended by the client" : "client";
   return "standard";
+}
+
+/** Ids written into a sentence read as words: "eta_request follow-up timer" reads "ETA request follow-up timer". */
+export function plainIds(text: string): string {
+  return text.replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, (id) => phrase(id));
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : v == null ? "" : String(v));
@@ -144,10 +151,12 @@ export function explainRun(
   },
 ): WhySummary {
   const intent = run.intent ?? run.gate?.intent ?? null;
-  const gate = run.gate
-    ? `${run.gate.act ? "Needs the agent" : "Needs no action"}${run.gate.reason ? `: ${lower(run.gate.reason)}` : ""}`
-    : null;
-  const act = run.gate_scores?.act;
+  // A decision model's reason only restates its probabilities, which are shown as numbers.
+  const scores = run.gate_scores ?? null;
+  const reason = run.gate?.reason && !scores ? `: ${lower(plainIds(run.gate.reason))}` : "";
+  const gate = run.gate ? `${run.gate.act ? "Needs the agent" : "Needs no action"}${reason}` : null;
+  const act = scores?.act;
+  const intentScore = intent && scores ? scores.intents[intent] : undefined;
   return {
     headline: HEADLINE[run.status] ?? humanize(run.status),
     understood: {
@@ -155,6 +164,7 @@ export function explainRun(
       intent: intent ? phrase(intent) : null,
       gate,
       actProbability: typeof act === "number" ? act : null,
+      intentProbability: typeof intentScore === "number" ? intentScore : null,
     },
     followed: run.sop_section_ids.map((id) => {
       const section = context.sections.get(id);

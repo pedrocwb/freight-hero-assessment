@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeAction, explainRun, layerOf, leftOpen } from "./why";
+import { describeAction, explainRun, layerOf, leftOpen, plainIds } from "./why";
 import { run, snapshotA } from "./testFixtures";
 
 const LOAD = { contacts: [{ id: "drv_20931", role: "driver" as const, channels: ["sms" as const] }] };
@@ -32,13 +32,19 @@ describe("explainRun", () => {
   });
   const why = explainRun(answered, { event: question, load: LOAD, sections: SECTIONS, step: AFTER });
 
-  it("says what the agent understood: the event, the intent and the gate's call with its probability", () => {
+  it("says what the agent understood: the event, the intent and the gate's call with its probabilities", () => {
     expect(why.understood).toEqual({
       event: "Driver wrote by SMS: “What's the PO number?”",
       intent: "question",
-      gate: "Needs the agent: the driver asks for the PO.",
+      gate: "Needs the agent",
       actProbability: 0.91,
+      intentProbability: 0.97,
     });
+  });
+
+  it("gives a chat model gate's reason in words", () => {
+    const chat = explainRun({ ...answered, gate_scores: null }, { event: question, load: LOAD, sections: SECTIONS, step: AFTER });
+    expect([chat.understood.gate, chat.understood.actProbability]).toEqual(["Needs the agent: the driver asks for the PO.", null]);
   });
 
   it("lists the SOP sections it followed with their layer", () => {
@@ -94,6 +100,11 @@ describe("plain lines", () => {
 
   it("says when the requests ran out", () => {
     expect(leftOpen({ obligations: { eta_request: { status: "exhausted", attempts: 2, max_attempts: 2 } }, timers: { pending: 0, due_at: null } })).toEqual(["Nothing open"]);
+  });
+
+  it("reads ids inside a sentence as words", () => {
+    expect(plainIds("eta_request follow-up timer is due")).toBe("ETA request follow-up timer is due");
+    expect(plainIds("The driver asks for the PO.")).toBe("The driver asks for the PO.");
   });
 
   it("names the SOP layer of a section", () => {
