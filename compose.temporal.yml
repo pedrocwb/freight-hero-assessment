@@ -1,0 +1,104 @@
+# Standalone local stack: docker compose -f compose.temporal.yml up --build
+# Separate DB/volumes/ports from the virtual-clock UI in docker-compose.yml.
+# start-dev persists to SQLite here; production needs a supported Temporal cluster.
+name: freight-durable
+
+x-agent: &agent
+  image: freight-agent:temporal
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    PERSISTENCE: postgres
+    DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+    TEMPORAL_ADDRESS: temporal:7233
+    BLOBS_DIR: /app/blobs
+  volumes:
+    - blobs:/app/blobs
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    temporal:
+      condition: service_started
+  restart: unless-stopped
+  healthcheck:
+    disable: true
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  temporal:
+    # Temporal CLI 1.9.1 (Server 1.32.0); pin the tested multi-platform image.
+    image: temporalio/temporal@sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/home/temporal/temporal.db"]
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"
+    volumes:
+      - temporal:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "namespace", "describe", "--address", "localhost:7233", "--namespace", "default"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: app
+    image: freight-agent:temporal
+    command: ["db", "migrate"]
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  worker:
+    <<: *agent
+    command: ["temporal", "worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+
+  relay:
+    <<: *agent
+    command: ["temporal", "relay"]
+
+  ingress:
+    <<: *agent
+    command: ["temporal", "serve", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  pgdata:
+  temporal:
+  blobs:

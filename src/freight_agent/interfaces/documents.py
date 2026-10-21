@@ -59,6 +59,9 @@ class DocumentRepository(Protocol):
 class DocumentProcessor(Protocol):
     """Reads the pending documents. It opens its own units of work (the model runs
     outside any transaction) and logs and enqueues one `document_processed` event per
-    document it finishes, which it returns."""
+    document it finishes, which it returns. A load_id scopes processing to one load's
+    Workflow; None preserves the global batch used by the simulation."""
 
-    async def process_pending(self, limit: int = 10) -> list[Event]: ...
+    async def process_pending(
+        self, limit: int = 10, *, load_id: str | None = None
+    ) -> list[Event]: ...

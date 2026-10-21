@@ -18,6 +18,7 @@ dependencies = [
     "pypdfium2>=4.30",
     "python-multipart>=0.0.9",
     "pyyaml>=6.0",
+    "temporalio>=1.34,<2",
     "typer>=0.12",
     "uvicorn[standard]>=0.30",
 ]
@@ -61,6 +62,7 @@ markers = [
     "contract: interface contract suites, run on the memory store (and Postgres, see integration)",
     "integration: needs a Postgres database (TEST_DATABASE_URL or DATABASE_URL); skipped without one",
     "property: hypothesis property tests",
+    "temporal: uses the Temporal time-skipping test server (RUN_TEMPORAL_TESTS=1)",
 ]
 
 [tool.ruff]

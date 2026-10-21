@@ -94,7 +94,7 @@ class NullDocumentProcessor:
     """Implements `interfaces.documents.DocumentProcessor` by reading nothing: every pending
     document stays pending (the runtime before wave 3, and the eval harness)."""
 
-    async def process_pending(self, limit: int = 10) -> list[Event]:
+    async def process_pending(self, limit: int = 10, *, load_id: str | None = None) -> list[Event]:
         return []
 
 
@@ -138,10 +138,17 @@ class DocumentPipeline:
         self._knowledge = knowledge
         self._timeout_s = timeout_s
 
-    async def process_pending(self, limit: int = 10) -> list[Event]:
+    async def process_pending(self, limit: int = 10, *, load_id: str | None = None) -> list[Event]:
         """Read up to `limit` pending documents; return the events announced."""
         async with self._uow_factory() as uow:
-            pending = await uow.documents.list_pending(limit)
+            if load_id is None:
+                pending = await uow.documents.list_pending(limit)
+            else:
+                pending = [
+                    d
+                    for d in await uow.documents.list_for_load(load_id)
+                    if d.status is DocumentStatus.PENDING
+                ][: max(0, limit)]
         announced: list[Event] = []
         for document in pending:
             try:

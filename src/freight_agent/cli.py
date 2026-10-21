@@ -24,6 +24,7 @@ import typer
 from freight_agent.cli_memory import memory_app
 from freight_agent.cli_prompts import prompts_app
 from freight_agent.cli_sop import sop_app
+from freight_agent.cli_temporal import temporal_app
 from freight_agent.settings import MissingSetting, Settings
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
 app.add_typer(prompts_app, name="prompts")
 app.add_typer(memory_app, name="memory")
+app.add_typer(temporal_app, name="temporal")
 
 # Exit codes of `agent eval run`.
 PASSED = 0
