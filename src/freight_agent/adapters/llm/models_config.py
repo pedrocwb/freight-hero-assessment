@@ -9,6 +9,9 @@ Prices are USD per 1M tokens, copied from the public OpenRouter catalog. They ar
 estimates for budgets and reports: the billed price depends on the endpoint OpenRouter
 routes to, which is why the evals can pin a provider.
 
+The `decisions` block names the decision model a role can run on instead of its chat
+model (the gate, with `GATE_ENGINE=jev`), served by `adapters/decisions/openrouter.py`.
+
 The OpenRouter key is not here: it is a secret of the app `Settings`
 (`freight_agent.settings`), which the composition root passes to the live models.
 """
@@ -100,9 +103,30 @@ class ModelPricing(_Config):
         ) / _PER_MILLION
 
 
+class DecisionRoleConfig(_Config):
+    """A role served by a decision model (OpenRouter's Decisions API, not chat), the
+    `decisions` block. One model and no fallback: another model's probabilities would
+    not be comparable with the threshold the policy was measured on, so an outage
+    escalates the run instead."""
+
+    model: str = Field(min_length=1)  # e.g. typesafe/jev-1.14, pinned (not an alias)
+    attempt_timeout_s: float = Field(default=10.0, gt=0)  # one HTTP attempt
+    max_attempts: int = Field(default=3, ge=1, le=5)  # sends, on 429, 5xx or a dropped link
+    backoff_s: float = Field(default=0.5, ge=0)  # before the 2nd send, doubled after
+
+
 class ModelsConfig(_Config):
     roles: dict[ModelRole, RoleConfig]
     pricing: dict[str, ModelPricing]
+    # Roles that can also run on a decision model, chosen by a setting (GATE_ENGINE).
+    decisions: dict[ModelRole, DecisionRoleConfig] = {}
+
+    @model_validator(mode="after")
+    def _decisions_priced(self) -> "ModelsConfig":
+        unpriced = sorted({d.model for d in self.decisions.values()} - self.pricing.keys())
+        if unpriced:
+            raise ValueError(f"decision models with no pricing entry: {', '.join(unpriced)}")
+        return self
 
     @model_validator(mode="after")
     def _complete(self) -> "ModelsConfig":

@@ -130,3 +130,27 @@ pricing:
     output: 2.50
     cached_input: 0.075
     context_length: 1048576
+  # TypeSafe's Jev decision model (the `decisions` block below). Output is free; the
+  # provider reports each call's cost in USD, which the adapter records. Text over about
+  # 32,000 bytes, or any image, runs in a slower, less accurate long-context mode.
+  typesafe/jev-1.14:
+    input: 0.042
+    output: 0
+    context_length: 262144
+
+# Roles that can run on a decision model instead of their chat model, through
+# OpenRouter's Decisions API (adapters/decisions/openrouter.py): a typed answer with
+# probabilities, no text. The gate runs on it with GATE_ENGINE=jev (default llm, the
+# chat model above), with the policy of application/gate_decision.py. One model, no
+# fallback: the act threshold belongs to this model's probabilities, so an outage
+# escalates the run instead.
+#   model              pinned version; ~typesafe/jev-latest is an alias that moves
+#   attempt_timeout_s  one HTTP attempt; the call's own budget is the runtime's
+#   max_attempts       sends in all, retrying a 429, a 5xx or a dropped connection
+#   backoff_s          wait before the second send, doubled after (Retry-After wins)
+decisions:
+  gate:
+    model: typesafe/jev-1.14
+    attempt_timeout_s: 10
+    max_attempts: 3
+    backoff_s: 0.5

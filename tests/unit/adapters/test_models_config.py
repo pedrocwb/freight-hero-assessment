@@ -168,3 +168,22 @@ def test_pricing_lookup_names_the_missing_model() -> None:
 
     with pytest.raises(KeyError, match="acme/none"):
         config.pricing_for("acme/none")
+
+
+@pytest.mark.unit
+def test_the_shipped_gate_can_run_on_a_pinned_decision_model() -> None:
+    config = load_models_config(SHIPPED)
+
+    gate = config.decisions[ModelRole.GATE]
+    assert gate.model == "typesafe/jev-1.14"  # a pinned version, not the moving alias
+    assert (gate.max_attempts, gate.attempt_timeout_s, gate.backoff_s) == (3, 10, 0.5)
+    assert config.pricing_for(gate.model).input == 0.042
+
+
+@pytest.mark.unit
+def test_decisions_are_optional_and_their_model_must_be_priced(tmp_path: Path) -> None:
+    assert load_models_config(_write(tmp_path, _config())).decisions == {}
+
+    raw = _config(decisions={"gate": {"model": "acme/decider"}})
+    with pytest.raises(ValueError, match="decision models with no pricing entry: acme/decider"):
+        load_models_config(_write(tmp_path, raw))
