@@ -2,25 +2,68 @@
 #
 #   docker compose up --build        # http://localhost:8000 (web UI and API) and the Agent
 #                                    # Server for LangGraph Studio on http://127.0.0.1:2024
-#   docker compose up --build app    # only the platform
-#   docker compose down
+#   docker compose up --build app    # only the platform (and its database)
+#   docker compose up -d postgres    # only the database, for `uv run` on the host
+#   docker compose down              # add -v to drop the volumes (the database too)
 #
-#   app       the Dockerfile's default image: the API on :8000, serving the built UI.
+#   postgres  the database (pgvector/pgvector:pg17, the image CI's integration job uses).
+#             It keeps every load's memory: the event log, the obligations ledger, the
+#             timers, the outbox, the run records, the event queue and the documents.
+#   migrate   one shot: `agent db migrate` once postgres is healthy, then it exits.
+#   app       the Dockerfile's default image: the API on :8000, serving the built UI, on
+#             PERSISTENCE=postgres, so loads, runs and the ledger survive a restart.
 #             Uploaded attachments go to the `blobs` volume (BLOBS_DIR).
 #   studio    the Dockerfile's `studio` stage: the `scenario` graph of langgraph.json for
-#             LangGraph Studio. Open
-#             https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+#             LangGraph Studio. Each play runs in a fresh in-memory world, so it needs no
+#             database. Open https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 #             logged in to LangSmith (Chrome; Safari blocks localhost there).
 #
-# Both read the keys from .env (OPENROUTER_API_KEY for the model, LANGSMITH_API_KEY for the
-# Prompt Hub and tracing); a key reaches the container here, never the image. Every play,
-# run or scenario calls the model live and costs money.
+# app and studio read the keys from .env (OPENROUTER_API_KEY for the model,
+# LANGSMITH_API_KEY for the Prompt Hub and tracing); a key reaches the container here,
+# never the image. Every play, run or scenario calls the model live and costs money.
 #
-# The ports are published on 127.0.0.1 only: the platform has no login. Opening them to the
-# network (dropping the 127.0.0.1) is a deliberate change, not a default.
+# The ports are published on 127.0.0.1 only: postgres has fixed agent/agent credentials
+# and the platform has no login. Opening them to the network (dropping the 127.0.0.1) is a
+# deliberate change, not a default.
 name: freight-agent
 
+# Inside the compose network the database is `postgres`, not localhost.
+x-database-url: &database-url postgresql://agent:agent@postgres:5432/agent
+
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    ports:
+      # The host's `uv run` (and `make integration`) reach it at localhost:5432.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: app
+    image: freight-agent:local
+    command: ["db", "migrate"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true  # a job, not a server
+    restart: "no"
+
   app:
     build:
       context: .
@@ -31,12 +74,19 @@ services:
       - path: .env
         required: false
     environment:
-      # Bytes of uploaded attachments, kept across restarts.
+      # These win over .env: the platform's load memory is the postgres service.
+      PERSISTENCE: postgres
+      DATABASE_URL: *database-url
+      # Bytes of uploaded attachments, kept across restarts with the database rows that
+      # point at them.
       BLOBS_DIR: /app/blobs
     volumes:
       - blobs:/app/blobs
     ports:
       - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   studio:
@@ -52,4 +102,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  pgdata:
   blobs:

@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint studio ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint integration studio ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -58,6 +58,15 @@ eval:
 
 sop-lint:
 	uv run agent sop lint
+
+# The Postgres tests: every contract suite on Postgres, the migrations, the platform's
+# restart and the assignment's scenario on both stores, as CI's integration job runs them.
+# Needs a database: `docker compose up -d postgres`. Each test works in a schema (or a
+# database) of its own and drops it, so this database may hold data. Without a database
+# these tests skip, which keeps `make test` and `make ci` offline.
+TEST_DATABASE_URL ?= postgresql://agent:agent@localhost:5432/agent
+integration:
+	TEST_DATABASE_URL=$(TEST_DATABASE_URL) uv run pytest -m integration -rs
 
 # LangGraph Studio: the local Agent Server (`langgraph dev`, in memory) serves the scenario
 # graph of src/freight_agent/studio.py (langgraph.json), and Studio, in the LangSmith UI,
