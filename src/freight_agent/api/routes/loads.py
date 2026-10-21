@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from freight_agent.api.deps import AppSettings, Service
 from freight_agent.api.fixtures import fixture_catalog
-from freight_agent.api.schemas import Fixture, LoadSummary, RunView
+from freight_agent.api.schemas import Fixture, LoadSummary, RunView, StopNotesView
 from freight_agent.application.contracts import LoadSnapshot
 
 router = APIRouter(tags=["loads"])
@@ -33,3 +33,10 @@ async def fixtures(settings: AppSettings) -> list[Fixture]:
 async def runs(service: Service, load_id: str) -> list[RunView]:
     """The run inspector: what each run saw, decided and cost."""
     return await service.runs(load_id)
+
+
+@router.get("/loads/{load_id}/facility-memory")
+async def facility_memory(service: Service, load_id: str) -> list[StopNotesView]:
+    """The facility notes of each stop of the load: what earlier loads of its client
+    taught about the place (read-only)."""
+    return await service.facility_memory(load_id)

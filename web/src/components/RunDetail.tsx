@@ -140,6 +140,23 @@ function RunFacts({ run }: { run: RunRecord }) {
           ))}
         </dd>
       </div>
+      <div className="run-cell run-cell--wide">
+        <dt>Facility notes shown</dt>
+        <dd>
+          {run.facility_facts?.length ? (
+            <ul className="note-list">
+              {run.facility_facts.map((fact) => (
+                <li key={fact.fact_id}>
+                  {fact.facility_name}: <q>{fact.text}</q>{" "}
+                  <span className="muted">(load {fact.source_load_id})</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <span className="muted">none</span>
+          )}
+        </dd>
+      </div>
     </dl>
   );
 }
