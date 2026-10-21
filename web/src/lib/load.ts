@@ -77,3 +77,10 @@ const CHANNEL_LABEL: Record<string, string> = { sms: "SMS", email: "email", slac
 export function channelLabel(channel: string): string {
   return CHANNEL_LABEL[channel] ?? channel;
 }
+
+/** `humanize` for the middle of a sentence: "eta_request" reads "ETA request", "pod_request" "POD request", "follow_up" "follow-up". */
+export function phrase(id: string): string {
+  const text = humanize(id);
+  const first = text.split(" ")[0] ?? "";
+  return first.length > 1 && first === first.toUpperCase() ? text : text.charAt(0).toLowerCase() + text.slice(1);
+}
