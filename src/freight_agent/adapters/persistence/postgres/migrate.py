@@ -9,13 +9,12 @@ the runner owns the transaction, a file holds no BEGIN or COMMIT, and nothing th
 cannot run inside a transaction (such as `CREATE INDEX CONCURRENTLY`).
 
 The entry points are `apply_migrations` (async) and `migrate` (sync, for the
-`agent db migrate` command). `scratch_schema` gives a test a migrated schema of its own.
+`agent db migrate` command).
 """
 
 import asyncio
 import hashlib
 import re
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -29,7 +28,6 @@ from psycopg.abc import QueryNoTemplate
 from freight_agent.adapters.persistence.postgres.connection import (
     CONNECTION_KWARGS,
     begin_command,
-    check_schema,
 )
 
 # src/freight_agent/adapters/persistence/postgres/migrate.py -> the repo root.
@@ -147,30 +145,6 @@ async def _apply(conn: AsyncConnection[Any], migration: Migration) -> bool:
         (migration.version, migration.filename, migration.checksum),
     )
     return True
-
-
-async def drop_schema(conninfo: str, schema: str) -> None:
-    async with await AsyncConnection.connect(conninfo, **CONNECTION_KWARGS) as conn:
-        await conn.execute(
-            sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(check_schema(schema)))
-        )
-
-
-@asynccontextmanager
-async def scratch_schema(
-    conninfo: str, *, prefix: str = "scratch", directory: Path = MIGRATIONS_DIR
-) -> AsyncIterator[str]:
-    """A new schema with every migration applied, dropped on exit.
-
-    It gives a test an empty store of its own on a shared database, without touching
-    anything outside it (pass the name to `open_store`).
-    """
-    schema = check_schema(f"{prefix}_{uuid.uuid4().hex[:12]}")
-    try:
-        await apply_migrations(conninfo, schema=schema, directory=directory)
-        yield schema
-    finally:
-        await drop_schema(conninfo, schema)
 
 
 def migrate(

@@ -8,10 +8,9 @@ from pathlib import Path
 import pytest
 
 from freight_agent.adapters.persistence.postgres import PostgresUnitOfWorkFactory
-from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load
-from tests.postgres import DATABASE_URL, POSTGRES
+from tests.postgres import DATABASE_URL, POSTGRES, scratch_schema
 
 FIXTURE = Path(__file__).resolve().parents[2] / "evals" / "fixtures" / "load_481207.json"
 

@@ -17,11 +17,10 @@ from freight_agent.adapters.persistence.postgres.migrate import (
     MigrationError,
     apply_migrations,
     discover,
-    drop_schema,
     migrate,
 )
 from freight_agent.adapters.persistence.postgres.store import DOMAIN_TABLES
-from tests.postgres import DATABASE_URL, POSTGRES
+from tests.postgres import DATABASE_URL, POSTGRES, drop_schema
 
 pytestmark = POSTGRES
 

@@ -12,10 +12,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.adapters.persistence.postgres.store import open_store
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
-from tests.postgres import DATABASE_ENV, database_url_for_tests
+from tests.postgres import DATABASE_ENV, database_url_for_tests, scratch_schema
 
 # How many failed attempts make a queued event a dead letter, in every contract store:
 # the queue tests count them.

@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.adapters.persistence.postgres.store import PostgresStore, open_store
 from freight_agent.domain.actions import (
     CloseObligation,
@@ -36,7 +35,7 @@ from freight_agent.evalkit.spec import load_scenario
 from freight_agent.interfaces.llm import ModelRole
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from tests.fakes import FakeModel
-from tests.postgres import DATABASE_URL, POSTGRES
+from tests.postgres import DATABASE_URL, POSTGRES, scratch_schema
 from tests.prompts import PROMPTS
 
 pytestmark = POSTGRES
