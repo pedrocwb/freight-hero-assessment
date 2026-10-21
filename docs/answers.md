@@ -427,7 +427,7 @@ are designed.
 
 **Before a release:**
 
-- `make ci`: lint, strict types, layer rules, 1,965 tests (unit, contract, property,
+- `make ci`: lint, strict types, layer rules, 2,000 tests (unit, contract, property,
   integration, eval harness; 90 Postgres tests skip without a database) with 99.4% coverage
   of `domain` and `application`, branches included (the minimum is 90%), and the SOP lint.
   The tests run the real graph, rules and executor with a fake model (`tests/fakes.py`),
@@ -437,6 +437,10 @@ are designed.
   virtual clock with recording gateways and the real models, as a LangSmith experiment with
   k repetitions. A scenario passes only if every repetition passes (pass^k), because a
   customer sees every run.
+- `agent play` plays chosen scenarios (by id, suite or tag) with the same player and
+  checks, and prints each step in plain words: what came in, what the agent did and why,
+  what is still open, and which checks passed or failed. A failure can be read in the
+  terminal, without opening LangSmith.
 
 | Evaluator | Checks |
 |---|---|

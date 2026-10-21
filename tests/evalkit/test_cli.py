@@ -11,6 +11,7 @@ replaced, and the test checks what the command hands them and how it reports wha
 back.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from typer.testing import CliRunner, Result
 from freight_agent import bootstrap, cli
 from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
 from freight_agent.application.gate import GateEngine
+from freight_agent.domain.actions import Plan
 from freight_agent.evalkit import experiment
 from freight_agent.evalkit.experiment import (
     ExperimentRun,
@@ -33,7 +35,9 @@ from freight_agent.evalkit.experiment import (
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.results import Failure
 from freight_agent.evalkit.suite import discover
+from freight_agent.interfaces.llm import ModelRole
 from freight_agent.settings import Settings
+from tests.evalkit.test_player import scenario_a_agent
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 
@@ -445,6 +449,136 @@ def test_exit_codes_follow_the_outcomes() -> None:
     assert code(outcome("b_ack_with_nothing_open", False)) == cli.FAILED
     assert code(outcome("c3_relative_eta", False)) == cli.PASSED  # capability
     assert code(outcome("c1_eta_from_driver", not_run=1), not_run=("c1",)) == cli.COST_CAP
+
+
+# --- play -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scripted(monkeypatch: pytest.MonkeyPatch) -> FakeModel:
+    """`agent play` on the scripted right agent of scenario A: the chat-model gate, the
+    offline embeddings, the repository's prompts (no LangSmith key) and no tracing."""
+    model = scenario_a_agent()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("GATE_ENGINE", "llm")
+    monkeypatch.setenv("MEMORY_EMBEDDINGS", "fake")
+    monkeypatch.setenv("LANGSMITH_TRACING", "")  # restored after the test
+    monkeypatch.setattr(bootstrap, "build_llm", lambda settings, **kwargs: model)
+    return model
+
+
+def test_play_without_a_choice_exits_2() -> None:
+    result = agent("play", "--no-upload")
+
+    assert result.exit_code == cli.HARNESS_ERROR
+    assert "say which scenarios to play" in result.stderr
+
+
+@pytest.mark.usefixtures("scripted")
+def test_play_refuses_unknown_ids_and_tags_nobody_has() -> None:
+    unknown = agent("play", "nope", "--no-upload")
+    no_tag = agent("play", "--tag", "sop:nope", "--no-upload")
+
+    assert unknown.exit_code == no_tag.exit_code == cli.HARNESS_ERROR
+    assert "no scenario 'nope' in any suite" in unknown.stderr
+    assert "no scenario in any suite has the tag sop:nope" in no_tag.stderr
+
+
+def test_play_uploads_by_default_so_it_needs_the_langsmith_key(scripted: FakeModel) -> None:
+    result = agent("play", "a_client_a_high_risk")
+
+    assert result.exit_code == cli.HARNESS_ERROR
+    assert "LANGSMITH_API_KEY is not set" in result.stderr
+    assert scripted.calls == []
+
+
+def test_play_no_upload_prints_the_transcript_and_exits_0(scripted: FakeModel) -> None:
+    result = agent("play", "a_client_a_high_risk", "--no-upload")
+
+    assert result.exit_code == cli.PASSED, result.output
+    out = result.output
+    assert "playing 1 scenario, k=1, live on OpenRouter, cost cap $0.05, local only" in out
+    assert "== a_client_a_high_risk  (core)" in out
+    assert '       did    SMS to drv_20931 (driver): "The PO number is 55821."' in out
+    assert "PASSED  a_client_a_high_risk  4/4 steps passed  $0.0000" in out
+    assert out.rstrip().splitlines()[-2:] == ["1 scenario: 1 passed, 0 failed", "cost: $0.0000"]
+    assert "\x1b[" not in out  # no color when the output is not a terminal
+    assert scripted.remaining() == 0
+
+
+def test_play_json_prints_only_the_result(scripted: FakeModel) -> None:
+    result = agent("play", "a_client_a_high_risk", "--no-upload", "--json")
+
+    assert result.exit_code == cli.PASSED, result.output
+    data = json.loads(result.stdout)
+    assert (data["k"], data["exit_code"], data["passed"], data["experiments"]) == (1, 0, True, [])
+    (scenario,) = data["scenarios"]
+    assert (scenario["id"], scenario["suite"], scenario["passed"]) == (
+        "a_client_a_high_risk",
+        "core",
+        True,
+    )
+    (only,) = scenario["plays"]
+    assert [s["at"] for s in only["steps"]] == ["07:00", "07:12", "07:31", "08:01"]
+    assert "playing 1 scenario" in result.stderr
+
+
+def test_a_failing_play_exits_1_and_shows_the_failed_check(scripted: FakeModel) -> None:
+    scripted.push(ModelRole.AGENT, Plan(rationale="nothing to do"))  # a second play
+    result = agent("play", "a_client_a_high_risk", "--no-upload", "--k", "2")
+
+    assert result.exit_code == cli.FAILED, result.output
+    assert "(run 1 of 2)" in result.output and "(run 2 of 2)" in result.output
+    assert "✗ expect.actions[0]" in result.output
+    assert "pass^2: 0/1" in result.output
+
+
+def test_the_cost_cap_stops_new_plays_and_exits_3(
+    scripted: FakeModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = ScenarioTarget.__call__
+
+    async def costly(self: ScenarioTarget, inputs: dict[str, Any]) -> dict[str, Any]:
+        outputs = await original(self, inputs)
+        self.meter.spent_usd += 1.0
+        return outputs
+
+    monkeypatch.setattr(ScenarioTarget, "__call__", costly)
+
+    result = agent("play", "a_client_a_high_risk", "--no-upload", "--k", "2")
+
+    assert result.exit_code == cli.COST_CAP, result.output
+    assert "not run (cost cap): a_client_a_high_risk" in result.output
+
+
+@pytest.mark.usefixtures("scripted")
+def test_play_with_upload_runs_one_experiment_per_suite_and_links_it(
+    monkeypatch: pytest.MonkeyPatch, offline: Offline
+) -> None:
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+
+    async def play_them(client: Any, **kwargs: Any) -> ExperimentRun:
+        offline.calls.append(kwargs)
+        target: ScenarioTarget = kwargs["target"]
+        rows = [
+            ({"scenario_id": s.id}, await target({"scenario_id": s.id}), None)
+            for s in kwargs["chosen"]
+        ]
+        found = experiment.outcomes({s.id: s for s in kwargs["chosen"]}, rows)
+        return ExperimentRun("core-k1-x", "https://ls/x", tuple(found), 0.0, ())
+
+    monkeypatch.setattr(experiment, "run_experiment", play_them)
+    monkeypatch.setattr(bootstrap, "build_llm", lambda settings, **kwargs: scenario_a_agent())
+
+    result = agent("play", "a_client_a_high_risk")
+
+    assert result.exit_code == cli.PASSED, result.output
+    (call,) = offline.calls
+    assert (call["suite"], call["k"], call["concurrency"]) == ("core", 1, 1)
+    assert call["description"] == "agent play, suite core, k=1"
+    assert "uploaded to LangSmith" in result.output
+    assert "== a_client_a_high_risk  (core)" in result.output
+    assert "LangSmith experiment core-k1-x: https://ls/x" in result.output
 
 
 # --- eval list --------------------------------------------------------------------------

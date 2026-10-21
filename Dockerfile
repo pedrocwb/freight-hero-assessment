@@ -61,11 +61,14 @@ COPY migrations ./migrations
 COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
-# them; it may only write blobs: the uploaded attachments (BLOBS_DIR, a volume in
-# docker-compose.yml).
+# them; it may only write blobs, the uploaded attachments (BLOBS_DIR, a volume in
+# docker-compose.yml), and the scenarios the UI saves ("Save as scenario": the suite
+# folders, and the files their steps sent under fixtures/recorded). A saved scenario lives
+# in the container: `docker compose cp` copies it out before a rebuild replaces it.
 RUN useradd --system --user-group --no-log-init --create-home --uid 10001 app \
-    && mkdir -p blobs \
-    && chown app:app blobs
+    && mkdir -p blobs evals/fixtures/recorded \
+    && chown app:app blobs evals/fixtures/recorded \
+    && chown -R app:app evals/scenarios
 USER app
 
 ENV PATH="/app/.venv/bin:$PATH" \

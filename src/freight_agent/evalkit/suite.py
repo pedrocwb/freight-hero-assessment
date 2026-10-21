@@ -105,3 +105,42 @@ def _describe_error(exc: Exception) -> str:
             for error in exc.errors()
         )
     return " ".join(str(exc).split())
+
+
+def find(
+    evals_dir: Path,
+    *,
+    ids: Iterable[str] = (),
+    suite: str | None = None,
+    tags: Iterable[str] = (),
+) -> list[Scenario]:
+    """The scenarios `agent play` asks for: by id (searched in every suite unless `suite`
+    names one), and or by suite and tag. Nothing asked for, an unknown or ambiguous id, or
+    nothing that matches is a `SuiteError`."""
+    wanted_ids, wanted_tags = list(dict.fromkeys(ids)), set(tags)
+    if not wanted_ids and suite is None and not wanted_tags:
+        raise SuiteError(
+            "say which scenarios to play: their ids, --suite or --tag "
+            "(`agent eval list` shows them)"
+        )
+    names = [suite] if suite is not None else suites(evals_dir)
+    found = [s for name in names for s in discover(evals_dir, name)]
+    by_id: dict[str, list[Scenario]] = {}
+    for scenario in found:
+        by_id.setdefault(scenario.id, []).append(scenario)
+    where = f"suite {suite!r}" if suite is not None else "any suite"
+    if unknown := [i for i in wanted_ids if i not in by_id]:
+        raise SuiteError(
+            f"no scenario {', '.join(repr(i) for i in unknown)} in {where} "
+            "(`agent eval list` shows the ids)"
+        )
+    if twice := [i for i in wanted_ids if len(by_id[i]) > 1]:
+        raise SuiteError(
+            f"the id {', '.join(repr(i) for i in twice)} is in more than one suite: add --suite"
+        )
+    chosen = [by_id[i][0] for i in wanted_ids] if wanted_ids else found
+    chosen = [s for s in chosen if not wanted_tags or wanted_tags & set(s.tags)]
+    if not chosen:
+        tags_text = ", ".join(sorted(wanted_tags))
+        raise SuiteError(f"no scenario in {where} has the tag {tags_text}")
+    return chosen
