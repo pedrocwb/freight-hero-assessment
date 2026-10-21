@@ -1,5 +1,5 @@
 """Command line entry point: `agent eval run|list`, `agent sop ...` (in `cli_sop.py`),
-`agent prompts ...` (in `cli_prompts.py`) and `agent serve`.
+`agent prompts ...` (in `cli_prompts.py`), `agent serve` and `agent db migrate`.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -312,3 +312,35 @@ def serve(
     from freight_agent.api.__main__ import main as serve_api
 
     serve_api(["--host", host, "--port", str(port)])
+
+
+db_app = typer.Typer(no_args_is_help=True, help="The Postgres database (PERSISTENCE=postgres).")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("migrate")
+def db_migrate() -> None:
+    """Apply the pending migrations of migrations/ to DATABASE_URL (environment or .env).
+
+    Each file is applied once and recorded in schema_migrations, so a rerun applies only
+    new files. Exit code 2: no DATABASE_URL, an unreachable database or a bad migration.
+    """
+    from psycopg import OperationalError
+
+    from freight_agent.adapters.persistence.postgres.migrate import MigrationError, migrate
+
+    try:
+        url = Settings().require_database_url().get_secret_value()
+        applied = migrate(url)
+    except MissingSetting as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2) from exc
+    except MigrationError as exc:
+        typer.echo(f"error: {exc}")
+        raise typer.Exit(2) from exc
+    except OperationalError as exc:  # the message names host and port, never the password
+        typer.echo(f"error: cannot reach the database: {str(exc).strip().splitlines()[0]}")
+        raise typer.Exit(2) from exc
+    typer.echo(
+        f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else "")
+    )
