@@ -27,8 +27,9 @@ deterministic step: it reads the load's memory, drops what needs no thought, giv
 events their intent, selects the SOP sections and checks every action. The model works
 inside one bounded tool loop: it reads what it needs (SOP, history, ledger, load,
 documents) and stages actions one at a time. Each staged action is checked by the rules at
-the call and answered "accepted" or "rejected by <rule>"; nothing runs until the run
-commits, and then only through an outbox. Memory lives in storage, never in the process.
+the call and answered "accepted" or "rejected by <rule>", with what an acceptable action
+looks like; nothing runs until the run commits, and then only through an outbox. Memory
+lives in storage, never in the process.
 
 The run graph (`application/graph/build.py`, diagram in
 [architecture.md section 4](architecture.md#4-the-run-graph)):
@@ -53,7 +54,7 @@ The agent's tools:
 | Kind | Tools | Effect |
 |---|---|---|
 | Read | `search_sop`, `read_sop_section`, `get_history`, `get_ledger`, `get_load`, `read_document`, `list_document_requirements` | Text from the run's context and the SOP index. Message and document text comes back as quoted, untrusted data. |
-| Action | `send_sms`, `send_email`, `post_broker_slack`, `write_tms_note`, `create_hero_task`, `post_internal_slack`, `update_stage`, `schedule_timer`, `defer_obligation`, `close_obligation`, `open_obligation` | Build the action and check it with `check_action` against the actions accepted so far. Answer `accepted as action #n` or `rejected by <rule>: <why>`. Execute nothing. |
+| Action | `send_sms`, `send_email`, `post_broker_slack`, `write_tms_note`, `create_hero_task`, `post_internal_slack`, `update_stage`, `schedule_timer`, `defer_obligation`, `close_obligation`, `open_obligation` | Build the action and check it with `check_action` against the actions accepted so far. Answer `accepted as action #n` or `rejected by <rule>: <why>` (what is wrong, then how to correct it: "its requests are used up. No further message may carry requests: eta_request ..."). Execute nothing. |
 | Answer | `finish(rationale, intent, no_procedure)` | Ends the loop. |
 
 **Guardrails that hold whatever the model does:**
@@ -63,7 +64,9 @@ The agent's tools:
   load, on a channel that contact has; at most 3 SMS per contact per hour; the attempt cap
   of each obligation kind; obligation kinds from the client's catalog; one deferral of at
   most 15 minutes; the stage only moves forward; no duplicate action; no phone number or
-  email address in outbound text. A rule refuses an action, never edits it.
+  email address in outbound text. A rule refuses an action, never edits it; its refusal
+  says what is wrong and what an acceptable action looks like, so the next round can
+  correct it.
   `e1_prompt_injection` checks that an email asking for the rate confirmation at an
   outside address gets nothing sent there.
 - **Budgets per client** (`BrokerLimits`): 8 rounds (`max_steps`), $0.05 of model spend per
@@ -77,8 +80,8 @@ The agent's tools:
   section selection, the rules and the executor are code; the same context renders the
   same prompt, byte for byte.
 
-**Trade-offs.** The loop resends its prompt every round: an agent run reads about 15,500
-input tokens over 2.5 rounds on average (`evals/RESULTS.md`), against about 4,700 for a
+**Trade-offs.** The loop resends its prompt every round: an agent run reads about 16,200
+input tokens over 2.7 rounds on average (`evals/RESULTS.md`), against about 4,700 for a
 single structured plan. Its trajectory varies between runs. Both are bounded (the budgets,
 the rules) and measured (trajectory checks, cost per run, pass^3).
 
@@ -132,7 +135,7 @@ stage there; its follow-up timer asks the driver for the POD, then hands it to a
 
 **Measured.** The fixtures are real PDFs (`evals/fixtures/docs/`: a clean POD, a POD with
 exceptions and a mistyped PO, a scanned POD with no text layer, a BOL), each with its
-expected values. An extraction of a one-page POD reads about 1,810 input and 115 output
+expected values. An extraction of a one-page POD reads about 1,810 input and 113 output
 tokens and costs $0.0008 in 1.3 s. The clean POD and the POD with exceptions were read
 correctly in every live trial; the scanned POD and the BOL are covered by unit tests with
 the fake model only, not by a live run.
@@ -421,7 +424,7 @@ inspector shows each run's path, tool calls and actions. **Designed, not built:*
 | Age of the oldest queued event | above 2 minutes warns, above 5 is the SLA breach |
 | Run p95, deadline escalations, dead letters | any dead letter; p95 over 60 s |
 | Status mix per client: acted, noop, escalated, blocked | a shift after a deploy or an SOP change |
-| Model errors and fallback share per model | fallback share over 5% (the k=3 round showed why: `evals/RESULTS.md`) |
+| Model errors, retries, providers and fallback share per model | fallback share over 5% (a weaker fallback costs pass rate: `evals/RESULTS.md`) |
 | Cost per load against $1 | 80% of the budget |
 | Stalled obligations (open, no timer), timer lag | any |
 
@@ -463,15 +466,21 @@ of each role. The safety rules do not depend on the model.
   calls per run, the SOP-gap scenario in every trial. The cheapest model that meets all
   wins. That chose `openai/gpt-oss-120b` for the agent ($0.00066 per run); Claude Haiku
   5.5 passed 22/22 at 3.6 times the cost and is the first upgrade.
-- **The fallback is part of the change.** Each role has a fallback chain with a circuit
-  breaker (`adapters/llm/resilient.py`). The k = 3 round in `evals/RESULTS.md` hit
-  provider rate limits: rows served by the primary alone passed 43 of 43, both core
-  failures came from rounds served by the fallback. So a model change is measured for the
-  primary and the fallback, and a fallback that does not pass the suite is replaced.
+- **The fallback is part of the change.** Each role has a chain in `config/models.yaml`:
+  the model on its preferred provider (OpenRouter may serve it from another provider that
+  takes the same parameters), two short retries on the same model when the provider rate
+  limits, then fallback models with settings of their own, each model behind a circuit
+  breaker (`adapters/llm/resilient.py`). An earlier k = 3 round showed why the fallback
+  is measured too: rate limits moved agent rounds to Gemini 2.5 Flash Lite, and both core
+  failures came from rounds it served. The agent's fallback is now Claude Haiku 5.5, which
+  passed the suite as the agent model; in the current round the retries answered 91 of the
+  99 rate-limited rounds on the primary and Haiku the other 8 (`evals/RESULTS.md`).
 - **Model-specific behavior is found by these runs, not by tests:** OpenRouter has no
-  Anthropic endpoint for `tool_choice: required` (the adapter sends `auto` there), and
-  Google endpoints dropped a union type in a tool schema (the action tools have flat
-  schemas, with no `$ref` and no union: `application/agent_tools.py`).
+  Anthropic endpoint for `tool_choice: required` (the adapter sends `auto` there), only
+  DeepInfra serves gpt-oss at bf16 with a forced tool call (so OpenRouter has no other
+  provider to route an agent round to), and Google endpoints dropped a union type in a
+  tool schema (the action tools have flat schemas, with no `$ref` and no union:
+  `application/agent_tools.py`).
 - **Independent of the model:** structured output is a forced tool call validated by
   pydantic, so a malformed answer is an error (fallback, then a Hero task), never a
   half-read plan; the rules hold for any model.
@@ -521,9 +530,10 @@ own only for what it changes.
 
 **Short answer.** Each run is bounded by construction: a per-load FIFO with loads processed
 in parallel, no model call for most events, one gate call for messages and one agent loop
-with a round and a cost limit, a 60-second timeout per model call inside a 240-second run
-deadline, and an escalation to a Hero instead of a retry when a model or the deadline
-fails. Measured, the agent call (all its rounds) takes 7.0 s at p50 and 14.6 s at p95.
+with a round and a cost limit, a 60-second timeout per model call (its retries included)
+inside a 240-second run deadline, and an escalation to a Hero instead of a rerun when the
+models or the deadline fail. Measured, the agent call (all its rounds) takes 7.7 s at p50
+and 12.5 s at p95.
 
 | Mechanism | Where |
 |---|---|
@@ -532,14 +542,15 @@ fails. Measured, the agent call (all its rounds) takes 7.0 s at p50 and 14.6 s a
 | No model call for pings, stale timers, duplicates, empty messages; intents of system events from code | `domain/ping_filter.py`, `application/prefilter.py`, `application/gate.py` |
 | At most 8 agent rounds and $0.05 per run, then a forced answer | `BrokerLimits`, `application/graph/nodes.py` |
 | 60 s per model call, 240 s per run; past the deadline one urgent Hero task and the event completes | `RuntimeConfig`, `application/escalation.py` |
-| Fallback chain with circuit breakers: a failing model is skipped, not waited on | `adapters/llm/resilient.py` |
+| A rate limit is retried at most twice on the same model, about 1 s then 2 s later, inside the call's timeout; then the fallback chain, whose circuit breakers skip a failing model instead of waiting on it | `RetryPolicy`, `adapters/llm/resilient.py` |
 | A worker that dies mid-run: the claim lease (deadline plus 60 s) returns the event; 3 failures make a dead letter | `EventQueue.reclaim_expired` |
 
 **Measured** (`evals/RESULTS.md`, k = 3 round, 135 agent runs of the core suite): agent call
-p50 7.0 s, p95 14.6 s, max 35.8 s (a run that used all 8 rounds); gate call p50 0.9 s, p95
-1.3 s; a document extraction 1.3 s. Eight rounds at the 60-second timeout could exceed 240
-s, which is why the deadline, not the round count, is the bound. The deadline leaves 60
-seconds of the 5 minutes for the queue wait and the delivery.
+p50 7.7 s, p95 12.5 s, max 16.6 s; gate call p50 0.9 s, p95 1.2 s; a document extraction
+1.3 s. A rate-limited round adds its backoff, about 1 to 3 s; 86 core rounds were rate
+limited, and no run reached its deadline. Eight rounds at the 60-second timeout could
+exceed 240 s, which is why the deadline, not the round count, is the bound. The deadline
+leaves 60 seconds of the 5 minutes for the queue wait and the delivery.
 
 **Designed, not built:** workers that scale on the age of the oldest queued event, an
 always-on outbox dispatcher (today the tick delivers), and priority for risk changes and
@@ -567,7 +578,7 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 | Storage | In-memory store behind the repository ports | Postgres: the events table partitioned by month, closed loads archived to object storage, a pooler, a read replica for the platform and metrics |
 | SOP index | Files read per run | Published versions in Postgres, cached per client by hash; hybrid search with pgvector |
 | Documents | Blobs on the filesystem; read in the tick | An object store behind `BlobStore`; document workers scaled on pending documents |
-| Models | One OpenRouter key | Higher rate limits or provisioned throughput, retry with backoff on 429 before falling back, a fallback from another provider that passes the suite, per-client concurrency limits |
+| Models | One OpenRouter key; a rate limit is retried on the same model, OpenRouter may serve the model from another provider that takes the same parameters (the gate: OpenAI, then Azure), then a fallback model that passes the suite serves the call | Higher rate limits or provisioned throughput, per-client concurrency limits |
 | Tracing | Every run | Sampling: every escalation and failure, a share of the rest |
 | Cost | About $0.04 per load | The same per load; the total grows linearly |
 
@@ -581,17 +592,17 @@ memory store, is at tag `full-platform`.
 **Short answer.** Most events never reach a model, the gate keeps chatter away from the
 agent, the agent runs a cheap model chosen by a bake-off, its prompt holds only the
 matching SOP sections, and each run has a round and a cost budget. Measured on the current
-design: about $0.0001 per gate call and $0.0008 per agent run, so about **$0.04 for a
+design: about $0.0001 per gate call and $0.0007 per agent run, so about **$0.04 for a
 typical load and $0.07 for a heavy one**.
 
 | Per load | Typical | Heavy |
 |---|---|---|
 | Inbound messages, one gate call each ($0.000099) | 75: $0.007 | 100: $0.010 |
-| Agent runs ($0.00077): messages the gate passes, plus risk changes, timers and documents | 42: $0.032 | 77: $0.059 |
+| Agent runs ($0.00068): messages the gate passes, plus risk changes, timers and documents | 42: $0.029 | 77: $0.052 |
 | Document extractions ($0.0008) | 4: $0.003 | 5: $0.004 |
 | Location pings | no model call | no model call |
 | **Total** | **about $0.04** | **about $0.07** |
-| With the agent on Claude Haiku 5.5 | about $0.13 | about $0.23 |
+| With the agent on Claude Haiku 5.5 | about $0.11 | about $0.20 |
 
 Per-call figures are means over the k = 3 round (`evals/RESULTS.md`); the volumes are the
 assignment's 50 to 100 messages and an assumption for the rest.
@@ -605,8 +616,8 @@ assignment's 50 to 100 messages and an assumption for the rest.
 3. **The gate:** an "ok" ends as `noop` after a $0.0001 call instead of an $0.0008 loop;
    `must_act` keeps the intents that need action.
 4. **A cheap model per role,** chosen by the bake-off (4.3): the same loop on a $3 / $12 per
-   million model with no caching would cost about 42 x (15,500 x $3 + 450 x $12) / 1M,
-   about $2.20 per typical load.
+   million model with no caching would cost about 42 x (16,200 x $3 + 220 x $12) / 1M,
+   about $2.15 per typical load.
 5. **Small prompts:** only the matching sections in full; the rest is one line each and a
    search away.
 6. **The run budget:** 8 rounds and $0.05 per run, per client.

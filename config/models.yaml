@@ -60,7 +60,7 @@ roles:
     # gpt-oss-120b is the only model of the bake-off that met every threshold
     # (evals/RESULTS.md, "How the agent model was chosen"), at about $0.0007 per run;
     # Claude Haiku 5.5 passed too, at about 3.6 times the cost, and is the first upgrade.
-    # gpt-oss always reasons; low effort keeps an agent call near 7 s (p95 about 15 s).
+    # gpt-oss always reasons; low effort keeps an agent call near 8 s (p95 about 13 s).
     # DeepInfra at bf16 first, the endpoint the evals measured, and fallbacks allowed to
     # any other bf16 endpoint that takes every parameter sent. On 2026-10-20 there is
     # none: DekaLLM, AkashML and Crusoe serve gpt-oss at bf16 but take only

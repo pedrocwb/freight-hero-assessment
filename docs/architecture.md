@@ -80,7 +80,7 @@ flowchart TB
   app["application/: run context, prefilter, gate, agent and tools, run graph, executor, runtime, document pipeline"]
   ports["ports/: repositories, SOP index, language model, prompts, gateways, blobs, page reader, clock, tracer"]
   domain["domain/: load, events, obligations, timers, rules and validation, SOP merge, catalog, documents, actions"]
-  adapters["adapters/: memory store, OpenRouter with fallbacks, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
+  adapters["adapters/: memory store, OpenRouter with retries and fallbacks, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
 
   entry --> boot
   boot --> app
@@ -159,9 +159,10 @@ flowchart TD
 | `max_steps` | 8 rounds | `BrokerLimits`, per client | The next round must call `finish` (the tool choice forces it) |
 | `max_cost_usd` | $0.05 per run | `BrokerLimits` | The next round must call `finish` |
 | `max_rejections` | 3 refused action calls | `BrokerLimits` | The run stops and escalates; accepted actions still run |
-| Model timeout | 60 s per round | `RuntimeConfig.llm_timeout_s` | The call fails over to the next model of the role |
+| Model timeout | 60 s per round, its retries included | `RuntimeConfig.llm_timeout_s` | The call fails over to the next model of the role |
+| Rate limit or overloaded provider | 2 retries on the same model, about 1 s then 2 s apart | `RetryPolicy`, `adapters/llm/resilient.py` | The call fails over to the next model of the role |
 | Run deadline | 240 s | `RuntimeConfig.run_deadline_s` | The run escalates with one urgent Hero task; the event completes |
-| Model failure | after the fallbacks | `adapters/llm/resilient.py` | The run escalates with one urgent Hero task; the event completes |
+| Model failure | after the retries and the fallbacks | `adapters/llm/resilient.py` | The run escalates with one urgent Hero task; the event completes |
 
 The graph is `application/graph/build.py`; the platform draws the same graph from
 `GET /api/graph`, and LangGraph Studio shows it inside its scenario graph.
