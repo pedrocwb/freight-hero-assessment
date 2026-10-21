@@ -157,8 +157,8 @@ def open_session(
     tracer: Tracer | None = None,
     memory: StoreFacilityMemory | None = None,
 ) -> Session:
-    """A simulation on `persistence` and `blobs`, as `bootstrap.build_simulation` builds
-    it. It reads what the store holds: emptying it first (a reset) is the caller's part.
+    """A simulation (`bootstrap.Simulation`) on `persistence` and `blobs`. It reads what
+    the store holds: emptying it first (a reset) is the caller's part.
 
     The model is the live one (`platform_llm`, on the session's clock for its circuit
     breakers) unless `llm` is given, which tests use to play the agent's rounds.

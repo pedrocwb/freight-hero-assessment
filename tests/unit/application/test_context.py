@@ -233,7 +233,7 @@ async def test_obligations_are_every_obligation_of_the_load_oldest_first(
     ctx = await _context(store, event)
 
     assert [o.obligation_id for o in ctx.obligations] == ["obl_old", "obl_new"]
-    assert ctx.open_obligation(ObligationKind.ETA_REQUEST) == open_
+    assert [o for o in ctx.open_obligations if o.kind == ObligationKind.ETA_REQUEST] == [open_]
     assert ctx.obligation("obl_old") == closed
     assert ctx.obligation("obl_foreign") is None
 

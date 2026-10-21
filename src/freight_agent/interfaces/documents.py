@@ -2,8 +2,8 @@
 and the pipeline the runtime ticks.
 
 Owner: card W3-DOC. C0 wrote the contracts; the memory implementations are
-`adapters/documents/memory_blobs.py`, `adapters/documents/fake_pages.py` and
-`adapters/persistence/memory/documents.py`.
+`adapters/documents/memory_blobs.py` and `adapters/persistence/memory/documents.py`
+(the tests read pages with `tests/fakes.py`'s `FakePageReader`).
 """
 
 from typing import Protocol

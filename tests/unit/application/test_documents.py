@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
-from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
@@ -45,7 +44,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.interfaces.llm import ChatRequest, ImageInput, LlmError, ModelRole
-from tests.fakes import FakeModel
+from tests.fakes import FakeModel, FakePageReader
 from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit

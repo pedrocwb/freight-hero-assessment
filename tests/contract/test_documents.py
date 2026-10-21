@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
-from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.application.documents import DocumentPipeline
@@ -34,7 +33,7 @@ from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.interfaces.llm import LlmError, ModelRole
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
-from tests.fakes import FakeModel
+from tests.fakes import FakeModel, FakePageReader
 from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.contract

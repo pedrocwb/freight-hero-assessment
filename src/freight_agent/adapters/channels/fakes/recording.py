@@ -25,7 +25,6 @@ class Delivery:
 class DeliveryLog:
     deliveries: list[Delivery] = field(default_factory=list)
     seen_keys: set[str] = field(default_factory=set)
-    duplicate_attempts: int = 0
     failures_remaining: dict[str, int] = field(default_factory=dict)
 
     def record(self, channel: str, load_id: str, key: str, payload: dict[str, Any]) -> None:
@@ -33,7 +32,6 @@ class DeliveryLog:
             self.failures_remaining[channel] -= 1
             raise DeliveryError(f"simulated {channel} failure")
         if key in self.seen_keys:
-            self.duplicate_attempts += 1
             return
         self.seen_keys.add(key)
         self.deliveries.append(Delivery(channel, load_id, key, payload))

@@ -203,12 +203,10 @@ def test_the_standard_catalog_has_the_four_document_types_and_no_requirement() -
         "rate_confirmation",
         "receipt",
     ]
-    pod = broker.document_type("pod")
-    assert pod is not None
+    pod = next(d for d in broker.document_types if d.type_id == "pod")
     checks = {f.name: f.check for f in pod.fields}
     assert checks["po_numbers"] == "po_number"  # a POD with the wrong PO is caught
     assert (checks["receiver"], checks["signed"]) == ("stop_name", "signature")
-    assert broker.document_type("nope") is None
     assert broker.requirements_at(Stage.AT_DELIVERY) == ()
 
 

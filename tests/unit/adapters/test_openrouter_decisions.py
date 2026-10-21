@@ -190,11 +190,7 @@ async def test_each_answer_is_typed_and_the_usage_is_the_providers_cost() -> Non
         0.9,
     )
     condition = response.answer("condition", ScoreAnswer)
-    assert (condition.score, condition.probabilities, condition.most_likely) == (
-        1.87,
-        (0.0, 0.13, 0.87),
-        2,
-    )
+    assert (condition.score, condition.probabilities) == (1.87, (0.0, 0.13, 0.87))
     usage = response.usage
     assert (usage.role, usage.model, usage.input_tokens, usage.output_tokens) == (
         "gate",
@@ -254,10 +250,6 @@ async def test_a_reply_that_misses_a_question_or_its_kind_fails(
 async def test_a_reply_that_is_not_a_decision_fails(body: bytes) -> None:
     with pytest.raises(DecisionError, match="the reply is not a decision"):
         await adapter(Script(httpx.Response(200, content=body))).decide(REQUEST)
-
-
-def test_a_score_with_no_level_weighed_is_its_rounded_score() -> None:
-    assert ScoreAnswer(score=1.6).most_likely == 2
 
 
 # --- retries and errors ------------------------------------------------------------------

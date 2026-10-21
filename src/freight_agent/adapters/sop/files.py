@@ -248,17 +248,6 @@ def tree_version(root: Path) -> str:
     return digest.hexdigest()[:_VERSION_LENGTH]
 
 
-def load_tree(root: Path) -> list[SopSection]:
-    """Every section of the tree, every client's included. Fails like `FileSopRepository`:
-    a file outside the layout, a file with a problem, an id used twice in one folder, a
-    broken catalog."""
-    catalogs: dict[str, tuple[str, ...]] = {}
-    files = [_load_file(root, source, path, catalogs) for source, path in sop_paths(root)]
-    for section_id, repeat, first in duplicates(files):
-        raise SopFormatError(repeat.location.source, duplicate_problem(section_id, first))
-    return [file.section for file in files if file.section is not None]
-
-
 def _load_file(
     root: Path, source: str, path: Path, catalogs: dict[str, tuple[str, ...]]
 ) -> SopFile:
