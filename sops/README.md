@@ -75,6 +75,7 @@ Situations (`intents`):
 | `status_update` | Other news about the truck or the load |
 | `driver_departed` | The truck left a stop |
 | `document` | A document or a photo arrived |
+| `document_processed` | The document check read a document: its type, its values and whether they match the load |
 | `other` | Anything else. When no topic covers a situation, the agent hands it to the Hero team |
 
 Stages (`stages`): `dispatched`, `to_pickup`, `at_pickup`, `to_delivery`, `at_delivery`,
@@ -168,8 +169,12 @@ uv run agent sop lint
 
 The check lists every problem with the file name and how to fix it: a missing `id`, an
 unknown intent or stage, a header that cannot be read, two files with the same id in one
-folder, an `extend` with nothing to extend. It also warns when no eval scenario covers a
-topic. Fix every error before you go on.
+folder, an `extend` with nothing to extend, a `broker.yaml` that cannot work. It also
+warns when no eval scenario covers a topic. Fix every error before you go on.
+
+To see what the agent reads, open the SOPs screen of the platform (see the repository
+README): pick the client, the load types, the situation and the stage, and it shows the
+topics the agent gets in full, after the layers are merged.
 
 ## The safe way to change an SOP
 
@@ -178,9 +183,11 @@ topic. Fix every error before you go on.
 3. **Evals**: run the eval scenarios. Each scenario replays a situation on a load (for
    example "the driver answers ok after our ETA request") and checks every action the
    agent takes. Scenarios name the topics they cover with a tag like
-   `sop:delay_risk_high`. A changed text changes what the model reads, so run them with
-   the live model. Every scenario must pass, including those of other clients. If your
-   change adds a rule that no scenario checks, add a scenario for it.
+   `sop:delay_risk_high`. A changed text changes what the model reads, so they run with
+   the live model, three times each (`uv run agent eval run --suite core --k 3
+   --cost-cap-usd 0.15`, and the same for the `agent` and `docs` suites). Every scenario
+   must pass, including those of other clients. If your change adds a rule that no
+   scenario checks, add a scenario for it.
 4. **Review**: someone who knows the client's procedure reads the change and the eval
    results, and approves it.
 5. **Publish**: the change is merged. The agent reads these files on every run, so the
