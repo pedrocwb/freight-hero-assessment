@@ -30,9 +30,10 @@ for the process. The run record keeps the version of each one the run sent to a 
 (`RunRecord.prompts`): the gate's when the triage called its model, the agent's when the
 run reached the agent loop, failed calls included.
 
-The gate's engine is the process's (`RuntimeConfig.gate_engine`): `llm`, the gate model
-on `RuntimeDeps.llm`, or `jev`, the decision model on `RuntimeDeps.decisions` with the
-policy of `gate_decision.py`. The run record names the engine that read a message
+The gate's engine is the process's (`RuntimeConfig.gate_engine`): `jev`, the decision
+model on `RuntimeDeps.decisions` with the policy of `gate_decision.py` (the process
+default, `GATE_ENGINE`), or `llm`, the gate model on `RuntimeDeps.llm` (this class's own
+default, the engine that needs no other port). The run record names the engine that read a message
 (`RunRecord.gate_engine`) and keeps the jev engine's probabilities (`gate_scores`).
 
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the

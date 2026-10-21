@@ -173,8 +173,8 @@ pricing:
 
 # Roles that can run on a decision model instead of their chat model, through
 # OpenRouter's Decisions API (adapters/decisions/openrouter.py): a typed answer with
-# probabilities, no text. The gate runs on it with GATE_ENGINE=jev (default llm, the
-# chat model above), with the policy of application/gate_decision.py. One model, no
+# probabilities, no text. The gate runs on it by default (GATE_ENGINE=jev; llm runs the
+# gate's chat model above), with the policy of application/gate_decision.py. One model, no
 # fallback: the act threshold belongs to this model's probabilities, so an outage
 # escalates the run instead.
 #   model              pinned version; ~typesafe/jev-latest is an alias that moves

@@ -90,8 +90,10 @@ def plan(*actions: Action) -> Plan:
 
 
 def api_settings(**overrides: Any) -> Settings:
-    """The repository's SOPs, evals and models; no `.env`, no key, no tracing."""
+    """The repository's SOPs, evals and models; no `.env`, no key, no tracing. The gate
+    runs on its chat model (`llm`), where these tests script its answers on the fake."""
     values: dict[str, Any] = {
+        "gate_engine": "llm",
         "langsmith_tracing": False,
         "openrouter_api_key": None,
         "langsmith_api_key": None,

@@ -289,10 +289,12 @@ def test_eval_run_hands_the_experiment_the_suite_the_choice_and_the_limits(
 
 
 @pytest.mark.usefixtures("keys")
-def test_eval_run_records_the_llm_gate_by_default(offline: Offline) -> None:
+def test_eval_run_on_the_llm_gate_records_it_and_builds_no_decision_model(
+    offline: Offline,
+) -> None:
     offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
 
-    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--gate-engine", "llm")
 
     assert result.exit_code == 0, result.output
     assert "gate engine: llm" in result.output
@@ -303,13 +305,13 @@ def test_eval_run_records_the_llm_gate_by_default(offline: Offline) -> None:
 
 
 @pytest.mark.usefixtures("keys")
-def test_eval_run_on_the_jev_gate_records_it_and_hands_the_trials_its_model(
+def test_eval_run_on_the_default_jev_gate_records_it_and_hands_the_trials_its_model(
     offline: Offline, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GATE_ACT_THRESHOLD", "0.15")
     offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
 
-    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--gate-engine", "jev")
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")  # jev by default
 
     assert result.exit_code == 0, result.output
     assert "gate engine: jev" in result.output

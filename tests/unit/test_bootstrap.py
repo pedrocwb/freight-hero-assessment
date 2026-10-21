@@ -311,7 +311,8 @@ async def test_the_default_runtime_is_local_and_untraced() -> None:
     assert isinstance(deps.gateways, Gateways)
     assert type(deps.gateways.sms).__module__ == recording.__name__
     assert isinstance(deps.tracer, NullTracer)
-    assert deps.config == RuntimeConfig()
+    assert deps.config == RuntimeConfig(gate_engine=GateEngine.JEV)
+    assert isinstance(deps.decisions, UnavailableDecisions)  # the gate's, saying the same
 
 
 def test_with_the_key_the_runtime_calls_the_live_router() -> None:
@@ -667,12 +668,14 @@ def test_no_document_is_read_until_both_document_adapters_exist(
 # --- the gate's engine -----------------------------------------------------------------
 
 
-def test_the_gate_runs_on_its_chat_model_by_default() -> None:
-    deps = build_runtime_deps(_settings(), llm=FakeModel())
+def test_the_gate_runs_on_the_decision_model_by_default_and_on_its_chat_model_on_llm() -> None:
+    assert build_runtime_deps(_settings(), llm=FakeModel()).config.gate_engine is GateEngine.JEV
+
+    deps = build_runtime_deps(_settings(gate_engine="llm"), llm=FakeModel())
 
     assert deps.config.gate_engine is GateEngine.LLM
     assert deps.decisions is None
-    assert gate_decisions(_settings()) is None
+    assert gate_decisions(_settings(gate_engine="llm")) is None
 
 
 def test_on_jev_the_runtime_gets_the_decision_model_of_the_models_file() -> None:

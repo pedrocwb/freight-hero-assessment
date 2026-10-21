@@ -98,7 +98,7 @@ def eval_run(
         str | None,
         typer.Option(
             help="The gate's engine: llm (the gate's chat model) or jev (the decision model).",
-            show_default="GATE_ENGINE, else llm",
+            show_default="GATE_ENGINE, else jev",
         ),
     ] = None,
 ) -> None:

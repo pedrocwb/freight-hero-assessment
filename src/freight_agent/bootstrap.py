@@ -13,10 +13,11 @@ switched on without its key it falls back to no tracing, with a warning that nam
 secret. Without `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run
 that needs the model escalates to a Hero, saying the key is missing.
 
-The gate's engine is `GATE_ENGINE` (`build_runtime_config`). On `jev` the gate runs on the
-decision model of `config/models.yaml` (`decisions.gate`), through OpenRouter's Decisions
-API (`build_decisions`); without the key it is a decision model whose every call fails
-saying so, as for the chat models.
+The gate's engine is `GATE_ENGINE` (`build_runtime_config`). On `jev`, the default, the
+gate runs on the decision model of `config/models.yaml` (`decisions.gate`), through
+OpenRouter's Decisions API (`build_decisions`); without the key it is a decision model
+whose every call fails saying so, as for the chat models. On `llm` it runs on the gate's
+chat model.
 
 The prompt templates come from the LangSmith Prompt Hub, at the references
 `config/prompts.yaml` pins (`build_prompts`), resolved once per process and checked

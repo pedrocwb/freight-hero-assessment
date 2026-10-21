@@ -67,10 +67,11 @@ class Settings(BaseSettings):
     prompts_source: Literal["auto", "local"] = "auto"
     prompts_tag: str | None = None  # every role at this Hub tag instead of its pin
 
-    # The gate: llm (the gate's chat model writes its decision) or jev (the decision model
-    # of config/models.yaml `decisions.gate` gives probabilities, and code decides). On
-    # jev, a quiet intent ends the run only when P(act now) is under the threshold.
-    gate_engine: Literal["llm", "jev"] = "llm"
+    # The gate: jev (the decision model of config/models.yaml `decisions.gate` gives
+    # probabilities, and code decides; measured against llm in evals/RESULTS.md) or llm
+    # (the gate's chat model writes its decision). On jev, a quiet intent ends the run
+    # only when P(act now) is under the threshold.
+    gate_engine: Literal["llm", "jev"] = "jev"
     gate_act_threshold: float = Field(default=0.2, ge=0, le=1)
 
     def require_openrouter_key(self) -> SecretStr:
