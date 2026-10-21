@@ -41,6 +41,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
+from langchain_core.embeddings import Embeddings
+
 from freight_agent.application.runtime import RuntimeConfig
 from freight_agent.evalkit.graders import GROUPS, CheckGroup, grade
 from freight_agent.evalkit.metadata import RunMetadata
@@ -92,8 +94,9 @@ def dataset_name(suite: str) -> str:
 
 
 def example_inputs(scenario: Scenario) -> dict[str, Any]:
-    """What the agent is given: the load, the clock, each step's message or ping."""
-    return {
+    """What the agent is given: the load, the clock, each step's message or ping, and the
+    facility notes seeded before the first step (only when there are some)."""
+    inputs: dict[str, Any] = {
         "scenario_id": scenario.id,
         "title": scenario.title,
         "description": scenario.description,
@@ -104,6 +107,11 @@ def example_inputs(scenario: Scenario) -> dict[str, Any]:
         "start": scenario.start,
         "steps": [_step_input(step) for step in scenario.steps],
     }
+    if scenario.memories:
+        inputs["memories"] = [
+            m.model_dump(mode="json", exclude_defaults=True) for m in scenario.memories
+        ]
+    return inputs
 
 
 def example_outputs(scenario: Scenario) -> dict[str, Any]:
@@ -298,7 +306,8 @@ class ScenarioTarget:
     """The experiment's target: one example in, one scenario played live, its
     observations out. A new model per example (`model_factory`), so circuit breakers
     never carry one example's outage into the next. `config` sets the gate's engine, and
-    `decisions` is the jev engine's model (one for the experiment: it has no breaker)."""
+    `decisions` is the jev engine's model (one for the experiment: it has no breaker), and
+    `embeddings` index each trial's facility memory (one for the experiment)."""
 
     def __init__(
         self,
@@ -311,8 +320,10 @@ class ScenarioTarget:
         meter: CostMeter,
         config: RuntimeConfig | None = None,
         decisions: DecisionModel | None = None,
+        embeddings: Embeddings | None = None,
     ) -> None:
         self._scenarios = scenarios
+        self._embeddings = embeddings
         self._evals_dir = evals_dir
         self._knowledge = knowledge
         self._prompts = prompts
@@ -338,6 +349,7 @@ class ScenarioTarget:
             model=self._model_factory(),
             config=self._config,
             decisions=self._decisions,
+            embeddings=self._embeddings,
         )
         meter.spent_usd += played.cost_usd
         return {

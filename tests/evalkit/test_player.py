@@ -28,7 +28,7 @@ from freight_agent.application.contracts import (
 )
 from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.gate import GateEngine
-from freight_agent.application.runtime import AgentRuntime, RuntimeConfig
+from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, StopFacts
 from freight_agent.domain.actions import (
     AgentOutcome,
     CloseObligation,
@@ -125,6 +125,12 @@ class FakeRuntime:
         self.runs: list[RunRecord] = []
         self._queue: list[_Queued] = []
         self._ids = SequentialIdGenerator()
+
+    # No facility memory: the player reads the notes of the load's stops after each step.
+    facility_memory = None
+
+    async def facility_facts(self, load_id: str) -> list[StopFacts]:
+        return []
 
     def seed_timer(self, due_at: datetime) -> None:
         self.timers.append(
@@ -860,3 +866,99 @@ def test_the_trial_runtime_is_the_product_runtime_on_the_counted_model() -> None
     assert isinstance(deps.ids, SequentialIdGenerator)
     assert isinstance(deps.tracer, NullTracer)
     assert deps.config.reraise_unexpected  # a harness bug ends the play with its message
+
+
+# --- facility memory --------------------------------------------------------------------
+
+
+async def test_m1_played_with_the_note_in_the_reply_passes_every_check() -> None:
+    m1 = real("m1_check_in_from_memory", "memory")
+    model = FakeModel()
+    model.push(ModelRole.GATE, QUESTION)
+    reply = SendSms(
+        contact_id=DRIVER,
+        text="On an earlier load we were told: Check in at gate 4.",
+        purpose=Purpose.REPLY,
+    )
+    model.push(ModelRole.AGENT, Plan(rationale="driver_questions step 3", actions=(reply,)))
+
+    played, _ = await play(m1, model)
+
+    assert played.error is None
+    assert grade(m1, played.observations) == []
+    prompt = model.rounds_of(ModelRole.AGENT)[0].request.user
+    assert '"Check in at gate 4"' in prompt and "gate 9" not in prompt  # Acme's note
+    (observation,) = played.observations
+    assert [n.text for n in observation.memories] == ["Check in at gate 4"]
+    (run,) = observation.runs
+    assert [f.fact_id for f in run.facility_facts] == ["seed-1"]
+
+
+async def test_seeded_notes_go_to_the_load_client_unless_another_is_named() -> None:
+    from freight_agent.evalkit.runner import seed_facts
+
+    m1 = real("m1_check_in_from_memory", "memory")
+    seeded = seed_facts(m1, read_load(EVALS, m1))
+
+    assert sorted(seeded) == ["acme", "northline"]
+    (note,) = seeded["northline"]
+    assert (note.facility_key, note.source_load_id) == ("riverbend-plant~stockton-ca", "470113")
+    assert note.source_at == datetime(2026, 10, 2, 9, 0, tzinfo=LA)
+
+
+async def test_a_note_on_a_stop_the_load_lacks_is_a_setup_error() -> None:
+    bad = scenario(
+        message("07:00"),
+        memories=[{"stop": 9, "text": "gate 4", "learned_on": "2026-10-02"}],
+    )
+
+    played, model = await play(bad)
+
+    assert played.error is not None and "names stop 9" in played.error
+    assert model.calls == []
+
+
+async def test_a_runtime_without_a_memory_cannot_seed_notes() -> None:
+    rig = Rig(
+        scenario(
+            message("07:00"), memories=[{"stop": 1, "text": "gate 4", "learned_on": "2026-10-02"}]
+        )
+    )
+
+    with pytest.raises(RunnerError, match="has no memory"):
+        await rig.player.start()
+
+
+async def test_a_delivered_load_is_extracted_before_the_step_is_observed() -> None:
+    from freight_agent.domain.actions import UpdateStage
+    from freight_agent.domain.load import Stage
+    from freight_agent.domain.memory import MemoryExtraction, ProposedOperation
+
+    delivering = scenario(
+        message("07:00", "check-in at Riverbend is at gate 4", message_id="m-gate"),
+        message("07:30", "delivered"),
+        load_overrides={"stage": "at_pickup"},
+    ).model_copy(update={"id": "s-memory"})
+    model = FakeModel()
+    status = GateDecision(intent=Intent.STATUS_UPDATE, act=True, reason="news")
+    model.push(ModelRole.GATE, status, status)
+    model.push(ModelRole.AGENT, Plan(rationale="nothing", actions=()))
+    model.push(
+        ModelRole.AGENT, Plan(rationale="done", actions=(UpdateStage(stage=Stage.DELIVERED),))
+    )
+    note = ProposedOperation(
+        op="add",
+        facility_key="riverbend-plant~stockton-ca",
+        text="Check in at gate 4",
+        event_id="m-gate",
+    )
+    model.push(ModelRole.MEMORY, MemoryExtraction(operations=(note,)))
+
+    played, _ = await play(delivering, model)
+
+    assert played.error is None
+    first, second = played.observations
+    assert first.memories == ()
+    assert [n.text for n in second.memories] == ["Check in at gate 4"]
+    assert second.llm_calls == 3  # the gate, the agent loop, the extraction
+    assert [u.role for u in played.usage][-1] == "memory"

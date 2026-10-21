@@ -1470,6 +1470,20 @@ textarea.input {
   gap: 6px;
 }
 
+/* Facility notes: what earlier loads taught about a stop's place (FacilityMemory). */
+.note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.note-list p {
+  margin: 0;
+}
+
+
 .doc:last-child {
   border-bottom: 0;
 }

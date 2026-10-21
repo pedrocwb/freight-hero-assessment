@@ -1067,3 +1067,92 @@ def test_two_failed_sub_checks_fail_their_check_once_with_both_details() -> None
 @pytest.mark.unit
 def test_a_step_that_declares_nothing_has_no_checks() -> None:
     assert step_checks(step(), observe(sms()), timezone=TZ) == []
+
+
+# --- expect.memories and expect.no_memories --------------------------------------------
+
+
+def _note(text: str, *, key: str = "riverbend-plant~stockton-ca", kind: str = "check_in") -> Any:
+    from freight_agent.domain.memory import FacilityFact, FactKind
+
+    return FacilityFact(
+        fact_id=f"fact-{next(_ids)}",
+        client_id="northline",
+        facility_key=key,
+        facility_name="Riverbend plant",
+        text=text,
+        kind=FactKind(kind),
+        source_load_id="481207",
+        source_event_id="m1",
+        source_at=T0,
+        created_at=T0,
+        updated_at=T0,
+    )
+
+
+def _with_notes(*notes: Any) -> StepObservation:
+    return observe().model_copy(update={"memories": notes})
+
+
+@pytest.mark.unit
+def test_expected_notes_match_by_stop_text_kind_and_count() -> None:
+    obs = _with_notes(
+        _note("Check in at gate 4"), _note("PO required at the gate", kind="requirement")
+    )
+
+    assert grade(expect(memories=[{"stop": 1, "contains": ["GATE 4"]}]), obs) == []
+    assert (
+        grade(expect(memories=[{"stop": 1, "regex": "^po\\b", "kind": "requirement"}]), obs) == []
+    )
+    assert grade(expect(memories=[{"stop": 1, "count": 2}]), obs) == []
+    failures = grade(
+        expect(
+            memories=[
+                {"stop": 1, "contains": ["gate 6"]},
+                {"stop": 1, "count": 1},
+                {"stop": 2, "contains": ["gate"]},
+                {"stop": 1, "kind": "hours"},
+            ]
+        ),
+        obs,
+    )
+    assert checks(failures) == [
+        "expect.memories[0]",
+        "expect.memories[1]",
+        "expect.memories[2]",
+        "expect.memories[3]",
+    ]
+    assert "expected at least 1 note on stop 1 containing 'gate 6'" in failures[0].message
+    assert "exactly 1" in failures[1].message
+    assert "kind hours" in failures[3].message
+    assert "Riverbend plant (check_in): 'Check in at gate 4'" in failures[0].message
+
+
+@pytest.mark.unit
+def test_unwanted_notes_fail_when_present() -> None:
+    obs = _with_notes(_note("Office 209-555-0147"))
+
+    assert grade(expect(no_memories=[{"stop": 1, "contains": ["gate"]}]), obs) == []
+    failures = grade(expect(no_memories=[{"stop": 1, "regex": "\\d{3}-\\d{4}"}]), obs)
+    assert checks(failures) == ["expect.no_memories[0]"]
+    assert "expected no note on stop 1 matching" in failures[0].message
+    empty = grade(expect(memories=[{"stop": 1}]), observe())
+    assert "notes: none" in empty[0].message
+
+
+@pytest.mark.unit
+def test_memory_checks_are_declared_and_listed() -> None:
+    spec = expect(memories=[{"stop": 1}], no_memories=[{"stop": 1, "regex": "x"}])
+
+    assert declared_checks(spec) == ["expect.memories[0]", "expect.no_memories[0]"]
+    listed = step_checks(spec, _with_notes(_note("x marks the spot")), timezone=TZ)
+    assert [(c.name, c.passed) for c in listed] == [
+        ("expect.memories[0]", True),
+        ("expect.no_memories[0]", False),
+    ]
+
+
+@pytest.mark.unit
+def test_a_memory_matcher_regex_must_compile() -> None:
+    with pytest.raises(ValidationError, match="invalid regex"):
+        expect(memories=[{"stop": 1, "regex": "("}])

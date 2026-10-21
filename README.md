@@ -9,12 +9,15 @@ holds the model inside one bounded tool loop; every action is checked by code at
 and happens only when the run commits. Each inbound message is first read by a decision
 model (TypeSafe's Jev, on OpenRouter) that answers its intent and whether it needs the
 agent as probabilities, not text; code decides from them, and a doubtful message goes on
-to the agent (`GATE_ENGINE=llm` reads it with a chat model instead).
+to the agent (`GATE_ENGINE=llm` reads it with a chat model instead). A facility memory
+keeps what drivers said about a pickup or delivery place ("check in at gate 4") for the
+next load of the same client there: extracted after delivery, checked in code, and shown to
+the agent as untrusted notes.
 
 | Read | For |
 |---|---|
 | [`docs/answers.md`](docs/answers.md) | The answers to the assignment's questions, numbered as asked |
-| [`docs/architecture.md`](docs/architecture.md) | The design in ten Mermaid diagrams |
+| [`docs/architecture.md`](docs/architecture.md) | The design in eleven Mermaid diagrams |
 | [`docs/decisions.md`](docs/decisions.md) | The contracts: SOP format and catalog, intents, run graph and budgets, executor, event ids, prompts |
 | [`evals/RESULTS.md`](evals/RESULTS.md) | Live eval results from LangSmith: pass^3, cost, latency, the model choice |
 | [`docs/api.md`](docs/api.md) | The platform API |
@@ -109,8 +112,9 @@ by the API. `.env.example` lists every setting with its default.
 | `uv run agent db migrate` | Applies the pending files of `migrations/` to `DATABASE_URL`, each once (recorded in `schema_migrations`) | free |
 | `uv run agent eval list` | The scenarios of each suite with their tags | free |
 | `uv run agent sop lint` | Checks every SOP file and catalog; warns about sections no scenario covers | free |
-| `uv run agent eval run --suite core --k 3 --cost-cap-usd 0.15` | One suite live, as a LangSmith experiment: pass^k table and the experiment's link. Suites: `core`, `agent`, `docs`. `--scenario ID` for one; `--prompt-tag candidate` to measure a prompt candidate | core $0.03 to $0.04 per repetition; the cap stops it (exit 3) |
+| `uv run agent eval run --suite core --k 3 --cost-cap-usd 0.15` | One suite live, as a LangSmith experiment: pass^k table and the experiment's link. Suites: `core`, `agent`, `docs`, `memory`. `--scenario ID` for one; `--prompt-tag candidate` to measure a prompt candidate | core $0.03 to $0.04 per repetition; the cap stops it (exit 3) |
 | `make eval` | Every suite at k=1 (`EVAL_K`, `EVAL_COST_CAP_USD` per suite, default $0.10) | about $0.04 |
+| `uv run agent memory list --client C` / `--load L`, `extract --load L` | The facility notes of a client or of a load's stops; run a load's extraction now (one live `memory` call) | extract: about $0.001 |
 | `uv run agent prompts status` / `push --tag T` / `pull` | Compare `prompts/` with the Hub pins; publish changed templates and move tag T; write a Hub version back | free |
 | `uv run agent serve` | The platform API on http://127.0.0.1:8000 (`/docs` for OpenAPI) | runs spend on the model |
 | `cd web && pnpm dev` | The UI on http://localhost:5173, proxying `/api` to port 8000 | |
@@ -132,22 +136,24 @@ src/freight_agent/
   interfaces/         interfaces: repositories, SOP index, language model, decision model,
                  prompts, gateways, blobs, page reader, clock, tracer
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
-                 (graph/), executor, escalations, runtime, document pipeline, prompt variables
-  adapters/      memory and Postgres stores, OpenRouter with retries, fallbacks and circuit breakers,
+                 (graph/), executor, escalations, runtime, document pipeline, facility
+                 memory extraction, prompt variables
+  adapters/      memory and Postgres stores, facility memory on a LangGraph store with
+                 embeddings, OpenRouter with retries, fallbacks and circuit breakers,
                  OpenRouter's Decisions API (the gate's decision model), SOP files and
                  lint, Prompt Hub and local prompts, pypdfium2 pages, blobs, LangSmith
                  links, recording gateways
   evalkit/       scenario spec, player, graders, judge, LangSmith experiments, metadata
   api/           FastAPI platform: simulation, ingress, scenarios, SOPs, documents, stream
   bootstrap.py   the composition root: the only place that wires adapters to interfaces
-  cli.py         the `agent` command (cli_sop.py, cli_prompts.py)
+  cli.py         the `agent` command (cli_sop.py, cli_prompts.py, cli_memory.py)
   studio.py      LangGraph Studio's scenario graph (langgraph.json)
 sops/            the SOPs: standard, client and load-type sections, client catalogs
-prompts/         the reviewable copy of the five prompt templates
+prompts/         the reviewable copy of the six prompt templates
 migrations/      the Postgres schema, numbered SQL files (`agent db migrate`)
 config/          models per role with prices and the gate's decision model (models.yaml),
                  prompt pins (prompts.yaml)
-evals/           scenarios (core, agent, docs), fixtures (load 481207, POD and BOL PDFs),
+evals/           scenarios (core, agent, docs, memory), fixtures (load 481207, POD and BOL PDFs),
                  RESULTS.md
 web/             React and Vite platform UI
 tests/           unit, contract, property, integration, eval harness

@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.application.contracts import LoadSnapshot
+from freight_agent.domain.memory import FacilityFact
 from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.runs import RunRecord
 from freight_agent.evalkit.judge import JudgeResult
@@ -28,6 +29,8 @@ class StepObservation(_Result):
     llm_calls: int  # model calls made during the step (all roles, an agent loop as one)
     snapshot: LoadSnapshot  # state at the end of the step
     judge: JudgeResult | None = None  # the judge's verdict, for a step with a rubric
+    # The facility notes of the load's stops at the end of the step (its client's).
+    memories: tuple[FacilityFact, ...] = ()
 
     def compact(self) -> dict[str, Any]:
         """The observation as JSON, without what the graders never read: the snapshot's

@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     gate_engine: Literal["llm", "jev"] = "jev"
     gate_act_threshold: float = Field(default=0.2, ge=0, le=1)
 
+    # The facility memory's embeddings: auto (the `embeddings.memory` model of
+    # config/models.yaml when OPENROUTER_API_KEY is set, else the offline hash) or fake
+    # (always the offline hash: no network, deterministic).
+    memory_embeddings: Literal["auto", "fake"] = "auto"
+
     def require_openrouter_key(self) -> SecretStr:
         return _required(self.openrouter_api_key, "OPENROUTER_API_KEY", "the agent's model")
 

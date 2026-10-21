@@ -1,5 +1,6 @@
 """Command line entry point: `agent eval run|list`, `agent sop ...` (in `cli_sop.py`),
-`agent prompts ...` (in `cli_prompts.py`), `agent serve` and `agent db migrate`.
+`agent prompts ...` (in `cli_prompts.py`), `agent memory ...` (in `cli_memory.py`),
+`agent serve` and `agent db migrate`.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from freight_agent.cli_memory import memory_app
 from freight_agent.cli_prompts import prompts_app
 from freight_agent.cli_sop import sop_app
 from freight_agent.settings import MissingSetting, Settings
@@ -33,6 +35,7 @@ eval_app = typer.Typer(
 app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
 app.add_typer(prompts_app, name="prompts")
+app.add_typer(memory_app, name="memory")
 
 # Exit codes of `agent eval run`.
 PASSED = 0
@@ -152,6 +155,7 @@ def _run(
     from freight_agent.adapters.knowledge.memory import MemorySopIndex
     from freight_agent.bootstrap import (
         BootstrapError,
+        build_embeddings,
         build_llm,
         build_prompts,
         build_runtime_config,
@@ -183,6 +187,7 @@ def _run(
     except BootstrapError as exc:
         raise UsageProblem(str(exc)) from exc
     config = build_runtime_config(settings)
+    embeddings = build_embeddings(settings)  # the facility memory's index, for every trial
     # The examples' traces carry each graph node and model round: LangChain traces them
     # into the experiment through LangSmith's context.
     enable_native_tracing(settings)
@@ -208,6 +213,7 @@ def _run(
         meter=CostMeter(cap_usd=cost_cap_usd),
         config=config,
         decisions=decisions,
+        embeddings=embeddings,
     )
     client = Client(
         api_key=langsmith_key.get_secret_value(),
@@ -235,6 +241,9 @@ def _run(
     except LangSmithUnavailable as exc:
         raise UsageProblem(f"LangSmith: {exc}; nothing was run") from exc
     typer.echo(render_table(run, k))
+    spent = getattr(embeddings, "spent_usd", None)
+    if isinstance(spent, float) and spent:
+        typer.echo(f"facility memory embeddings: ${spent:.6f} (not in the cost cap)")
     return exit_code(run)
 
 

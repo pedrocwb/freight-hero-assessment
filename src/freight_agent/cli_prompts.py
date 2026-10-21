@@ -57,6 +57,7 @@ def _checks() -> "dict[PromptRole, Callable[[ChatPrompt], ChatPrompt]]":
     from freight_agent.application.agent import check_agent_prompt
     from freight_agent.application.gate import check_gate_prompt
     from freight_agent.application.gate_decision import check_gate_decision_prompt
+    from freight_agent.application.memory import check_memory_prompt
     from freight_agent.application.prompts_documents import check_extract_prompt
     from freight_agent.evalkit.judge import check_judge_prompt
     from freight_agent.interfaces.prompts import PromptRole
@@ -67,6 +68,7 @@ def _checks() -> "dict[PromptRole, Callable[[ChatPrompt], ChatPrompt]]":
         PromptRole.EXTRACT: check_extract_prompt,
         PromptRole.JUDGE: check_judge_prompt,
         PromptRole.GATE_DECISION: check_gate_decision_prompt,
+        PromptRole.MEMORY: check_memory_prompt,
     }
 
 

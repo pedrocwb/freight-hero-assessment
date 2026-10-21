@@ -51,6 +51,7 @@ from freight_agent.api.schemas import (
     RunView,
     SimState,
     StepResult,
+    StopNotesView,
 )
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
 from freight_agent.bootstrap import (
@@ -378,6 +379,24 @@ class SimulationService:
             return await self._session.simulation.runtime.snapshot(load_id)
         except DomainError as exc:
             raise NotFound(f"unknown load {load_id!r}") from exc
+
+    async def facility_memory(self, load_id: str) -> list[StopNotesView]:
+        """Each stop of the load with its client's facility notes."""
+        try:
+            stops = await self._session.simulation.runtime.facility_facts(load_id)
+        except DomainError as exc:
+            raise NotFound(f"unknown load {load_id!r}") from exc
+        return [
+            StopNotesView(
+                sequence=s.stop.sequence,
+                type=s.stop.type,
+                name=s.stop.name,
+                address=s.stop.address,
+                facility_key=s.facility_key,
+                facts=s.facts,
+            )
+            for s in stops
+        ]
 
     async def runs(self, load_id: str) -> list[RunView]:
         return [RunView.of(run) for run in (await self.snapshot(load_id)).runs]

@@ -33,6 +33,7 @@ class ModelRole(StrEnum):
     JUDGE = "judge"  # grades wording in the evals
     DRIVER_SIM = "driver_sim"  # plays a driver in multi-turn evals
     EXTRACT = "extract"  # a document's type and values, images included
+    MEMORY = "memory"  # the facility facts a delivered load taught us
 
 
 @dataclass(frozen=True)

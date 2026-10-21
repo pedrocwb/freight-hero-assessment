@@ -9,6 +9,7 @@ from pydantic import Field
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.intents import GateDecision, GateScores
+from freight_agent.domain.memory import FacilityFact
 from freight_agent.domain.validation import Violation
 
 
@@ -87,6 +88,8 @@ class RunRecord(DomainModel):
     gate_engine: str | None = None
     # The jev engine's probabilities: each intent's, and P(act now).
     gate_scores: GateScores | None = None
+    # The facility notes the agent's prompt showed (the load's current and next stop).
+    facility_facts: tuple[FacilityFact, ...] = ()
 
     @property
     def cost_usd(self) -> float:

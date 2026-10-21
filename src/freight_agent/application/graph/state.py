@@ -19,6 +19,7 @@ from freight_agent.application.gate import GateResult
 from freight_agent.application.prefilter import PrefilterResult
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome, Plan
 from freight_agent.domain.intents import GateDecision
+from freight_agent.domain.memory import FacilityFact
 from freight_agent.domain.runs import RunStatus, TrajectoryStep, Usage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import ValidationOutcome, Violation
@@ -56,6 +57,8 @@ class RunState:
     sop: ResolvedSop | None = None
     sop_version: str | None = None
     visible_sections: tuple[ResolvedSection, ...] = ()  # back the read_sop_section tool
+    # The facility notes of the load's current and next stop, as the prompt shows them.
+    facility_facts: tuple[FacilityFact, ...] = ()
     # The agent loop: the conversation after the prompts, the model rounds made, the
     # answer (`finish`), and what the tool calls staged and refused.
     messages: Annotated[tuple[Turn, ...], operator.add] = ()
@@ -124,6 +127,7 @@ class RunUpdate(TypedDict, total=False):
     sop: ResolvedSop
     sop_version: str | None
     visible_sections: tuple[ResolvedSection, ...]
+    facility_facts: tuple[FacilityFact, ...]
     messages: tuple[Turn, ...]
     rounds: int
     outcome: AgentOutcome

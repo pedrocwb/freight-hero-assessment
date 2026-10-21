@@ -116,6 +116,20 @@ roles:
     temperature: 0
     max_tokens: 4096
 
+  memory:
+    # Reads a delivered load's messages and proposes the facility notes to add, update or
+    # delete (application/memory.py): one structured call per delivered load, off the
+    # run's path, so a cheap model. GPT-4.1 Mini follows the "nothing new, no operation"
+    # rule better than Nano at a few tenths of a cent per load; code checks every
+    # operation anyway (domain/memory.py).
+    model: openai/gpt-4.1-mini
+    fallbacks: [google/gemini-2.5-flash-lite]
+    temperature: 0
+    max_tokens: 1024
+    provider:
+      order: [openai]
+      allow_fallbacks: true
+
 # USD per 1M tokens and context length, as listed in the catalog on 2026-10-19.
 # cached_input: price of a prompt-cache read (omitted when the catalog lists none, then
 # cached tokens cost the input price). The billed price depends on the endpoint
@@ -163,6 +177,12 @@ pricing:
     output: 2.50
     cached_input: 0.075
     context_length: 1048576
+  # The facility memory's embeddings (`embeddings.memory` below), fetched 2026-10-21 from
+  # https://openrouter.ai/api/v1/embeddings/models. Embeddings have no output tokens.
+  openai/text-embedding-3-small:
+    input: 0.02
+    output: 0
+    context_length: 8192
   # TypeSafe's Jev decision model (the `decisions` block below). Output is free; the
   # provider reports each call's cost in USD, which the adapter records. Text over about
   # 32,000 bytes, or any image, runs in a slower, less accurate long-context mode.
@@ -188,3 +208,14 @@ decisions:
     attempt_timeout_s: 10
     max_attempts: 3
     backoff_s: 0.5
+
+# Embedding models by use, on OpenRouter's embeddings API (adapters/memory/embeddings.py).
+# `memory`: the facility memory's semantic search (the agent's recall_facility tool). One
+# model, no fallback: vectors of two models are not comparable, so a store's index is
+# built for one (`dims`). Without OPENROUTER_API_KEY, or with MEMORY_EMBEDDINGS=fake, the
+# facility memory embeds with a deterministic offline hash instead.
+embeddings:
+  memory:
+    model: openai/text-embedding-3-small
+    dims: 1536
+    timeout_s: 20

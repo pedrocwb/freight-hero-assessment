@@ -44,7 +44,8 @@ from freight_agent.domain.broker import Broker, IntentDef
 from freight_agent.domain.documents import Document, DocumentStatus
 from freight_agent.domain.events import Attachment, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.domain.load import AppointmentKind, Stop
+from freight_agent.domain.load import AppointmentKind, Load, Stop
+from freight_agent.domain.memory import FacilityFact, stop_by_key
 from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
@@ -87,6 +88,7 @@ AGENT_USER_VARIABLES = frozenset(
         "timezone",
         "load",
         "contacts",
+        "facility_memory",
         "sop",
         "ledger",
         "timers",
@@ -274,15 +276,18 @@ def agent_user_variables(
     gate: GateDecision,
     sop: ResolvedSop,
     in_progress: Sequence[ResolvedSection] = (),
+    facility_facts: Sequence[FacilityFact] = (),
 ) -> dict[str, str]:
     """`in_progress` are the sections that govern the follow-ups of open obligations; they are
-    shown for context, apart from the sections that apply to this event."""
+    shown for context, apart from the sections that apply to this event. `facility_facts`
+    are the notes earlier loads left about this load's current and next stop."""
     view = _View(ctx)
     return {
         "load_id": ctx.load.load_id,
         "timezone": view.zone_name,
         "load": "\n".join(_load_lines(view)),
         "contacts": "\n".join(_contact_lines(ctx)),
+        "facility_memory": "\n".join(_or_none(facility_lines(ctx.load, facility_facts))),
         "sop": _sop_block(sop, in_progress),
         "ledger": "\n".join(_ledger_lines(view)),
         "timers": "\n".join(_or_none([_timer_line(view, t) for t in ctx.pending_timers])),
@@ -300,8 +305,37 @@ def render_agent_prompt(
     gate: GateDecision,
     sop: ResolvedSop,
     in_progress: Sequence[ResolvedSection] = (),
+    facility_facts: Sequence[FacilityFact] = (),
 ) -> str:
-    return prompt.user.format(agent_user_variables(ctx, gate, sop, in_progress))
+    return prompt.user.format(agent_user_variables(ctx, gate, sop, in_progress, facility_facts))
+
+
+def facility_lines(load: Load, facts: Sequence[FacilityFact]) -> list[str]:
+    """One line per fact: the stop it is about (when it is one of this load's), its kind,
+    the date it was told and its text, quoted like message text: a fact is what someone
+    said on an earlier load, untrusted."""
+    stops = stop_by_key(load)
+    current = load.current_stop().sequence
+    lines: list[str] = []
+    for fact in facts:
+        stop = stops.get(fact.facility_key)
+        if stop is not None:
+            where = f"stop {stop.sequence}{' (current)' if stop.sequence == current else ''}, "
+        else:
+            where = ""
+        lines.append(
+            f"- {where}{_quote(fact.facility_name)}, {fact.kind.value}, told on load "
+            f"{_quote(fact.source_load_id)} {learned_on(fact, stop)}: {_quote(fact.text)}"
+        )
+    return lines
+
+
+def learned_on(fact: FacilityFact, stop: Stop | None) -> str:
+    """The date the fact was told, in its stop's timezone when known."""
+    moment = _aware(fact.source_at)
+    if stop is not None:
+        moment = moment.astimezone(ZoneInfo(stop.timezone))
+    return f"{moment:%Y-%m-%d}"
 
 
 # --- what the read tools return -----------------------------------------------------------

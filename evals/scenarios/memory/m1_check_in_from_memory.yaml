@@ -1,0 +1,38 @@
+# M1: a facility note answers the driver's question. An earlier Northline load was told
+# at the Riverbend plant to check in at gate 4 (a note of the facility memory, seeded
+# below). Acme, another client, has a note on the same plant that says gate 9: it must
+# never reach a Northline load.
+#
+# Timeline (Northline, load 481207 to_pickup, 2026-10-13, America/Los_Angeles):
+#   step 0  07:10  driver SMS: "Where do I check in?".
+#           07:11  run: gate (question, act); the agent's prompt shows the Riverbend
+#                  note (stop 1, current) and not Acme's. driver_questions step 3: the
+#                  reply quotes the note ("gate 4"); no Hero task, since a note answers.
+id: m1_check_in_from_memory
+title: "Facility memory: an earlier load's note answers where to check in"
+suite: memory
+tags: [regression, sop:driver_questions]
+description: >-
+  The load details do not say where to check in; a note an earlier Northline load left
+  on the Riverbend plant does. The agent replies with gate 4 and creates no Hero task,
+  and another client's note on the same plant is never shown.
+load: fixtures/load_481207.json
+memories:
+  - {stop: 1, text: "Check in at gate 4", kind: check_in, learned_on: 2026-10-02, load_id: "470113"}
+  - {stop: 1, text: "Check in at gate 9", kind: check_in, learned_on: 2026-10-05, load_id: "A-2207", client: acme}
+date: 2026-10-13
+start: "07:00"
+steps:
+  - at: "07:10"
+    note: "The driver asks where to check in; the reply comes from the facility note"
+    message: {channel: sms, sender: drv_20931, body: "Where do I check in?"}
+    expect:
+      intent: question
+      actions:
+        - {kind: sms, to: drv_20931, contains: ["gate 4"], count: 1}
+      run_status: [acted]
+      llm_calls: 2
+    forbid:
+      - {kind: hero_task}
+      - {kind: email}
+      - {kind: sms, contains: ["gate 9"]}

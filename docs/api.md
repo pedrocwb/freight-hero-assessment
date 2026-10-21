@@ -75,6 +75,7 @@ to template version), `skip_reason`, `error`, `broker_id`, `trace_url`.
 | POST | `/api/loads` | the assignment's load metadata JSON, plus optional `load_types` | `LoadSummary` (201); 400 with the reason on invalid metadata; 409 when the `load_id` exists |
 | GET | `/api/loads/{load_id}` | | `LoadSnapshot` = `{"load", "obligations", "timers", "events", "outbox", "runs"}`; 404 for an unknown load |
 | GET | `/api/loads/{load_id}/runs` | | `[Run]`, oldest first |
+| GET | `/api/loads/{load_id}/facility-memory` | | one entry per stop, in order: `{sequence, type, name, address, facility_key, facts}`, the client's notes on that place, most recent first; 404 for an unknown load |
 | GET | `/api/fixtures` | | `[{"name", "metadata"}]` |
 
 The list of loads is in `SimState.loads`. The fixtures are every `evals/fixtures/*.json`

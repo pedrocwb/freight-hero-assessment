@@ -86,10 +86,11 @@ def test_push_publishes_every_template_and_status_shows_them_matching(
         "extract: freight-agent-extract",
         "judge: freight-agent-judge",
         "gate_decision: freight-agent-gate_decision",
+        "memory: freight-agent-memory",
     ]
     assert all(line.endswith(", tagged prod") for line in lines(pushed))
     assert status.exit_code == 0, status.output
-    assert [line.split()[-1] for line in lines(status)[1:]] == ["matches"] * 5
+    assert [line.split()[-1] for line in lines(status)[1:]] == ["matches"] * 6
     commit = client.tags["freight-agent-agent"]["prod"]
     assert re.search(rf"freight-agent-agent:prod\s+{short_commit(commit)}", status.output)
 
@@ -101,7 +102,7 @@ def test_pushing_again_without_an_edit_commits_nothing(client: FakeHubClient) ->
 
     assert again.exit_code == 0
     assert all(", already prod" in line for line in lines(again))
-    assert len(client.pushes) == 5
+    assert len(client.pushes) == 6
 
 
 def test_a_candidate_is_measured_then_promoted_to_prod(
@@ -120,7 +121,7 @@ def test_a_candidate_is_measured_then_promoted_to_prod(
 
     assert "agent: freight-agent-agent pushed" in candidate.output
     assert "gate: freight-agent-gate unchanged at" in candidate.output
-    assert len(client.pushes) == 6  # only the edited template got a new commit
+    assert len(client.pushes) == 7  # only the edited template got a new commit
     assert behind.exit_code == 1 and "differs (local:" in behind.output
     assert at_candidate.exit_code == 0, at_candidate.output
     assert "agent: freight-agent-agent unchanged at" in promoted.output

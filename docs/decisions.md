@@ -263,7 +263,7 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
 - `ingest_message` saves one pending `Document` per attachment of a new message, in the
   message's transaction.
 - `tick()` is `fire_due_timers -> documents.process_pending -> process_all ->
-  dispatch_outbox`, so a document is read before the queue runs and its event queues
+  dispatch_outbox -> process_background` (the facility memory extraction), so a document is read before the queue runs and its event queues
   behind the message.
 - The pipeline (`application/documents.py`): blob, pages (a page with little text becomes
   an image), one `extract` call answering `{type_id, confidence, fields, notes}`, checks
@@ -276,6 +276,48 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
   `mc_number` (the carrier's), `stop_name` (a stop, the shipper or the consignee),
   `date_in_window` (the appointment's day, or inside its window), `seal_number` (the last
   seal a message reported), `signature` (present).
+
+## Facility memory
+
+- A `FacilityFact` (`domain/memory.py`): `fact_id`, `client_id`, `facility_key`,
+  `facility_name`, `text` (at most 200 characters), `kind` (`check_in | hours |
+  requirement | access | contact | other`), `source_load_id`, `source_event_id`,
+  `source_at`, `created_at`, `updated_at`.
+- `facility_key(stop)` is `<slug of the name>~<slug of the address>`, lower case ASCII
+  words joined by hyphens: `riverbend-plant~stockton-ca`. The same place on two loads gets
+  the same key; a renamed stop is a new facility.
+- Namespaces of the LangGraph store: `("facility_memory", <client>, <facility_key>)` for
+  the notes, keyed by fact id and indexed on `text`; `("facility_memory_jobs", <client>)`
+  for the extraction jobs, keyed by load id, not indexed. Every method of
+  `interfaces/memory.py` names the client; a write naming another client is refused whole,
+  and a read drops any value of another client.
+- Read: the knowledge node reads up to 5 notes of the current stop and 5 of the next
+  (most recently updated first) and the run record keeps them (`RunRecord.facility_facts`).
+  A memory that fails gives no notes; the run goes on. The agent prompt's variable is
+  `facility_memory`: one line per note, `- stop <n> (current), "<facility>", <kind>, told
+  on load "<id>" <date>: "<text>"`, every outside text as a JSON string.
+  `recall_facility {query, stop}` searches by meaning, within one stop's facility or across
+  the client's facilities.
+- Write: a run whose commit moves the load to `delivered` enqueues `ExtractionJob(load_id,
+  client_id, queued_at)` after the commit (fail-open: a lost job loses one load's notes,
+  and `agent memory extract --load` runs it again). `tick()` ends with
+  `process_background()`, which runs up to 5 pending jobs. One `memory` call per job reads
+  the load's inbound messages and Hero updates, each with its event id and the stops it may
+  be about, and the current notes of its facilities, and answers
+  `{operations: [{op, facility_key, fact_id, text, kind, event_id}]}`.
+- Which stop a message is about: the stop of the stage in effect when it arrived (the last
+  stage update logged before it; before any, the stage the first update leaves), plus any
+  stop whose name it mentions. A load with no stage update may be at any of its stops.
+- Guardrails, checked on every operation, in order: the facility is a stop of the load;
+  the cited event is an inbound message or Hero update of the load with text; that event
+  is about that stop; an update or a delete names an existing note of that facility; the
+  text is not empty, at most 200 characters, and has no email address, phone number,
+  money (rates, prices, pay, fees, "$") or words aimed at the agent ("ignore your rules",
+  "system prompt"); an add is not a note the facility already has and fits its cap of 12
+  notes; at most 10 operations per job. A refused operation is dropped with its reason,
+  kept on the job (`ExtractionJob.dropped`).
+- A model failure leaves the job pending; after 3 tries it is `failed`. A load with no
+  inbound text is `done` with no model call.
 
 ## Event ids
 
@@ -311,10 +353,10 @@ Studio:
 
 ## Prompts and their versions
 
-- Five templates, one per model role: `gate`, `agent`, `extract`, `judge`, and
+- Six templates, one per model role: `gate`, `agent`, `extract`, `judge`,
   `gate_decision` (the jev gate's texts: the two messages are the parts of the state the
   decision model reads, and the template's `tools` hold its questions' instructions and
-  criteria). Each is a chat template of a system and a user message (`interfaces/prompts.py`),
+  criteria), and `memory` (the facility memory extraction). Each is a chat template of a system and a user message (`interfaces/prompts.py`),
   stored in the LangSmith Prompt Hub as `freight-agent-<role>` with a reviewable copy in
   `prompts/<role>.yaml`.
 - `config/prompts.yaml` pins each role to a reference: `<name>:<tag>` (`prod` is what runs)

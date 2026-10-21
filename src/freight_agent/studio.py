@@ -41,7 +41,9 @@ three parts so that each run is a node visit of its own:
   conversation, the staged proposals, the trajectory, the validation, the verdict). The
   state after `run` holds the event, the run record and the ledger, timers and outbox
   after the commit.
-- `deliver`: the outbox dispatched; `sent` is what the recording gateways took.
+- `deliver`: the outbox dispatched, then the facility memory extraction of the loads
+  delivered so far (`AgentRuntime.process_background`); `sent` is what the recording
+  gateways took.
 - `check`: the step's checks, as the eval graders judge them (`evalkit.graders`), the
   judge included for a step with a rubric, and after the last step the invariants.
 
@@ -83,6 +85,7 @@ from freight_agent.adapters.clock import VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.null import NullTracer
+from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.bootstrap import (
@@ -109,6 +112,7 @@ from freight_agent.evalkit.runner import (
 from freight_agent.evalkit.spec import Scenario
 from freight_agent.evalkit.suite import discover, suites
 from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.prompts import Prompts
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from freight_agent.settings import Settings
 
@@ -457,9 +461,11 @@ class _Nodes:
     async def deliver(self, state: StudioState) -> StudioState:
         world = self._worlds.move(state)
         sent = await world.runtime.dispatch_outbox()
+        extracted = await world.runtime.process_background()  # facility memory, delivered loads
+        learned = f"; facility notes of {len(extracted)} load(s) extracted" if extracted else ""
         update: StudioState = {
             "moves": world.moves,
-            "note": f"{world.time_of()}: {sent} outbox item(s) delivered",
+            "note": f"{world.time_of()}: {sent} outbox item(s) delivered{learned}",
             "sent": [
                 {"channel": d.channel, "idempotency_key": d.idempotency_key, **d.payload}
                 for d in world.gateways.log.deliveries
@@ -560,12 +566,14 @@ def _live_model(settings: Settings) -> ModelFactory:
 
 def _drawn_run_graph(settings: Settings) -> Any:
     """A run graph built as every world's is, on a model that is never called: what
-    LangGraph draws inside `run` and reads the run graph's checkpoints with."""
+    LangGraph draws inside `run` and reads the run graph's checkpoints with. Its prompts
+    are the repository copy: a drawing renders none, so it needs no Hub version."""
     runtime = build_runtime(
         settings,
         llm=UnavailableModel("the drawing of the run graph never runs"),
         blobs=MemoryBlobStore(),
         tracer=NullTracer(),
+        prompts=Prompts.resolve(LocalPromptRegistry(settings.prompts_dir)),
     )
     return runtime.graph.compiled
 

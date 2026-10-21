@@ -249,6 +249,12 @@ describe("documents", () => {
     expect(calls[1]?.url).toBe("/api/loads/730118/runs");
   });
 
+  it("reads the facility notes of a load's stops", async () => {
+    const { calls, api } = recorder(200, []);
+    await api.facilityMemory("730118");
+    expect(calls[0]?.url).toBe("/api/loads/730118/facility-memory");
+    expect(calls[0]?.method ?? "GET").toBe("GET");
+  });
 });
 
 describe("errorDetail", () => {
