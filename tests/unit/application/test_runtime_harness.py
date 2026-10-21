@@ -10,6 +10,7 @@ rationale (`plan()` with no action is the finish round alone).
 """
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,7 @@ from freight_agent.adapters.channels.fakes.recording import Delivery, RecordingG
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
+from freight_agent.adapters.memory.store import StoreFacilityMemory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.contracts import (
@@ -25,6 +27,7 @@ from freight_agent.application.contracts import (
     LoadSnapshot,
     LocationPing,
 )
+from freight_agent.application.memory import MemoryExtractor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.actions import Action, Plan, Purpose, ScheduleTimer, SendSms
 from freight_agent.domain.broker import Broker
@@ -170,9 +173,11 @@ class World:
         tracer: Tracer | None = None,
         wrap_gateways: Callable[[Gateways], Gateways] | None = None,
         decisions: DecisionModel | None = None,
+        memory: StoreFacilityMemory | None = None,
     ) -> None:
         """`wrap_gateways` puts test gateways in front of the recording ones; `decisions`
-        is the jev gate engine's model (with `config.gate_engine`)."""
+        is the jev gate engine's model (with `config.gate_engine`); `memory` a facility
+        memory, with its extraction on the fake model."""
         self.load = load
         self.store = MemoryStore()
         self.clock = VirtualClock(at(6, 55))
@@ -192,7 +197,20 @@ class World:
             prompts=PROMPTS,
             config=config or RuntimeConfig(),
             decisions=decisions,
+            memory=memory,
+            memory_queue=memory,
         )
+        if memory is not None:
+            extractor = MemoryExtractor(
+                uow_factory=self.store.unit_of_work,
+                clock=self.clock,
+                ids=self.ids,
+                llm=self.deps.llm,
+                memory=memory,
+                queue=memory,
+                prompt=PROMPTS.memory,
+            )
+            self.deps = replace(self.deps, memory_extraction=extractor)
         self.runtime = AgentRuntime(self.deps)
 
     def restart(self) -> None:

@@ -21,12 +21,14 @@ from freight_agent.application.agent import (
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import Triage
 from freight_agent.application.graph.state import RunState, RunUpdate, Verdict, need
+from freight_agent.application.memory import facts_in_view
 from freight_agent.application.prefilter import PrefilterResult, prefilter
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.validation import Rule, ValidationOutcome, validate
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import AssistantTurn, Turn, UserTurn
+from freight_agent.interfaces.memory import FacilityMemory
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +71,10 @@ def triage_node(gate: Triage) -> Node:
     return run_triage
 
 
-def knowledge_node(knowledge: SopIndex) -> Node:
+def knowledge_node(knowledge: SopIndex, memory: FacilityMemory | None = None) -> Node:
     """The SOP sections for this intent and stage (`by_applies`), and every section the
-    load can see, for the catalog and the read tools.
+    load can see, for the catalog and the read tools; and the facility notes of the
+    load's current and next stop, for its client (`facts_in_view`, fail-open).
 
     It never ends the run: an event no section covers is the agent's call
     (`finish(no_procedure=true)`), after it has searched the SOP.
@@ -84,6 +87,7 @@ def knowledge_node(knowledge: SopIndex) -> Node:
             "sop": await knowledge.by_applies(load.broker_id, load.load_types, intent, load.stage),
             "sop_version": await knowledge.version(load.broker_id),
             "visible_sections": await knowledge.visible(load.broker_id, load.load_types),
+            "facility_facts": await facts_in_view(memory, load),
         }
 
     return run_knowledge
@@ -110,6 +114,7 @@ def agent_node(agent: Agent) -> Node:
             need(state.sop, "the resolved SOP"),
             state.visible_sections,
             (*state.messages, *nudge),
+            facility_facts=state.facility_facts,
             force_answer=prose or state.rounds >= limits.max_steps or spent >= limits.max_cost_usd,
         )
         update: RunUpdate = {

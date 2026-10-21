@@ -40,6 +40,7 @@ class PromptRole(StrEnum):
     # Triage on a decision model (`GATE_ENGINE=jev`): the state's preamble and context,
     # and in `tools` each question's instructions and criteria, by key.
     GATE_DECISION = "gate_decision"
+    MEMORY = "memory"  # the facility facts a delivered load taught us (add, update, delete)
 
 
 class PromptError(Exception):
@@ -100,6 +101,7 @@ class Prompts:
     extract: ChatPrompt
     judge: ChatPrompt
     gate_decision: ChatPrompt
+    memory: ChatPrompt
 
     @classmethod
     def resolve(cls, registry: PromptRegistry) -> "Prompts":
@@ -109,10 +111,11 @@ class Prompts:
             extract=registry.get(PromptRole.EXTRACT),
             judge=registry.get(PromptRole.JUDGE),
             gate_decision=registry.get(PromptRole.GATE_DECISION),
+            memory=registry.get(PromptRole.MEMORY),
         )
 
     def all(self) -> tuple[ChatPrompt, ...]:
-        return (self.gate, self.agent, self.extract, self.judge, self.gate_decision)
+        return (self.gate, self.agent, self.extract, self.judge, self.gate_decision, self.memory)
 
     def versions(self) -> dict[str, str]:
         """Role -> version, as a run record and an experiment record them."""
