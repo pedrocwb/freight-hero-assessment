@@ -173,11 +173,15 @@ def test_a_message_is_about_the_stop_of_the_stage_around_it(load: Load) -> None:
     }
 
 
-def test_before_any_stage_update_a_message_may_be_about_any_stop(load: Load) -> None:
-    events = [_message("m1", "gate 2 today", 0), _stage("a1", Stage.AT_DELIVERY, 5)]
+def test_before_the_first_stage_update_a_message_is_about_the_stage_it_leaves(
+    load: Load,
+) -> None:
+    arriving = [_message("m1", "gate 2 today", 0), _stage("a1", Stage.AT_DELIVERY, 5)]
+    leaving = [_message("m1", "gate 2 today", 0), _stage("a1", Stage.TO_DELIVERY, 5)]
 
-    assert source_events(load, events)["m1"][1] == frozenset({PICKUP, DELIVERY})
-    assert source_events(load, events[:1])["m1"][1] == frozenset({PICKUP, DELIVERY})
+    assert source_events(load, arriving)["m1"][1] == frozenset({DELIVERY})
+    assert source_events(load, leaving)["m1"][1] == frozenset({PICKUP})
+    assert source_events(load, arriving[:1])["m1"][1] == frozenset({PICKUP, DELIVERY})
 
 
 def test_only_inbound_text_of_the_load_is_a_source(load: Load) -> None:

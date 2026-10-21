@@ -241,6 +241,14 @@ def _stage_updates(events: Sequence[Event]) -> list[tuple[int, Stage]]:
     return found
 
 
+def _stage_before(stage: Stage) -> Stage:
+    """The stage a load is in just before it moves to `stage`: arriving at or delivering
+    to the delivery comes from the road to it; any other move is still around the pickup."""
+    if stage in (Stage.AT_DELIVERY, Stage.DELIVERED):
+        return Stage.TO_DELIVERY
+    return Stage.AT_PICKUP
+
+
 # Words of a stop name too generic to say which stop a message is about.
 _GENERIC = frozenset(
     {
@@ -279,9 +287,9 @@ def source_events(load: Load, events: Sequence[Event]) -> dict[str, tuple[Event,
 
     A source is an inbound message or a Hero update of the load, with text. It is about
     the stop the load was at or heading to when it arrived (read from the stage updates
-    logged around it), and about any stop it names. Before the first stage update the
-    stage is unknown: a message is about the pickup when the first update is still at or
-    leaving the pickup, about any stop otherwise.
+    logged around it), and about any stop it names. Before the first stage update, the
+    stage is the one that update leaves (`_stage_before`); a load with no stage update at
+    all may be at any of its stops.
     """
     updates = _stage_updates(events)
     every = frozenset(facility_key(s) for s in load.stops)
@@ -293,13 +301,8 @@ def source_events(load: Load, events: Sequence[Event]) -> dict[str, tuple[Event,
         after = [stage for at, stage in updates if at > index]
         if before:
             keys = {facility_key(_stop_for_stage(load, before[-1]))}
-        elif after and after[0] in (
-            Stage.DISPATCHED,
-            Stage.TO_PICKUP,
-            Stage.AT_PICKUP,
-            Stage.TO_DELIVERY,
-        ):
-            keys = {facility_key(_stop_for_stage(load, Stage.AT_PICKUP))}
+        elif after:
+            keys = {facility_key(_stop_for_stage(load, _stage_before(after[0])))}
         else:
             keys = set(every)
         keys |= {facility_key(s) for s in load.stops if _named(s, event.body)}
