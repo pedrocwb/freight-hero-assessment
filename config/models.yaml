@@ -1,7 +1,8 @@
 # Models per role, their fallbacks and prices.
 #
-# Switching a model is a change to this file. Rule from the plan: cheap, light models
-# first; prompt and SOP improvement rounds run on them before any model is upgraded.
+# Switching a model is a change to this file, measured with the live evals first
+# (evals/RESULTS.md). Cheap, light models first; prompts and SOPs are improved on them
+# before any model is upgraded.
 #
 # Every model here comes from the public catalog https://openrouter.ai/api/v1/models,
 # fetched on 2026-10-19, and lists `tools`, `tool_choice` and `structured_outputs` among
@@ -37,15 +38,12 @@ roles:
       allow_fallbacks: false
 
   agent:
-    # The role was `decide` before wave 3. The agent loop (card W3-AGT) runs on it: read
-    # and action tools for at most the broker's `limits.max_steps` rounds and
-    # `limits.max_cost_usd`, then the AgentOutcome as a forced tool call. The wave 3
-    # bake-off (evals/RESULTS.md "Wave 3") kept the wave 2 choice, made on the single plan:
-    # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
-    # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
-    # about $0.024 for a long load (100 messages, 80 decide calls). Claude Haiku 5.5 also
-    # passed 22/22 at about 5 times the cost. gpt-oss always reasons; low effort keeps the
-    # decide call near 5 s (p95 8 to 11 s).
+    # The agent loop: one model round per graph step, with read and action tools, for at
+    # most the client's `limits.max_steps` rounds and `limits.max_cost_usd`, then `finish`.
+    # gpt-oss-120b is the only model of the bake-off that met every threshold
+    # (evals/RESULTS.md, "How the agent model was chosen"), at about $0.0007 per run;
+    # Claude Haiku 5.5 passed too, at about 3.6 times the cost, and is the first upgrade.
+    # gpt-oss always reasons; low effort keeps an agent call near 7 s (p95 about 15 s).
     # Pinned to DeepInfra at bf16, the cheapest full-precision endpoint; fp4/int4 ones
     # are cheaper still but were not measured. The fallback is another family and takes
     # `reasoning` too: the chain sends every fallback the same settings, and GPT-4.1
@@ -79,9 +77,8 @@ roles:
     max_tokens: 400
 
   extract:
-    # Wave 3 (card W3-DOC): classifies a document and extracts its values in one call,
-    # page images included (scans, phone photos), so a vision model. Settled once the
-    # document fixtures exist (one call each).
+    # Classifies a document and extracts its values in one call, page images included
+    # (scans, phone photos), so a vision model. About $0.0008 per one-page POD.
     model: google/gemini-2.5-flash
     fallbacks: [openai/gpt-4.1-mini]
     temperature: 0
@@ -127,7 +124,7 @@ pricing:
     output: 0.50
     cached_input: 0.01
     context_length: 1000000
-  # Wave 3. Not re-fetched from the catalog with C0.
+  # Not re-checked against the catalog since it was added.
   google/gemini-2.5-flash:
     input: 0.30
     output: 2.50
