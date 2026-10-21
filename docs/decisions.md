@@ -299,8 +299,14 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
   `recall_facility {query, stop}` searches by meaning, within one stop's facility or across
   the client's facilities.
 - Write: a run whose commit moves the load to `delivered` enqueues `ExtractionJob(load_id,
-  client_id, queued_at)` after the commit (fail-open: a lost job loses one load's notes,
-  and `agent memory extract --load` runs it again). `tick()` ends with
+  client_id, queued_at)` after the commit (fail-open: the run stands if the enqueue fails).
+  A job lost that way, or to a crash between the commit and the enqueue, is queued again
+  when the platform starts on a durable store: `queue_missed_extractions` queues every
+  delivered load without a job (a load has at most one job, so it is never extracted
+  twice), and `agent memory extract --load` runs one by hand. Chosen over enqueuing in the
+  load memory's transaction, which would need the job table in the domain schema and a
+  second implementation of the queue: a crash means a restart, so the restart is when to
+  look, and the store keeps one home for everything the facility memory owns. `tick()` ends with
   `process_background()`, which runs up to 5 pending jobs. One `memory` call per job reads
   the load's inbound messages and Hero updates, each with its event id and the stops it may
   be about, and the current notes of its facilities, and answers
@@ -318,6 +324,19 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
   kept on the job (`ExtractionJob.dropped`).
 - A model failure leaves the job pending; after 3 tries it is `failed`. A load with no
   inbound text is `done` with no model call.
+- Store: `PERSISTENCE` chooses it, as for the load memory (`bootstrap.build_platform_memory`).
+  `postgres`: LangGraph's `AsyncPostgresStore` on `DATABASE_URL`, in the database's default
+  schema, on a small pool of its own (LangGraph's store needs `dict_row` connections) that
+  opens on first use, with a pgvector index `{dims: 1536, embed, fields: ["text"]}` (HNSW,
+  cosine). `agent db migrate` runs LangGraph's `setup()` after the SQL files (its tables
+  `store`, `store_vectors`, `store_migrations`, `vector_migrations`, idempotent), so the
+  app never creates tables at start. The vector width is fixed by that table, so on
+  Postgres the offline hash is built 1536 wide too, and an embedder of another width stops
+  the start. `memory`: an `InMemoryStore` with the same index. The evals and Studio always
+  get a fresh in-memory one per play.
+- Lifecycle: one facility memory per platform process, shared by every session; a reset
+  (and a scenario) forgets every note and job with the load memory, so a scenario never
+  reads another's notes.
 
 ## Event ids
 
@@ -387,8 +406,9 @@ Studio:
   store per play (`memory_uow_factory`), whatever the setting: a play is a throwaway world.
 - **Schema.** `migrations/NNNN_name.sql`, applied in order by `agent db migrate`, each in
   its own transaction with its row in `schema_migrations`; an applied file that changed is
-  refused (add a new file instead). `0001` holds the tables, `0002` enables pgvector for
-  embeddings in the same database. Ids are text in the `C` collation, ties sort by natural
+  refused (add a new file instead). `0001` holds the tables, `0002` enables pgvector,
+  which the facility memory's vector table uses. Then the command runs the setup of
+  LangGraph's Postgres store (the facility memory). Ids are text in the `C` collation, ties sort by natural
   id (`id_order`) as in the memory store, foreign keys are checked at commit, the event log
   refuses UPDATE and DELETE, and a load's metadata and a run record are JSONB.
 - **Transactions and locks.** One transaction per unit of work. `loads.get` locks the
@@ -396,12 +416,14 @@ Studio:
   `FOR UPDATE SKIP LOCKED`, so several workers could share them; a partial unique index
   allows one event in flight per load. The claim time is the runtime's clock, for the
   claim lease.
-- **Lifecycle.** A reset (and a scenario) empties every domain table (`TRUNCATE`). On
-  start the platform resumes a durable store: its virtual clock goes to the latest time
-  the loads hold. Attachment bytes go to `BLOBS_DIR` on Postgres, in memory otherwise.
+- **Lifecycle.** A reset (and a scenario) empties every domain table (`TRUNCATE`) and the
+  facility memory. On start the platform resumes a durable store: its virtual clock goes
+  to the latest time the loads hold, and delivered loads without an extraction job are
+  queued again. Attachment bytes go to `BLOBS_DIR` on Postgres, in memory otherwise.
 - **Tests.** `tests/contract/` runs every suite on both stores (Postgres when
   `TEST_DATABASE_URL` or `DATABASE_URL` is set, marked `integration`, each test in a
-  schema of its own); `make integration` runs them with the Postgres-only tests.
+  schema of its own), the facility memory's included (`InMemoryStore` and
+  `AsyncPostgresStore`); `make integration` runs them with the Postgres-only tests.
 
 ## Layers
 

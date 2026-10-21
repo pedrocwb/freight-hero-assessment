@@ -79,6 +79,19 @@ A reset of the simulation (and a scenario, which resets first) empties the table
 evals and LangGraph Studio always play each scenario in a fresh in-memory world, whatever
 `PERSISTENCE` says.
 
+**Facility memory.** What a driver says about a place ("check in at gate 4") is kept for
+the client's next load there. On `PERSISTENCE=postgres` the notes live in the same database,
+in LangGraph's Postgres store with a pgvector index on their text (embedded with
+`openai/text-embedding-3-small` on the OpenRouter key, or an offline hash without it);
+`agent db migrate` creates its tables. In memory otherwise. To look at them:
+
+```bash
+uv run agent memory list --client northline   # every note of a client, by facility
+uv run agent memory list --load 481207        # the notes of each stop of a load
+```
+
+The platform shows them per stop in the load inspector (`GET /api/loads/{id}/facility-memory`).
+
 **With your own LangSmith workspace, publish the prompts once.** The runtime reads its
 prompt templates from the LangSmith Prompt Hub at the pins of `config/prompts.yaml`
 (`freight-agent-<role>:prod`). A new workspace does not have them, and the process refuses
@@ -138,8 +151,8 @@ src/freight_agent/
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
                  (graph/), executor, escalations, runtime, document pipeline, facility
                  memory extraction, prompt variables
-  adapters/      memory and Postgres stores, facility memory on a LangGraph store with
-                 embeddings, OpenRouter with retries, fallbacks and circuit breakers,
+  adapters/      memory and Postgres stores, facility memory on LangGraph's store (in
+                 memory or Postgres with pgvector) with embeddings, OpenRouter with retries, fallbacks and circuit breakers,
                  OpenRouter's Decisions API (the gate's decision model), SOP files and
                  lint, Prompt Hub and local prompts, pypdfium2 pages, blobs, LangSmith
                  links, recording gateways
@@ -164,8 +177,9 @@ tests/           unit, contract, property, integration, eval harness
 - **Integrations are recording gateways.** SMS, email, Slack, the TMS and the Hero task
   tool record what they would send; nothing leaves the process.
 - **Storage is in memory by default, or Postgres** (`PERSISTENCE=postgres`, the compose
-  setup), behind repository interfaces whose contract suites both stores pass. Attachment
-  bytes are files under `BLOBS_DIR` on Postgres, in memory otherwise.
+  setup), behind repository interfaces whose contract suites both stores pass; the facility
+  notes follow the same setting. Attachment bytes are files under `BLOBS_DIR` on Postgres,
+  in memory otherwise.
 - **No always-on worker or scheduler.** `tick()` fires timers, reads documents, runs the
   queue and delivers the outbox; the platform, the evals and Studio call it on a virtual
   clock.

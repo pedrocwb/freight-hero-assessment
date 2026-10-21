@@ -12,7 +12,7 @@ not in the code.
 
 | Built | Designed, not built |
 |---|---|
-| The runtime (per-load FIFO, claim/think/commit, outbox, claim lease), the LangGraph run graph with the bounded tool loop, the rules, the ledger and timers, the document pipeline, the SOP layers and client catalogs with their lint, the prompt templates versioned in the LangSmith Prompt Hub, the eval harness as LangSmith experiments, the platform (FastAPI and React), LangGraph Studio, the Docker image, Postgres for the load memory (`PERSISTENCE=postgres`, run by Docker Compose; the same contract suites as the memory store) | An always-on worker and timer scheduler, real integrations (the gateways record what they would send), an SOP editor with review and approval, SOP versioning with canary and rollback, hybrid search over SOPs, operational metrics and alerts, the per-load cost cap, a rolling summary of old events |
+| The runtime (per-load FIFO, claim/think/commit, outbox, claim lease), the LangGraph run graph with the bounded tool loop, the rules, the ledger and timers, the document pipeline, the SOP layers and client catalogs with their lint, the prompt templates versioned in the LangSmith Prompt Hub, the eval harness as LangSmith experiments, the platform (FastAPI and React), LangGraph Studio, the Docker image, Postgres for the load memory (`PERSISTENCE=postgres`, run by Docker Compose; the same contract suites as the memory store), the facility memory across loads on LangGraph's Postgres store with a pgvector index (in memory in the tests and evals), its extraction after delivery and its guardrails | An always-on worker and timer scheduler, real integrations (the gateways record what they would send), an SOP editor with review and approval, SOP versioning with canary and rollback, hybrid search over SOPs, operational metrics and alerts, the per-load cost cap, a rolling summary of old events |
 
 An earlier build of several designed parts (pgvector search over SOPs, SOP onboarding
 from a PDF with review and publish, client config versions with a canary, metrics) is at
@@ -269,7 +269,7 @@ ledger, with its timers; documents are rows with their values and checks.
 | Procedure | The client's SOP sections | The selected sections (2.2) | `search_sop`, `read_sop_section` |
 | Load facts | Load metadata and the client catalog | "Load", "Contacts" | `get_load` |
 | Documents | Document rows | The document of a `document_processed` event | `read_document` |
-| Facilities, across loads | Facility notes in a LangGraph store, one namespace per client and facility, with an embeddings index | "Facility notes" of the current and the next stop, each with its source load and date, marked untrusted | `recall_facility` (semantic search over the client's notes) |
+| Facilities, across loads | Facility notes in LangGraph's store, one namespace per client and facility, with a vector index on each note's text (Postgres and pgvector on the platform) | "Facility notes" of the current and the next stop, each with its source load and date, marked untrusted | `recall_facility` (semantic search over the client's notes) |
 
 - **Actions are memory.** For each outbox item the executor appends an `agent_action`
   event (`act:{event_id}:{index}`) in the same transaction (`application/executor.py`), so
@@ -299,6 +299,22 @@ ledger, with its timers; documents are rows with their values and checks.
   would leak one client's operations to another, and a bad or hostile note written through
   one client's load could steer the agent on every other client's loads. Keeping notes per
   client limits both, at the cost of each client learning a shared facility on its own.
+- **Where facility notes are stored.** With `PERSISTENCE=postgres` they are in LangGraph's
+  `AsyncPostgresStore`, in the same database as the load memory: one row per note in its
+  `store` table (the note as JSONB), its text embedded (`openai/text-embedding-3-small`,
+  1536 dimensions) in `store_vectors` under an HNSW pgvector index, which `recall_facility`
+  searches by cosine distance within the client's namespace. `agent db migrate` creates
+  those tables with LangGraph's own `setup()`, so they exist once the compose migrate job
+  has run, and the notes survive a restart. With `PERSISTENCE=memory`, and always in the
+  tests, the evals and Studio, the same code runs on an `InMemoryStore` with the same
+  index; one contract suite runs on both stores (`tests/contract/test_facility_memory.py`).
+- **A delivered load's extraction is not lost.** Its job is queued in the facility
+  memory's store after the run's commit, so a crash in between would lose it. When the
+  platform starts on Postgres it queues the extraction of every delivered load that has no
+  job (`AgentRuntime.queue_missed_extractions`), and the next tick runs it. This is simpler
+  than moving the job into the load memory's transaction: it needs no new table and no
+  change to the unit of work, and since a crash means a restart, the restart is when to
+  look. A job is idempotent (one per load), so the sweep never extracts a load twice.
 - **Designed, not built:** a rolling summary of the events older than the last 30. Today
   the agent pages back with `get_history`.
 
@@ -609,6 +625,7 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 | Pings | One transaction per ping | A stream partitioned by load holds the risk tracker; only transitions reach the queue |
 | Storage | Postgres (`PERSISTENCE=postgres`, one instance in Docker Compose) or the in-memory store, behind the repository interfaces | The same schema with the events table partitioned by month, closed loads archived to object storage, a pooler (the adapter needs no session state), a read replica for the platform and metrics |
 | SOP index | Files read per run | Published versions in Postgres, cached per client by hash; hybrid search with pgvector |
+| Facility memory | LangGraph's Postgres store with a pgvector HNSW index in the load memory's database; extraction of up to 5 delivered loads at the end of each tick, in the same process | The same store, on its own pool or database; extraction workers on the job namespace, scaled on pending jobs; the startup sweep for lost jobs becomes a periodic one |
 | Documents | Blobs on the filesystem; read in the tick | An object store behind `BlobStore`; document workers scaled on pending documents |
 | Models | One OpenRouter key; a rate limit is retried on the same model, OpenRouter may serve the model from another provider that takes the same parameters (the gate: OpenAI, then Azure), then a fallback model that passes the suite serves the call | Higher rate limits or provisioned throughput, per-client concurrency limits |
 | Tracing | Every run | Sampling: every escalation and failure, a share of the rest |

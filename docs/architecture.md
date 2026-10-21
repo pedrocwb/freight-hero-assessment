@@ -67,8 +67,8 @@ flowchart LR
   runtime -. "traces; templates at start" .-> langsmith
 ```
 
-Built: the runtime, the load memory in memory or in Postgres (`PERSISTENCE`), the SOP
-files, the OpenRouter and LangSmith adapters, the platform (FastAPI and a React UI) that
+Built: the runtime, the load memory and the facility memory in memory or in Postgres
+(`PERSISTENCE`; the facility notes on LangGraph's store with pgvector), the SOP files, the OpenRouter and LangSmith adapters, the platform (FastAPI and a React UI) that
 plays every contact. Not built: real integrations (the gateways record what they would
 send), an always-on worker.
 
@@ -235,7 +235,7 @@ flowchart LR
     K["facts_in_view: current and next stop"] --> P["agent prompt: Facility notes (untrusted)"]
     T["recall_facility tool"]
   end
-  subgraph store["LangGraph store (InMemoryStore with an embeddings index)"]
+  subgraph store["LangGraph store: AsyncPostgresStore with pgvector, or InMemoryStore"]
     N[("facility_memory / client / facility key: one item per note, text embedded")]
     J[("facility_memory_jobs / client: one job per delivered load")]
   end
@@ -253,8 +253,14 @@ flowchart LR
   when it was said.
 - Embeddings: `openai/text-embedding-3-small` on OpenRouter (`embeddings.memory` in
   `config/models.yaml`), or a deterministic offline hash without the key and in the tests.
-- The store is any LangGraph `BaseStore` (`adapters/memory/store.py`); a `PostgresStore`
-  with pgvector takes the same namespaces.
+- The store is any LangGraph `BaseStore` (`adapters/memory/store.py`). With
+  `PERSISTENCE=postgres` it is LangGraph's `AsyncPostgresStore` in the load memory's
+  database (`adapters/memory/postgres.py`): the notes in its `store` table, their text's
+  vectors in `store_vectors` under an HNSW index, created by `agent db migrate`. Otherwise,
+  and always in the tests, the evals and Studio, an `InMemoryStore` with the same index.
+- A job is queued after the delivering run's commit, outside its transaction. A crash in
+  between leaves a delivered load without a job; when the platform starts on Postgres it
+  queues every such load again (`AgentRuntime.queue_missed_extractions`).
 
 ## 6. Load 481207, 07:00 to 08:01
 
