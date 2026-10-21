@@ -29,8 +29,10 @@ with the event's attachment id) for its type, its values and its checks.
 - `needs_review`, a check failed, a value is missing or unsure, or the POD lists an
   exception (shortage, damage, overage, refusal): do not change the stage. Create a Hero
   task (not urgent), "Review the <type> for load <load number>", with the file name,
-  when it arrived, the values found, each failed check with the value found and the
-  value expected, and the exceptions as the document writes them.
+  when it arrived, the values found, and the exceptions as the document writes them.
+  Write each failed check with both numbers, the one on the document and the one on the
+  load, for example "PO on the POD: 40112, PO of the load: 40121". "PO mismatch" alone
+  does not tell the Hero what to fix.
 - `failed`, the file could not be read: create a Hero task (not urgent), "Read the
   document by hand for load <load number>", with the file name, the sender and the time.
 
