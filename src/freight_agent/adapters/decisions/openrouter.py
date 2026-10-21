@@ -18,14 +18,17 @@ served the call (`typesafe/jev-1.14-20261014`). An error reply is
 
 - One `httpx.AsyncClient` per event loop, kept: calls reuse the connection, as the chat
   models' clients do, so a call's latency is the model's, not a new TLS handshake.
-- A 429, a 5xx or a dropped connection is sent again after a backoff (`backoff_s`,
-  doubled each time, or the reply's `Retry-After`), up to `max_attempts` sends, all within
-  the request's `timeout_s`. Any other status, the budget running out, or a reply that
-  does not answer every question with its kind is a `DecisionError` naming the model and
-  the role. The key is only in the request headers: it is never logged and is scrubbed
-  from every error text.
+- A transient failure (429, 502, 503, 529, as for the chat models, or a dropped
+  connection) is sent again on the chat models' `RetryPolicy` (`adapters/llm/resilient.py`):
+  exponential backoff from `backoff_s` with jitter, a short `Retry-After` as the least
+  wait and a long one as no retry, up to `max_attempts` sends, all within the request's
+  `timeout_s`. The resilient wrapper serves chat models only, so the adapter runs the
+  policy itself. Any other status, the budget running out, or a reply that does not
+  answer every question with its kind is a `DecisionError` naming the model and the role.
+  The key is only in the request headers: it is never logged and is scrubbed from every
+  error text.
 - A call's cost is the provider's `usage.cost`; without one, its tokens at the configured
-  price.
+  price. Its `Usage.provider` is the reply's `provider`.
 - Each call is an `llm` span in LangSmith when tracing is on, under the graph node that
   made it: the state and the questions in, the answers out, and the answers flattened
   into the span's metadata (`decision_act`, `decision_intent`,
@@ -33,6 +36,7 @@ served the call (`typesafe/jev-1.14-20261014`). An error reply is
 """
 
 import asyncio
+import random
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
@@ -43,6 +47,7 @@ from langsmith import run_helpers
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from freight_agent.adapters.llm.models_config import DecisionRoleConfig, ModelPricing
+from freight_agent.adapters.llm.resilient import RetryPolicy
 from freight_agent.domain.runs import Usage
 from freight_agent.ports.decisions import (
     Answer,
@@ -63,11 +68,15 @@ from freight_agent.ports.decisions import (
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 _APP_TITLE = "freight-agent"
 _MAX_CAUSE = 500  # characters of a provider's error text kept in a DecisionError
-_MAX_WAIT_S = 10.0  # the longest backoff, whatever Retry-After says
+_MAX_DELAY_S = 8.0  # the longest backoff; a longer Retry-After is no retry
 _IMAGE_PREVIEW = 64  # characters of an image URL a trace shows
+# Rate limited (429), the providers down or overloaded behind OpenRouter (502, 503) or
+# saying so (529): the chat models' transient statuses (`adapters/llm/openrouter.py`).
+_TRANSIENT_STATUSES = frozenset({429, 502, 503, 529})
 
 Sleep = Callable[[float], Awaitable[None]]
 Timer = Callable[[], float]
+Jitter = Callable[[], float]  # 0 to 1
 
 
 # --- the provider's reply -------------------------------------------------------------
@@ -107,6 +116,7 @@ _WireAnswer = Annotated[_Noul | _Choice | _Score, Field(discriminator="type")]
 
 class _Reply(_Wire):
     model: str | None = None
+    provider: str | None = None  # the endpoint that served the call: "TypeSafe"
     answers: dict[str, _WireAnswer]
     usage: _Usage = _Usage()
 
@@ -168,10 +178,17 @@ class OpenRouterDecisions:
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Sleep = asyncio.sleep,
         timer: Timer = time.perf_counter,
+        jitter: Jitter = random.random,
     ) -> None:
         if not api_key.get_secret_value().strip():
             raise ValueError("the OpenRouter API key is empty")
         self._config = config
+        self._retry = RetryPolicy(
+            max_retries=config.max_attempts - 1,
+            base_delay_s=min(config.backoff_s, _MAX_DELAY_S),
+            max_delay_s=_MAX_DELAY_S,
+        )
+        self._jitter = jitter
         self._pricing = pricing
         self._api_key = api_key
         self._url = url
@@ -235,29 +252,27 @@ class OpenRouterDecisions:
 
     async def _attempts(self, request: DecisionRequest, body: dict[str, Any]) -> _Reply:
         client = self._client()
-        backoff = self._config.backoff_s
-        attempts = self._config.max_attempts
-        for attempt in range(1, attempts + 1):
-            last = attempt == attempts
-            wait = backoff
+        attempt = 0
+        while True:
+            attempt += 1
+            retry_after: float | None = None
             try:
                 response = await client.post(self._url, json=body)
             except httpx.TransportError as exc:  # timeouts and dropped connections
-                if last:
-                    cause = f"{type(exc).__name__}: {exc}"
-                    error = self._error(request, f"no reply after {attempts} attempts: {cause}")
-                    raise error from None
+                cause = f"no reply: {type(exc).__name__}: {exc}"
             else:
                 status = response.status_code
                 if status == httpx.codes.OK:
                     return self._parse(request, response)
-                if last or not _retryable(status):
-                    tried = f" after {attempts} attempts" if last and _retryable(status) else ""
-                    raise self._error(request, f"HTTP {status}{tried}: {_error_text(response)}")
-                wait = _retry_after(response, default=backoff)
-            await self._sleep(min(wait, _MAX_WAIT_S))
-            backoff *= 2
-        raise AssertionError("unreachable: the last attempt returns or raises")
+                cause = f"HTTP {status}: {_error_text(response)}"
+                if status not in _TRANSIENT_STATUSES:
+                    raise self._error(request, cause)
+                retry_after = _retry_after_s(response)
+            delay = self._retry.delay_s(attempt, retry_after, self._jitter())
+            if delay is None:
+                tried = f" (attempt {attempt} of {self._config.max_attempts})"
+                raise self._error(request, cause + tried) from None
+            await self._sleep(delay)
 
     def _client(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
@@ -306,6 +321,7 @@ class OpenRouterDecisions:
         return Usage(
             role=request.role.value,
             model=self.model_id,
+            provider=reply.provider,
             input_tokens=tokens.input_tokens,
             output_tokens=tokens.output_tokens,
             cost_usd=cost,
@@ -339,16 +355,12 @@ def _answer(question: Question, raw: _Noul | _Choice | _Score | None) -> Answer 
             return None
 
 
-def _retryable(status: int) -> bool:
-    return status == httpx.codes.TOO_MANY_REQUESTS or status >= httpx.codes.INTERNAL_SERVER_ERROR
-
-
-def _retry_after(response: httpx.Response, *, default: float) -> float:
+def _retry_after_s(response: httpx.Response) -> float | None:
     """The reply's `Retry-After` in seconds, when it gives a number."""
     try:
         return max(float(response.headers.get("retry-after", "")), 0.0)
     except ValueError:
-        return default
+        return None
 
 
 def _error_text(response: httpx.Response) -> str:

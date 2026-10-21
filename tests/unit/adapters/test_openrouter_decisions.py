@@ -126,6 +126,7 @@ def adapter(
         transport=httpx.MockTransport(script),
         sleep=sleep,
         timer=timer or (lambda: next(ticks) * 0.25),
+        jitter=lambda: 1.0,  # the whole backoff, so the waits are exact
     )
 
 
@@ -201,7 +202,7 @@ async def test_each_answer_is_typed_and_the_usage_is_the_providers_cost() -> Non
         71,
     )
     assert usage.cost_usd == pytest.approx(1.9866e-05)
-    assert usage.latency_ms == 250
+    assert (usage.latency_ms, usage.provider) == (250, "TypeSafe")
 
 
 async def test_a_label_the_model_did_not_weigh_is_zero_and_an_unasked_one_is_dropped() -> None:
@@ -261,7 +262,7 @@ def test_a_score_with_no_level_weighed_is_its_rounded_score() -> None:
 # --- retries and errors ------------------------------------------------------------------
 
 
-async def test_a_rate_limit_and_a_server_error_are_sent_again_with_a_doubled_backoff() -> None:
+async def test_a_rate_limit_and_an_overload_are_sent_again_with_a_doubled_backoff() -> None:
     sleeps: list[float] = []
     script = Script(httpx.Response(429), httpx.Response(503), ok())
 
@@ -272,17 +273,26 @@ async def test_a_rate_limit_and_a_server_error_are_sent_again_with_a_doubled_bac
     assert sleeps == [0.5, 1.0]
 
 
-async def test_retry_after_sets_the_wait_within_a_cap() -> None:
+async def test_a_short_retry_after_is_the_least_wait_and_a_long_one_is_no_retry() -> None:
     sleeps: list[float] = []
     script = Script(
         httpx.Response(429, headers={"Retry-After": "2"}),
         httpx.Response(429, headers={"Retry-After": "3600"}),
-        ok(),
     )
 
-    await adapter(script, sleeps=sleeps).decide(REQUEST)
+    with pytest.raises(DecisionError, match=r"HTTP 429: .*\(attempt 2 of 3\)"):
+        await adapter(script, sleeps=sleeps).decide(REQUEST)
 
-    assert sleeps == [2.0, 10.0]
+    assert sleeps == [2.0]
+
+
+async def test_a_server_error_that_is_not_transient_is_not_sent_again() -> None:
+    script = Script(httpx.Response(500, json={"error": {"message": "bug"}}))
+
+    with pytest.raises(DecisionError, match=r"HTTP 500: bug$"):
+        await adapter(script).decide(REQUEST)
+
+    assert len(script.requests) == 1
 
 
 async def test_a_dropped_connection_is_sent_again() -> None:
@@ -297,7 +307,7 @@ async def test_a_dropped_connection_is_sent_again() -> None:
 async def test_the_retries_are_bounded_and_the_last_status_is_named() -> None:
     script = Script(*(httpx.Response(502, json={"error": {"message": "upstream down"}}),) * 3)
 
-    with pytest.raises(DecisionError, match=r"HTTP 502 after 3 attempts: upstream down"):
+    with pytest.raises(DecisionError, match=r"HTTP 502: upstream down \(attempt 3 of 3\)"):
         await adapter(script).decide(REQUEST)
 
     assert len(script.requests) == 3
@@ -306,7 +316,7 @@ async def test_the_retries_are_bounded_and_the_last_status_is_named() -> None:
 async def test_no_reply_after_every_attempt_fails() -> None:
     script = Script(*(httpx.ReadTimeout("slow"),) * 3)
 
-    with pytest.raises(DecisionError, match="no reply after 3 attempts: ReadTimeout"):
+    with pytest.raises(DecisionError, match=r"no reply: ReadTimeout: slow \(attempt 3 of 3\)"):
         await adapter(script).decide(REQUEST)
 
 

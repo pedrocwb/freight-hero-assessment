@@ -179,8 +179,9 @@ pricing:
 # escalates the run instead.
 #   model              pinned version; ~typesafe/jev-latest is an alias that moves
 #   attempt_timeout_s  one HTTP attempt; the call's own budget is the runtime's
-#   max_attempts       sends in all, retrying a 429, a 5xx or a dropped connection
-#   backoff_s          wait before the second send, doubled after (Retry-After wins)
+#   max_attempts       sends in all, retrying a 429, 502, 503, 529 or a dropped connection
+#   backoff_s          wait before the second send, doubled after, with jitter, at most
+#                      8 s (the chat models' RetryPolicy; a short Retry-After wins)
 decisions:
   gate:
     model: typesafe/jev-1.14
