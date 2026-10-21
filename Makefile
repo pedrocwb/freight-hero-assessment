@@ -1,4 +1,4 @@
-.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint diagrams studio ci all
+.PHONY: setup hooks fmt test lint typecheck arch cov eval sop-lint studio ci all
 
 # Local interpreter for `make setup`. CI gets Python 3.13 from setup-uv instead.
 PY ?= /opt/homebrew/bin/python3.13
@@ -74,10 +74,6 @@ studio:
 	@echo "Safari blocks localhost there: run 'make studio STUDIO_ARGS=--tunnel' and open the URL it prints."
 	@echo "Input: {\"scenario_id\": \"a_client_a_high_risk\"}. Each play spends money on OPENROUTER_API_KEY."
 	uv run langgraph dev --no-browser --port $(STUDIO_PORT) --allow-blocking $(STUDIO_ARGS)
-
-# Rebuilds docs/architecture.html from docs/build_diagrams.js (needs Node).
-diagrams:
-	node docs/build_diagrams.js $(or $(TMPDIR:%/=%),/tmp)/architecture-page.html docs/architecture.html
 
 # The gates of .github/workflows/ci.yml, in the same order. No evals: they are live.
 ci: lint typecheck arch cov sop-lint
