@@ -269,6 +269,7 @@ ledger, with its timers; documents are rows with their values and checks.
 | Procedure | The client's SOP sections | The selected sections (2.2) | `search_sop`, `read_sop_section` |
 | Load facts | Load metadata and the client catalog | "Load", "Contacts" | `get_load` |
 | Documents | Document rows | The document of a `document_processed` event | `read_document` |
+| Facilities, across loads | Facility notes in a LangGraph store, one namespace per client and facility, with an embeddings index | "Facility notes" of the current and the next stop, each with its source load and date, marked untrusted | `recall_facility` (semantic search over the client's notes) |
 
 - **Actions are memory.** For each outbox item the executor appends an `agent_action`
   event (`act:{event_id}:{index}`) in the same transaction (`application/executor.py`), so
@@ -277,6 +278,21 @@ ledger, with its timers; documents are rows with their values and checks.
   so a run never acts on an ETA that has not arrived for it; agent actions are always kept.
 - **The ledger holds only facts**, never a pointer into the SOP text, and nothing is kept
   in the process between runs, so any worker can run the next event.
+- **Facility memory is the one memory that outlives a load.** What a driver tells us about
+  a place ("check in at gate 4", "the PO is required at the gate") is still true at the
+  next load that stops there. When a run sets a load to `delivered`, the load is queued for
+  extraction; the next part of the tick makes one call on the `memory` model, which
+  proposes add, update and delete operations, each citing the inbound message it comes
+  from. Code checks every operation before it writes (`domain/memory.py`): the cited
+  event is an inbound message of this load about that stop, and the text has no phone
+  number, email address, money or instruction to the agent, and is short. The agent sees
+  a note as data that never overrides the SOP, the load instructions or the rules.
+- **Facility notes are per client.** The namespace is `("facility_memory", <client>,
+  <facility>)`, and every read and write names the client. Two brokers may use the same
+  warehouse, but what one broker's driver was told is that broker's information: sharing it
+  would leak one client's operations to another, and a bad or hostile note written through
+  one client's load could steer the agent on every other client's loads. Keeping notes per
+  client limits both, at the cost of each client learning a shared facility on its own.
 - **Designed, not built:** a rolling summary of the events older than the last 30. Today
   the agent pages back with `get_history`.
 

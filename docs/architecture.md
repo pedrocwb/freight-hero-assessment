@@ -214,6 +214,38 @@ Every run reads one snapshot of this memory (`application/context.py`); it never
 on anything kept in the process between runs. The agent's own actions come back as
 `agent_action` events, so the next run reads what was sent, to whom and when.
 
+### Facility memory, across loads
+
+The memory above ends with its load. Facility notes outlive it: what a driver learns about
+a pickup or a delivery place is kept for the next load of the same client at that place.
+
+```mermaid
+flowchart LR
+  subgraph run["A run (knowledge node, outside the units of work)"]
+    K["facts_in_view: current and next stop"] --> P["agent prompt: Facility notes (untrusted)"]
+    T["recall_facility tool"]
+  end
+  subgraph store["LangGraph store (InMemoryStore with an embeddings index)"]
+    N[("facility_memory / client / facility key: one item per note, text embedded")]
+    J[("facility_memory_jobs / client: one job per delivered load")]
+  end
+  C["commit of the run that sets delivered"] -->|enqueue| J
+  X["tick, after the outbox: MemoryExtractor"] -->|pending| J
+  X -->|"one memory model call: add, update, delete, each citing an event"| G["guardrails in code (domain/memory.py)"]
+  G -->|"writes that pass, one client's namespace"| N
+  K -->|recall by client and facility| N
+  T -->|semantic search by client| N
+```
+
+- A note (`FacilityFact`) is one short text with a kind (`check_in`, `hours`,
+  `requirement`, `access`, `contact`, `other`), its facility (`facility_key`: the stop's
+  normalized name and address), its client, and its source: the load, the inbound event and
+  when it was said.
+- Embeddings: `openai/text-embedding-3-small` on OpenRouter (`embeddings.memory` in
+  `config/models.yaml`), or a deterministic offline hash without the key and in the tests.
+- The store is any LangGraph `BaseStore` (`adapters/memory/store.py`); a `PostgresStore`
+  with pgvector takes the same namespaces.
+
 ## 6. Load 481207, 07:00 to 08:01
 
 ```mermaid
