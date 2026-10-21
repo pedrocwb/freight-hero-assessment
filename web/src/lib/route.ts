@@ -4,7 +4,7 @@
 
 export const SCREENS = ["scenarios", "inspector", "sops"] as const;
 export type ScreenId = (typeof SCREENS)[number];
-export const DEFAULT_SCREEN: ScreenId = "scenarios";
+const DEFAULT_SCREEN: ScreenId = "scenarios";
 
 export interface Route {
   screen: ScreenId;

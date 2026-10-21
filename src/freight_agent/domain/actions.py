@@ -162,8 +162,6 @@ Action = Annotated[
     Field(discriminator="type"),
 ]
 
-OUTBOUND_TYPES = frozenset({"send_sms", "send_email", "post_broker_slack"})
-
 
 class Plan(DomainModel):
     """What the agent proposes, in order. An empty plan is a valid no-op.

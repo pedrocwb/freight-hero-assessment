@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.domain.documents import Page
 from freight_agent.interfaces.documents import BlobStore
+from tests.fakes import FakePageReader
 
 
 def _stores(tmp_path: Path) -> list[BlobStore]:

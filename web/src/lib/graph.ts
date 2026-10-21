@@ -7,8 +7,8 @@
  * `classDef` lines are replaced by a palette that follows the page's light or dark theme.
  */
 
-export const START_NODE = "__start__";
-export const END_NODE = "__end__";
+const START_NODE = "__start__";
+const END_NODE = "__end__";
 
 /** How many times the run entered each node, in the order of the first visit. */
 export function visitCounts(path: readonly string[]): Map<string, number> {

@@ -43,7 +43,6 @@ from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, Runti
 from freight_agent.bootstrap import (
     BootstrapError,
     LazyAdapter,
-    Simulation,
     build_decisions,
     build_llm,
     build_prompt_registry,
@@ -51,7 +50,6 @@ from freight_agent.bootstrap import (
     build_runtime,
     build_runtime_config,
     build_runtime_deps,
-    build_simulation,
     build_tracer,
     enable_native_tracing,
     gate_decisions,
@@ -545,51 +543,6 @@ def test_a_lazy_adapter_that_lacks_one_of_its_own_dependencies_is_an_error(
 
     with pytest.raises(ModuleNotFoundError, match="no_such_dependency"):
         LazyAdapter("half_installed_adapter", "Thing").load()
-
-
-# --- simulation ----------------------------------------------------------------
-
-
-async def test_the_simulation_runs_on_its_virtual_clock_and_records_deliveries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(bootstrap, "AgentRuntime", RuntimeSpy)
-    llm = FakeModel()
-
-    simulation = build_simulation(_settings(), T0, llm=llm)
-
-    assert isinstance(simulation, Simulation)
-    assert isinstance(simulation.runtime, RuntimeSpy)
-    deps = simulation.runtime.deps
-    assert simulation.clock.now() == T0
-    assert deps.clock is simulation.clock
-    assert deps.llm is llm
-    await deps.gateways.sms.send(load_id="481207", contact_id="drv", text="hi", idempotency_key="k")
-    assert [d.channel for d in simulation.gateways.log.deliveries] == ["sms"]
-
-
-def test_the_simulation_builds_the_agent_runtime() -> None:
-    simulation = build_simulation(_settings(), T0, llm=FakeModel())
-
-    assert isinstance(simulation.runtime, AgentRuntime)
-    assert isinstance(simulation.clock, VirtualClock)
-    assert isinstance(simulation.gateways, RecordingGateways)
-
-
-def test_without_a_model_the_simulation_takes_the_platforms(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(bootstrap, "AgentRuntime", RuntimeSpy)
-
-    simulation = build_simulation(_settings(), T0)
-
-    assert isinstance(simulation.runtime, RuntimeSpy)
-    assert isinstance(simulation.runtime.deps.llm, UnavailableModel)  # no key in the settings
-
-
-def test_the_simulation_needs_a_timezone_aware_start() -> None:
-    with pytest.raises(ValueError, match="timezone"):
-        build_simulation(_settings(), datetime(2026, 10, 13, 7, 0), llm=FakeModel())
 
 
 # --- knowledge, blobs and documents (wave 3) -------------------------------------

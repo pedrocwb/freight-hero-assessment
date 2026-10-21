@@ -14,6 +14,10 @@ model's side written down:
 - An exception in the queue is raised at that call (a model failure).
 - Every request is recorded (`calls`), and a call with nothing queued raises
   `ScriptExhausted` (an `LlmError`, so a run escalates as on a real model failure).
+
+`FakePageReader` reads pages with no PDF library: plain text and Markdown are one page of
+text; anything else is one page with an empty image and no text, which sends the document
+pipeline down its vision path.
 """
 
 import itertools
@@ -25,6 +29,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome, Plan
+from freight_agent.domain.documents import Page
 from freight_agent.domain.runs import Usage
 from freight_agent.interfaces.decisions import (
     Answer,
@@ -201,3 +206,16 @@ def gate_answers(
         ),
         "act": YesNoAnswer(yes=act),
     }
+
+
+_TEXT_TYPES = frozenset({"text/plain", "text/markdown"})
+
+
+class FakePageReader:
+    """Implements `interfaces.documents.PageReader`."""
+
+    def pages(self, data: bytes, content_type: str) -> list[Page]:
+        kind = content_type.split(";", 1)[0].strip().lower()
+        if kind in _TEXT_TYPES:
+            return [Page(number=1, text=data.decode("utf-8", errors="replace"))]
+        return [Page(number=1, image_png=b"")]

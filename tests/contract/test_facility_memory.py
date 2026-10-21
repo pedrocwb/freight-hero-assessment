@@ -21,7 +21,6 @@ from freight_agent.adapters.memory.store import (
     facts_namespace,
     jobs_namespace,
 )
-from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.domain.memory import (
     ExtractionJob,
     ExtractionStatus,
@@ -30,7 +29,7 @@ from freight_agent.domain.memory import (
     FactKind,
 )
 from tests.conftest import LA
-from tests.postgres import DATABASE_URL, SKIP_REASON
+from tests.postgres import DATABASE_URL, SKIP_REASON, scratch_schema
 
 pytestmark = pytest.mark.contract
 

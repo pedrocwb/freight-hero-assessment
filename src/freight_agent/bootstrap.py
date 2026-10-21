@@ -54,7 +54,6 @@ import logging
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -561,20 +560,9 @@ def build_runtime(
 
 @dataclass(frozen=True)
 class Simulation:
-    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform
-    and the CLI: they move `clock` and read what the agent sent from `gateways.log`."""
+    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform:
+    it moves `clock` and reads what the agent sent from `gateways.log`."""
 
     runtime: AgentRuntime
     clock: VirtualClock
     gateways: RecordingGateways
-
-
-def build_simulation(
-    settings: Settings, start: datetime, *, llm: LanguageModel | None = None
-) -> Simulation:
-    """A simulation starting at `start` (timezone-aware). Storage and model come from the
-    settings, as for the product; `llm` replaces the model (a fake one, in tests)."""
-    clock = VirtualClock(start)
-    gateways = RecordingGateways()
-    runtime = build_runtime(settings, clock=clock, gateways=gateways.as_gateways(), llm=llm)
-    return Simulation(runtime=runtime, clock=clock, gateways=gateways)

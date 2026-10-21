@@ -100,14 +100,6 @@ class ScoreAnswer:
     probabilities: tuple[float, ...] = ()  # per level, in the question's order
     confidence: float | None = None
 
-    @property
-    def most_likely(self) -> int:
-        """The index of the most likely level (the first one on a tie); the rounded score
-        when no level has a probability."""
-        if not self.probabilities:
-            return round(self.score)
-        return max(range(len(self.probabilities)), key=lambda i: self.probabilities[i])
-
 
 Answer = YesNoAnswer | ChoiceAnswer | ScoreAnswer
 

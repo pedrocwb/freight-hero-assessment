@@ -16,7 +16,6 @@ import pytest
 from psycopg import sql
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.adapters.persistence.postgres.migrate import scratch_schema
 from freight_agent.adapters.persistence.postgres.store import PostgresStore, open_store
 from freight_agent.domain.actions import CreateHeroTask, Plan, Purpose, ScheduleTimer, SendSms
 from freight_agent.domain.events import Event, EventType
@@ -28,7 +27,7 @@ from freight_agent.domain.runs import RunRecord, RunStatus, Usage
 from freight_agent.domain.timers import Timer
 from freight_agent.domain.validation import Severity, Violation
 from freight_agent.interfaces.repositories import UnitOfWork, UnitOfWorkFactory
-from tests.postgres import DATABASE_URL, POSTGRES
+from tests.postgres import DATABASE_URL, POSTGRES, scratch_schema
 
 pytestmark = POSTGRES
 

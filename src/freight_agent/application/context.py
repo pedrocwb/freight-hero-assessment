@@ -67,9 +67,6 @@ class RunContext:
             None,
         )
 
-    def open_obligation(self, kind: str) -> Obligation | None:
-        return next((o for o in self.open_obligations if o.kind == kind), None)
-
     def obligation(self, obligation_id: str) -> Obligation | None:
         return next((o for o in self.obligations if o.obligation_id == obligation_id), None)
 

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.sop.files import FileSopRepository, load_tree
+from freight_agent.adapters.sop.files import FileSopRepository
 from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.contract
 
 ROOT = Path(__file__).resolve().parents[2]
 SOPS = ROOT / "sops"
-TREE = load_tree(SOPS)
+REPOSITORY = FileSopRepository(SOPS)
 CLIENTS = (("northline", ()), ("keystone", ("reefer",)), ("keystone", ()), ("acme", ()))
 
 
@@ -35,10 +35,11 @@ def index() -> SopIndex:
 async def test_by_applies_is_the_domain_resolve_on_the_merged_layers(
     index: SopIndex, broker_id: str, load_types: tuple[str, ...]
 ) -> None:
+    tree = await REPOSITORY.sections_for_client(broker_id)
     for intent in Intent:
         for stage in Stage:
             assert await index.by_applies(broker_id, load_types, intent, stage) == resolve(
-                TREE, client_id=broker_id, load_types=load_types, intent=intent, stage=stage
+                tree, client_id=broker_id, load_types=load_types, intent=intent, stage=stage
             ), (intent, stage)
 
 
@@ -47,7 +48,7 @@ async def test_visible_is_every_merged_section(
     index: SopIndex, broker_id: str, load_types: tuple[str, ...]
 ) -> None:
     assert await index.visible(broker_id, load_types) == effective_sections(
-        TREE, client_id=broker_id, load_types=load_types
+        await REPOSITORY.sections_for_client(broker_id), client_id=broker_id, load_types=load_types
     )
 
 

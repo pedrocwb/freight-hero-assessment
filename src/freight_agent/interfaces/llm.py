@@ -31,7 +31,6 @@ class ModelRole(StrEnum):
     GATE = "gate"  # what a message means (triage)
     AGENT = "agent"  # the agent loop: reads, stages actions, answers with the outcome
     JUDGE = "judge"  # grades wording in the evals
-    DRIVER_SIM = "driver_sim"  # plays a driver in multi-turn evals
     EXTRACT = "extract"  # a document's type and values, images included
     MEMORY = "memory"  # the facility facts a delivered load taught us
 

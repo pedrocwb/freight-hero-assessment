@@ -30,10 +30,7 @@
   --critical: #b42318;
   --critical-soft: #fbe3df;
   --violet: #6a4aa5;
-  --violet-soft: #ece6f7;
 
-  --bubble-own: #24589c;
-  --bubble-own-ink: #ffffff;
   --focus: #1f63d6;
   --shadow-float: 0 8px 24px rgb(18 30 38 / 0.18);
 
@@ -73,10 +70,7 @@
     --critical: #f38b7f;
     --critical-soft: #45241f;
     --violet: #bba3ec;
-    --violet-soft: #312a45;
 
-    --bubble-own: #2f63a8;
-    --bubble-own-ink: #ffffff;
     --focus: #86b4f1;
     --shadow-float: 0 8px 24px rgb(0 0 0 / 0.45);
   }
@@ -765,46 +759,6 @@ textarea.input {
 
 .segment:last-of-type {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-}
-
-.segment input {
-  position: absolute;
-  opacity: 0;
-  inset: 0;
-  margin: 0;
-  cursor: pointer;
-}
-
-.segment:has(input:focus-visible) {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-  z-index: 1;
-}
-
-.segment--on {
-  z-index: 1;
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--surface);
-  font-weight: 600;
-}
-
-.segment--low.segment--on {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-.segment--medium.segment--on {
-  background: var(--warn-soft);
-  border-color: var(--warn);
-  color: var(--warn);
-}
-
-.segment--high.segment--on {
-  background: var(--critical-soft);
-  border-color: var(--critical);
-  color: var(--critical);
 }
 
 .version {

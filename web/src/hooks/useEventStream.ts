@@ -12,12 +12,12 @@ export type StreamEvent =
 export type StreamStatus = "connecting" | "live" | "polling";
 
 const EVENT_TYPES = ["run", "outbox", "clock", "load", "scenario"] as const;
-export const POLL_MS = 5000;
+const POLL_MS = 5000;
 const OPEN_TIMEOUT_MS = 4000; // no stream by then: start polling while it keeps trying
 const REOPEN_MS = 15000; // after the browser gives up on a stream, try a new one
 
 /** Parse one SSE message: one JSON object per `data:` line. */
-export function parseStreamData(raw: string): unknown {
+function parseStreamData(raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch {

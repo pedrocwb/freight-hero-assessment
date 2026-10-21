@@ -192,9 +192,6 @@ class Broker(DomainModel):
     def obligation(self, kind: str) -> ObligationDef | None:
         return next((o for o in self.obligations if o.kind == kind), None)
 
-    def document_type(self, type_id: str) -> DocumentTypeDef | None:
-        return next((d for d in self.document_types if d.type_id == type_id), None)
-
     def message_intents(self) -> tuple[IntentDef, ...]:
         """The intents a message can have, in priority order (catalog order breaks ties)."""
         return tuple(sorted((i for i in self.intents if not i.system), key=lambda i: i.priority))
