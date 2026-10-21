@@ -560,8 +560,8 @@ def build_runtime(
 
 @dataclass(frozen=True)
 class Simulation:
-    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform
-    and the CLI: they move `clock` and read what the agent sent from `gateways.log`."""
+    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform:
+    it moves `clock` and reads what the agent sent from `gateways.log`."""
 
     runtime: AgentRuntime
     clock: VirtualClock
