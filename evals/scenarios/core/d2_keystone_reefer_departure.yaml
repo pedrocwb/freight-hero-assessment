@@ -4,14 +4,14 @@
 # Expected timeline (Client B reefer, load 481207 at_pickup, 2026-10-13,
 # America/Los_Angeles):
 #   step 0  09:05  driver SMS "loaded, leaving the shipper now".
-#           09:06  run: gate -> driver_departed, decide. driver_departed is the standard
+#           09:06  run: gate -> driver_departed -> agent. driver_departed is the standard
 #                  body plus the keystone/types/reefer extension: set the stage
 #                  at_pickup -> to_delivery (the next stop is a delivery), write a TMS
 #                  note with the stop and the local time, and send the driver one SMS
 #                  that asks for both the temperature and the seal number. No ETA
 #                  request is open, so there is nothing to close.
 #   step 1  09:12  driver SMS "34F, seal 4471902".
-#           09:13  run: gate -> status_update, decide. status_updates: a trailer
+#           09:13  run: gate -> status_update -> agent. status_updates: a trailer
 #                  temperature and a seal number matter, so write them in a TMS note
 #                  (the reefer extension says the same). Send no reply; the stage stays.
 id: d2_keystone_reefer_departure

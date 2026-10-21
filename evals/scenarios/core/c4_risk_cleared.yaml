@@ -8,7 +8,7 @@
 #                  is the first one: the tracker holds it as pending and no event is
 #                  created. No run, no model call, nothing changes.
 #   step 2  07:20  ping, risk low again: second confirmation, transition high -> low.
-#           07:21  run: intent delay_risk_low from code, decide only. delay_risk_cleared:
+#           07:21  run: intent delay_risk_low from code, agent only. delay_risk_cleared:
 #                  close the open ETA request as cancelled, send no message, create no
 #                  Hero task. Closing cancels T1.
 #   step 3  07:31  nothing fires: no run, no reminder SMS.

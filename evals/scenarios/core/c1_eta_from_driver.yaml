@@ -2,11 +2,11 @@
 #
 # Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high (one confirmation is enough for an upgrade).
-#           07:01  run (60 s latency): intent delay_risk_high from code, decide only.
+#           07:01  run (60 s latency): intent delay_risk_high from code, agent only.
 #                  Northline delay_risk_high, first step: SMS to drv_20931 for the ETA
 #                  (opens eta_request, attempts 1), follow-up timer T1 due 07:31.
 #   step 1  07:15  driver SMS "be there at 9:40".
-#           07:16  run: gate -> eta_provided, decide. eta_received: close eta_request as
+#           07:16  run: gate -> eta_provided -> agent. eta_received: close eta_request as
 #                  satisfied, write a TMS note with the ETA as a local clock time, send no
 #                  reply. Closing cancels T1.
 #   step 2  07:31  nothing is pending, so nothing fires: no run, no second SMS. With no

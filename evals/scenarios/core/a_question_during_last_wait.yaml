@@ -4,8 +4,8 @@
 # What the full scenario does not test. At 07:46 the ETA request has used both of its
 # attempts, and the procedure in progress says the next step is "email the dispatcher,
 # then a Hero task". That step belongs to the 08:01 timer, not to this question, so:
-#   - the answer goes out as a reply. Labelled as an ETA request, it would be dropped by
-#     the validator (eta_attempt_cap: 2 of 2 used), and the driver would get no PO;
+#   - the answer goes out as a reply. Labelled as an ETA request, it would be refused at
+#     the call (attempt_cap: 2 of 2 used), and the driver would get no PO;
 #   - nothing is escalated early, and the ledger and the 08:01 timer do not change;
 #   - at 08:01 the escalation still happens. The driver did write since the last
 #     request, but a question is not an ETA.
@@ -15,23 +15,23 @@
 # Only inbound messages call the gate model.
 #
 # Step 0, 07:00. Ping, delay risk low -> high (intent delay_risk_high, from code).
-#   07:01 run 1: acted, 1 model call (decide).
+#   07:01 run 1: acted, 1 model call (agent).
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
 #
 # Step 1, 07:31. No injection: T1 fires.
-#   07:31 run 2 (timer_due, eta_follow_up_due): acted, 1 model call (decide).
+#   07:31 run 2 (timer_due, eta_follow_up_due): acted, 1 model call (agent).
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 2. Pending timers: T2 at 08:01.
 #
 # Step 2, 07:45. SMS from the driver: "What's the PO number?".
-#   07:46 run 3: acted, 2 model calls (gate: question, act; then decide).
+#   07:46 run 3: acted, 2 model calls (gate: question, act; then agent).
 #   Plan: send_sms(drv_20931, purpose reply) with the PO 55821. Nothing else.
 #   SMS rate: 2 SMS to the driver in the last 60 minutes, under the limit of 3.
 #   After: eta_request open, attempts 2. Pending timers: T2 at 08:01.
 #
 # Step 3, 08:01. No injection: T2 fires.
-#   08:01 run 4 (timer_due, eta_follow_up_due): acted, 1 model call (decide).
+#   08:01 run 4 (timer_due, eta_follow_up_due): acted, 1 model call (agent).
 #   Plan: send_email(to dsp_4410) + create_hero_task(call the driver) +
 #   close_obligation(eta_request, exhausted).
 #   After: eta_request exhausted, attempts 2. No pending timer.

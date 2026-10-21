@@ -4,11 +4,11 @@
 # Expected timeline (Client B, load 481207 with broker keystone, 2026-10-13,
 # America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high.
-#           07:01  run: intent delay_risk_high from code, decide only. The keystone
+#           07:01  run: intent delay_risk_high from code, agent only. The keystone
 #                  delay_risk_high section replaces the standard one: one SMS to
 #                  drv_20931 for the ETA (eta_request opens, attempts 1) and a follow-up
 #                  timer T1 due 07:31.
-#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, decide only.
+#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, agent only.
 #                  Keystone: no second SMS; post an alert in the broker's Slack channel
 #                  that starts with the load number; close eta_request as exhausted.
 #                  No email to the dispatcher.

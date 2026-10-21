@@ -4,17 +4,18 @@
 #
 # Expected timeline (Client A, load 481207 at_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:40  driver SMS "lumper wants cash to unload, who pays?".
-#           09:41  run: gate -> question (it asks us something), decide.
+#           09:41  run: gate -> question (it asks us something) -> agent.
 #                  driver_questions: the answer is not in the load details, so do not
 #                  guess and do not reply with a promise; create a Hero task with the
 #                  question, who asked and what they need. escalation lists questions
 #                  about pay as Hero work, and communication_rules forbids promising a
 #                  payment. One Hero task; no SMS may say that anyone will pay.
 #
-# Live note: a gate that reads the message as `other` reaches no section with an
-# explicit intent, and decisions.md escalates the run to a Hero ("no SOP for this
-# situation") without a decide call. Both paths end in one Hero task, so the
-# expectations hold for both; run_status and llm_calls differ and are not asserted.
+# Live note: a gate that reads the message as `other` gives the agent no section with
+# an explicit intent; the agent may search the SOP, find nothing and answer
+# no_procedure, and the run hands the event to a Hero ("No SOP for this situation").
+# Both paths end in one Hero task, so the expectations hold for both; run_status and
+# llm_calls differ and are not asserted.
 id: d4_lumper_no_sop
 title: A lumper payment question no SOP answers goes to a Hero, with no promise
 suite: core

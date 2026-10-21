@@ -5,7 +5,7 @@
 #           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
 #                  follow-up timer T1 due 07:31.
 #   step 1  07:20  dsp_4410 emails in the main thread: the driver will be there at 9:40.
-#           07:21  run: gate -> eta_provided, decide. eta_received counts an ETA "from the
+#           07:21  run: gate -> eta_provided -> agent. eta_received counts an ETA "from the
 #                  driver or the dispatcher": close eta_request as satisfied, write the
 #                  ETA in the TMS, reply to no one. The request is about the truck, not
 #                  about who answers it. Closing cancels T1.

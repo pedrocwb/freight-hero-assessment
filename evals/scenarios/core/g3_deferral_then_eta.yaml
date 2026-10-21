@@ -9,7 +9,7 @@
 #                  until 07:35 and replaces T1 with T2 due 07:37; T1's run is skipped as
 #                  stale. Nothing is sent. (See G1 for the detail.)
 #   step 2  07:34  driver SMS "ok be there at 9:15".
-#           07:35  run: gate -> eta_provided, decide. eta_received: close eta_request as
+#           07:35  run: gate -> eta_provided -> agent. eta_received: close eta_request as
 #                  satisfied, write the ETA in the TMS, send no reply. Closing cancels T2.
 #   step 3  07:37  T2 was cancelled, so it never fires: no run, no second ETA request.
 id: g3_deferral_then_eta

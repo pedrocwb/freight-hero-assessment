@@ -5,7 +5,7 @@
 #           07:01  run: SMS to drv_20931 for the ETA (eta_request opens, attempts 1),
 #                  follow-up timer T1 due 07:31.
 #   step 1  07:20  driver SMS "30 mins".
-#           07:21  run (60 s latency): gate -> eta_provided, decide. eta_received: a
+#           07:21  run (60 s latency): gate -> eta_provided -> agent. eta_received: a
 #                  duration is added to the time of the message, so the TMS note says
 #                  07:50 (07:20 + 30 min). 07:51, the processing time plus 30, would be
 #                  wrong. Close eta_request as satisfied, send no reply. Closing cancels T1.

@@ -6,10 +6,10 @@
 #                  follow-up timer T1 due 07:31.
 #   step 1  07:20  driver SMS "on my way, there soon".
 #           07:21  run: gate -> eta_provided (the gate leaves "is it precise enough?" to the
-#                  ETA procedure), decide. eta_received: "soon" and "on my way" give no
-#                  time, so send nothing, write nothing, leave the request open. Empty
-#                  plan: status noop. The ledger and T1 are unchanged.
-#   step 2  07:31  T1 fires (zero latency): intent eta_follow_up_due from code, decide
+#                  ETA procedure) -> agent. eta_received: "soon" and "on my way" give no
+#                  time, so send nothing, write nothing, leave the request open. Nothing
+#                  staged: status noop. The ledger and T1 are unchanged.
+#   step 2  07:31  T1 fires (zero latency): intent eta_follow_up_due from code, agent
 #                  only. Northline, after 1 ETA request: SMS the driver again (attempts 2)
 #                  and follow up in 30 minutes (timer due 08:01).
 id: c3_vague_eta

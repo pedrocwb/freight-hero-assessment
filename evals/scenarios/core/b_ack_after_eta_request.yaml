@@ -10,19 +10,19 @@
 # Only inbound messages call the gate model.
 #
 # Step 0, 07:00. Ping, delay risk low -> high (intent delay_risk_high, from code).
-#   07:01 run 1: acted, 1 model call (decide).
+#   07:01 run 1: acted, 1 model call (agent).
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
 #
 # Step 1, 07:05. SMS from the driver: "ok".
 #   07:06 run 2: noop. The gate says acknowledgement, act false, so the run ends
 #   at the gate with 1 model call. The model-call count is not asserted here: with an
-#   ETA request open, a gate that lets decide look ("when unsure, act is true") is also
-#   correct, as long as decide returns an empty plan; the run is noop either way.
+#   ETA request open, a gate that lets the agent look ("when unsure, act is true") is
+#   also correct, as long as the agent stages nothing; the run is noop either way.
 #   After: unchanged. eta_request open, attempts 1. Pending timers: T1 at 07:31.
 #
 # Step 2, 07:31. No injection: T1 fires.
-#   07:31 run 3 (timer_due, eta_follow_up_due): acted, 1 model call (decide).
+#   07:31 run 3 (timer_due, eta_follow_up_due): acted, 1 model call (agent).
 #   The ledger says attempts 1 and no ETA arrived ("ok" is not one): the second request.
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 2. Pending timers: T2 at 08:01.

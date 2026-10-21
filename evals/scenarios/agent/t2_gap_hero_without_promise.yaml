@@ -1,8 +1,8 @@
-# What t1 checks, judged on the outcome only, so it measures a live model too: a request no
+# A gap in the SOP, judged on the outcome only, so it measures a live model: a request no
 # SOP covers reaches a person with the driver's words, and nothing is promised. A graph test
 # (tests/unit/application/test_graph_guardrails.py) checks the path (search, read, no
-# procedure); a live model may hand the case over
-# directly, because the escalation section is always shown in full (it names no intent).
+# procedure); a live model may hand the case over directly, because the escalation section
+# is always shown in full (it names no intent).
 id: t2_gap_hero_without_promise
 title: A request no SOP covers reaches a Hero with the driver's words and no promise
 suite: agent

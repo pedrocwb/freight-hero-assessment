@@ -5,7 +5,7 @@
 # Acme's proof_of_delivery section, step 5: a Hero task with the values found and what
 # does not match, no stage change, nothing to the driver.
 #
-# Cards: W3-DOC (checks in code, needs_review leaves the obligation open) and W3-AGT.
+# What it covers: checks in code, and needs_review leaving the obligation open.
 #
 # Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:10  arrival, as in p1: at_delivery, `pod` open with its timer at 11:11.

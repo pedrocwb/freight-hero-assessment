@@ -3,9 +3,9 @@
 # catalog (broker.yaml: pod at at_delivery, 120 min, opens the `pod` obligation) and its
 # section `proof_of_delivery`.
 #
-# Cards: W3-AGT (update_stage into a stage with a requirement opens its obligation and
-# timer; staged by the agent loop) and W3-DOC (the document pipeline reads the
-# attachment on the tick, before the queue, and closes the obligation on a clean POD).
+# What it covers: update_stage into a stage with a requirement opens its obligation and
+# timer (staged by the agent loop), and the document pipeline reads the attachment on the
+# tick, before the queue, and closes the obligation on a clean POD.
 #
 # Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:10  driver SMS: checked in at Valley DC.

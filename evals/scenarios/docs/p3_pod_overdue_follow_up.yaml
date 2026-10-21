@@ -2,8 +2,8 @@
 # reminder SMS (`ObligationDef pod`: max_attempts 1, follow-up 30 min), then a Hero task
 # to get the POD from the carrier (proof_of_delivery, steps 2 and 3).
 #
-# Cards: W3-AGT (the requirement timer, `requests: pod` counts an attempt, the attempt cap
-# per kind, the follow-up intent `pod_follow_up_due` from the catalog).
+# What it covers: the requirement timer, `requests: pod` counting an attempt, the attempt
+# cap per kind, the follow-up intent `pod_follow_up_due` from the catalog.
 #
 # Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:10  arrival: at_delivery; `pod` open, attempts 0, timer at 11:11.

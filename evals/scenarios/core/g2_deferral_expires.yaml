@@ -8,7 +8,7 @@
 #           07:31  one tick: T1 fires (queued behind the message); the message run defers
 #                  until 07:35 and replaces T1 with T2 due 07:37; T1's run is skipped as
 #                  stale. Nothing is sent. (See G1 for the detail.)
-#   step 2  07:37  T2 fires (zero latency): intent eta_follow_up_due, decide only. The
+#   step 2  07:37  T2 fires (zero latency): intent eta_follow_up_due, agent only. The
 #                  ledger shows attempts 1 and no ETA, so Northline's next step: SMS the
 #                  driver again (attempts 2) and follow up in 30 minutes. The new timer is
 #                  due max(07:37 + 30 min, 07:35 + 2 min grace) = 08:07: the cadence goes

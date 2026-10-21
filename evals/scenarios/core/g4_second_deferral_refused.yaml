@@ -9,14 +9,13 @@
 #                  until 07:35 (deferrals used 1) and replaces T1 with T2 due 07:37; T1's
 #                  run is skipped as stale. Nothing is sent. (See G1 for the detail.)
 #   step 2  07:33  driver SMS "give me 10 more minutes".
-#           07:34  run: gate -> eta_deferred, decide. eta_deferred rule 2: this request
+#           07:34  run: gate -> eta_deferred -> agent. eta_deferred rule 2: this request
 #                  already used its one wait, so send nothing and change nothing.
-#                  Scripted: a model that does not count deferrals proposes
-#                  defer_obligation 10 minutes. The validator drops it (deferral_policy),
-#                  so no action is approved: status noop. A careful live model returns an
-#                  empty plan, which is also noop. Either way the ledger keeps one
-#                  deferral and T2 stays at 07:37 (an accepted second deferral would have
-#                  moved it to 07:45).
+#                  A careful model stages nothing: status noop. A model that does not
+#                  count deferrals stages defer_obligation 10 minutes; the tool refuses it
+#                  at the call (deferral_policy), so nothing is approved: also noop.
+#                  Either way the ledger keeps one deferral and T2 stays at 07:37 (an
+#                  accepted second deferral would have moved it to 07:45).
 #   step 3  07:37  T2 fires: Northline's next step, the second ETA SMS (attempts 2) and a
 #                  timer due max(08:07, 07:35 + 2 min) = 08:07.
 id: g4_second_deferral_refused

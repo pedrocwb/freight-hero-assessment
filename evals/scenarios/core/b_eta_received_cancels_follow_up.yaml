@@ -10,12 +10,12 @@
 # Only inbound messages call the gate model.
 #
 # Step 0, 07:00. Ping, delay risk low -> high (intent delay_risk_high, from code).
-#   07:01 run 1: acted, 1 model call (decide).
+#   07:01 run 1: acted, 1 model call (agent).
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
 #
 # Step 1, 07:20. SMS from the driver: "Should be there around 8:15".
-#   07:21 run 2: acted, 2 model calls (gate: eta_provided, act; then decide). The
+#   07:21 run 2: acted, 2 model calls (gate: eta_provided, act; then agent). The
 #   `eta_received` section applies: close the request as satisfied and write the ETA, as
 #   a local clock time, in the TMS. It asks for no message.
 #   Plan: close_obligation(eta_request, satisfied) + write_tms_note(ETA 08:15).
