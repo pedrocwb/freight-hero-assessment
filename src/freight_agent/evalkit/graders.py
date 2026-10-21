@@ -1,12 +1,16 @@
 """Code graders: did the agent do the right thing at each step of a scenario?
 
 `grade_step` judges one step against its `Expectation` and `forbid` list;
-`check_invariants` judges the whole run (idempotency, recipients, budget).
+`check_invariants` judges the whole play (idempotency, recipients); `grade` is every
+check of a played scenario. The checks come in groups, one LangSmith evaluator each
+(`evalkit.experiment`): `facts` (the outbox, the ledger, the timers, the run statuses
+and counts), `trajectory` (the agent loop's intent, tool calls, sections and refusals),
+`judge` (the judge's verdict on a rubric step) and `invariants`.
 
 The trajectory checks (wave 3) read the step's run records: the intent each run settled
 on (the agent's label, else the gate's), the tool calls of the agent loop
 (`RunRecord.trajectory`), the sections it searched up or read and the calls a rule
-refused (`RunRecord.rejections`). The judge check reads the verdict the runner asked the
+refused (`RunRecord.rejections`). The judge check reads the verdict the player asked the
 judge model for (`StepObservation.judge`); it never calls a model itself.
 Graders never raise on a bad agent: every problem becomes a `Failure` whose
 message states what was expected and lists what actually happened, so a red
@@ -17,12 +21,12 @@ Payload keys follow the outbox table in `docs/decisions.md`.
 
 import re
 from collections import defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from freight_agent.domain.load import Load
 from freight_agent.domain.obligations import Obligation
@@ -35,6 +39,7 @@ from freight_agent.evalkit.spec import (
     ActionMatcher,
     Expectation,
     ObligationExpectation,
+    Scenario,
     Step,
     TimerExpectation,
 )
@@ -48,39 +53,105 @@ READ_SECTION_TOOL = "read_sop_section"  # its `section_id` argument is a section
 type _Findings = Iterator[tuple[str, str]]
 
 
-class Budget(BaseModel):
-    """Spending limits for one scenario trial. A `None` limit is not checked.
+CheckGroup = Literal["facts", "trajectory", "judge", "invariants"]
+GROUPS: tuple[CheckGroup, ...] = ("facts", "trajectory", "judge", "invariants")
 
-    Tokens and latency are per run, from the run's model usage: run timestamps
-    come from the virtual clock, so only the model calls measure real time.
-    """
+
+class StepCheck(BaseModel):
+    """One check a step declares, and how it went: what the platform shows per step."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_cost_usd: float | None = Field(default=None, description="Total over every run")
-    max_tokens_per_run: int | None = Field(default=None, description="Input plus output tokens")
-    max_latency_ms_per_run: int | None = Field(default=None, description="Sum of model latency")
+    name: str  # e.g. "expect.actions[0]", "forbid[1]", "expect.obligations.eta_request"
+    passed: bool
+    detail: str | None = None  # the failure's message
 
 
 # --- step grading -----------------------------------------------------------------------
 
 
-def grade_step(step: Step, obs: StepObservation, *, timezone: str) -> list[Failure]:
-    """Every failed check of the step, in the order the spec declares them."""
+def grade_step(
+    step: Step,
+    obs: StepObservation,
+    *,
+    timezone: str,
+    groups: Collection[CheckGroup] = GROUPS,
+) -> list[Failure]:
+    """Every failed check of the step in `groups`, in the order the spec declares them."""
     expect = step.expect
-    findings = [
-        *_check_actions(expect.actions, obs.outbox),
-        *_check_no_actions(expect.no_actions, obs.outbox),
-        *_check_forbid(step.forbid, obs.outbox),
-        *_check_obligations(expect.obligations, obs.snapshot.obligations),
-        *_check_timers(expect.timers, obs.snapshot.timers, timezone),
-        *_check_run_status(expect.run_status, obs.runs),
-        *_check_llm_calls(expect.llm_calls, obs),
-        *_check_runs(expect.runs, obs),
-        *_check_trajectory(expect, obs.runs),
-        *_check_judge(expect.judge, obs.judge),
-    ]
+    findings: list[tuple[str, str]] = []
+    if "facts" in groups:
+        findings += [
+            *_check_actions(expect.actions, obs.outbox),
+            *_check_no_actions(expect.no_actions, obs.outbox),
+            *_check_forbid(step.forbid, obs.outbox),
+            *_check_obligations(expect.obligations, obs.snapshot.obligations),
+            *_check_timers(expect.timers, obs.snapshot.timers, timezone),
+            *_check_run_status(expect.run_status, obs.runs),
+            *_check_llm_calls(expect.llm_calls, obs),
+            *_check_runs(expect.runs, obs),
+        ]
+    if "trajectory" in groups:
+        findings += _check_trajectory(expect, obs.runs)
+    if "judge" in groups:
+        findings += _check_judge(expect.judge, obs.judge)
     return [Failure(step_index=obs.step_index, check=c, message=m) for c, m in findings]
+
+
+def grade(
+    scenario: Scenario,
+    observations: Sequence[StepObservation],
+    *,
+    error: str | None = None,
+    groups: Collection[CheckGroup] = GROUPS,
+) -> list[Failure]:
+    """Every failed check of a played scenario in `groups`. A play that stopped early is
+    graded on the steps it reached, and its error is a failure of its own, in every
+    group: no check passes a scenario that did not play to its end."""
+    failures: list[Failure] = []
+    if error is not None:
+        failures.append(Failure(step_index=None, check="error", message=error))
+    for step, observation in zip(scenario.steps, observations, strict=False):
+        failures.extend(grade_step(step, observation, timezone=scenario.timezone, groups=groups))
+    if "invariants" in groups and observations:
+        failures.extend(check_invariants(observations[-1].snapshot.load, observations))
+    return failures
+
+
+def step_checks(step: Step, obs: StepObservation, *, timezone: str) -> list[StepCheck]:
+    """Every check the step declares, passed or failed, in the order the spec declares
+    them; a failed sub-check (`expect.timers.pending`) fails its check."""
+    failures = grade_step(step, obs, timezone=timezone)
+    checks: list[StepCheck] = []
+    for name in declared_checks(step):
+        mine = [f for f in failures if f.check == name or f.check.startswith(f"{name}.")]
+        detail = "; ".join(f.message for f in mine) or None
+        checks.append(StepCheck(name=name, passed=not mine, detail=detail))
+    return checks
+
+
+def declared_checks(step: Step) -> list[str]:
+    """The names of the checks a step declares, as its failures name them."""
+    expect = step.expect
+    names = [f"expect.actions[{i}]" for i in range(len(expect.actions))]
+    names += ["expect.no_actions"] if expect.no_actions else []
+    names += [f"forbid[{i}]" for i in range(len(step.forbid))]
+    names += [f"expect.obligations.{kind}" for kind in expect.obligations]
+    optional: dict[str, object] = {
+        "expect.timers": expect.timers,
+        "expect.run_status": expect.run_status or None,
+        "expect.llm_calls": expect.llm_calls,
+        "expect.runs": expect.runs,
+        "expect.intent": expect.intent,
+        "expect.tools_used": expect.tools_used or None,
+        "expect.tools_refused": expect.tools_refused or None,
+        "expect.sections_read": expect.sections_read or None,
+        "expect.min_rejections": expect.min_rejections,
+        "expect.max_rejections": expect.max_rejections,
+        "expect.judge": expect.judge,
+    }
+    names += [name for name, value in optional.items() if value is not None]
+    return names
 
 
 def _check_actions(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]) -> _Findings:
@@ -218,14 +289,16 @@ def tool_calls(runs: Sequence[RunRecord]) -> list[TrajectoryStep]:
 
 def sections_read(runs: Sequence[RunRecord]) -> list[str]:
     """Sections the agent searched up or read: `sections_searched`, plus the `section_id` of
-    every `read_sop_section` call, in order, each once."""
+    every `read_sop_section` call that found its section, in order, each once."""
     found: list[str] = []
     for run in runs:
         found.extend(run.sections_searched)
         for step in run.trajectory:
             section_id = step.args.get("section_id")
-            if step.tool == READ_SECTION_TOOL and isinstance(section_id, str):
-                found.append(section_id)
+            # The tool answers `# <id>: <title>` with the section, or the valid ids.
+            read = isinstance(section_id, str) and step.result.startswith(f"# {section_id}:")
+            if step.tool == READ_SECTION_TOOL and read:
+                found.append(cast(str, section_id))
     return list(dict.fromkeys(found))
 
 
@@ -284,8 +357,6 @@ def _check_judge(want: JudgeSpec | None, result: JudgeResult | None) -> _Finding
     if result is None:
         yield "expect.judge", "the step has a rubric but the judge did not run"
         return
-    if result.skipped is not None:
-        return
     if result.error is not None:
         yield "expect.judge", result.error
         return
@@ -302,18 +373,9 @@ def _check_judge(want: JudgeSpec | None, result: JudgeResult | None) -> _Finding
 # --- invariants -------------------------------------------------------------------------
 
 
-def check_invariants(
-    load: Load,
-    observations: Sequence[StepObservation],
-    *,
-    budget: Budget | None = None,
-) -> list[Failure]:
+def check_invariants(load: Load, observations: Sequence[StepObservation]) -> list[Failure]:
     """Scenario-wide checks; the message names the step, since `step_index` is None."""
-    findings = [
-        *_check_idempotency(observations),
-        *_check_recipients(load, observations),
-        *(_check_budget(budget, observations) if budget is not None else ()),
-    ]
+    findings = [*_check_idempotency(observations), *_check_recipients(load, observations)]
     return [Failure(step_index=None, check=c, message=m) for c, m in findings]
 
 
@@ -347,34 +409,6 @@ def _check_recipients(load: Load, observations: Sequence[StepObservation]) -> _F
                         f"{where} goes to {recipient!r}, who is not a contact of load "
                         f"{load.load_id} (contacts: {', '.join(contacts)})",
                     )
-
-
-def _check_budget(budget: Budget, observations: Sequence[StepObservation]) -> _Findings:
-    runs = [(obs.step_index, run) for obs in observations for run in obs.runs]
-    if budget.max_cost_usd is not None:
-        total = sum(run.cost_usd for _, run in runs)
-        if total > budget.max_cost_usd:
-            yield (
-                "invariant.budget.cost_usd",
-                f"total model cost ${total:.4f} over {len(runs)} run(s) exceeds the budget "
-                f"of ${budget.max_cost_usd:.4f}",
-            )
-    for step_index, run in runs:
-        where = f"step {step_index}, run {run.run_id}"
-        tokens = sum(u.input_tokens + u.output_tokens for u in run.usage)
-        if budget.max_tokens_per_run is not None and tokens > budget.max_tokens_per_run:
-            yield (
-                "invariant.budget.tokens",
-                f"{where}: {tokens} input+output tokens exceed the budget of "
-                f"{budget.max_tokens_per_run}",
-            )
-        latency = sum(u.latency_ms for u in run.usage)
-        if budget.max_latency_ms_per_run is not None and latency > budget.max_latency_ms_per_run:
-            yield (
-                "invariant.budget.latency_ms",
-                f"{where}: {latency} ms of model latency exceeds the budget of "
-                f"{budget.max_latency_ms_per_run} ms",
-            )
 
 
 # --- matching ---------------------------------------------------------------------------

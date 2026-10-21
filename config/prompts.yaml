@@ -1,0 +1,18 @@
+# The prompt template each model role runs, as a LangSmith Prompt Hub reference.
+#
+# `<name>:<tag>` follows a commit tag (`prod` is what production runs); `<name>:<commit>`
+# pins one commit for good. The runtime resolves each reference once, when the process
+# starts (adapters/prompts/hub.py), and every run records the commit it sent
+# (`RunRecord.prompts`), as every eval experiment does in its metadata.
+#
+# The templates' text is in prompts/<role>.yaml, the repository copy: `agent prompts
+# push --tag <tag>` publishes it, `agent prompts pull` writes a Hub version back, and
+# `agent prompts status` shows whether the copy matches what each pin names. Without
+# LANGSMITH_API_KEY (or with PROMPTS_SOURCE=local) the runtime runs that copy instead.
+# PROMPTS_TAG, or `agent eval run --prompt-tag`, runs every role at another tag.
+
+gate: freight-agent-gate:prod
+agent: freight-agent-agent:prod
+extract: freight-agent-extract:prod
+judge: freight-agent-judge:prod
+gate_decision: freight-agent-gate_decision:prod

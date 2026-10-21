@@ -1,6 +1,6 @@
 """The run graph's nodes. Each factory takes the services it needs and returns the node.
 
-Nodes are thin: the work lives in the services (`prefilter`, `Gate`, the knowledge
+Nodes are thin: the work lives in the services (`prefilter`, the gate, the knowledge
 index, `Agent`, `domain.validation`). A node adapts their results to the run state and
 decides whether the run ends here, by writing a `Verdict`. Errors are not caught:
 the runtime turns a model failure or the deadline into an escalation and anything
@@ -11,15 +11,22 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 
 from freight_agent.application import escalation
-from freight_agent.application.agent import Agent, Staged, validation_context
+from freight_agent.application.agent import (
+    ANSWER_NOW,
+    Agent,
+    Proposal,
+    catalog_intent,
+    validation_context,
+)
 from freight_agent.application.context import RunContext
-from freight_agent.application.gate import Gate
+from freight_agent.application.gate import Triage
 from freight_agent.application.graph.state import RunState, RunUpdate, Verdict, need
 from freight_agent.application.prefilter import PrefilterResult, prefilter
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.validation import Rule, ValidationOutcome, validate
 from freight_agent.ports.knowledge import SopIndex
+from freight_agent.ports.llm import AssistantTurn, Turn, UserTurn
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +51,7 @@ def _prefilter_verdict(ctx: RunContext, result: PrefilterResult) -> Verdict:
     return Verdict.escalated(escalation.unknown_sender(ctx, result.detail))
 
 
-def triage_node(gate: Gate) -> Node:
+def triage_node(gate: Triage) -> Node:
     """The event's intent, on the broker's catalog. A run whose triage does not act ends
     as a no-op."""
 
@@ -83,54 +90,95 @@ def knowledge_node(knowledge: SopIndex) -> Node:
 
 
 def agent_node(agent: Agent) -> Node:
-    """One agent model call: what it staged, the plan it proposed, how it read the event."""
+    """One model round of the agent loop: tool calls, or the answer.
+
+    The round must answer (`force_answer`) once the broker's budget is spent: after
+    `max_steps` rounds, or once the agent's rounds cost `max_cost_usd`. A model that
+    replied in prose is asked once, in a user turn, for its answer (a trailing assistant
+    message reads as a prefill to some providers).
+    """
 
     async def run_agent(state: RunState) -> RunUpdate:
-        result = await agent.run(
-            state.ctx,
+        ctx = state.ctx
+        limits = ctx.broker.limits
+        prose = _replied_in_prose(state.messages)
+        nudge: tuple[Turn, ...] = (UserTurn(ANSWER_NOW),) if prose else ()
+        spent = sum(u.cost_usd for u in state.agent_usage)
+        reply = await agent.round(
+            ctx,
             need(state.gate_decision, "a triage decision"),
             need(state.sop, "the resolved SOP"),
             state.visible_sections,
+            (*state.messages, *nudge),
+            force_answer=prose or state.rounds >= limits.max_steps or spent >= limits.max_cost_usd,
         )
-        staged = result.staged
         update: RunUpdate = {
-            "plan": result.plan,
-            "staged": staged,
-            "no_procedure": result.no_procedure,
-            "usage": result.usage,
-            "trajectory": staged.trajectory,
-            "sections_searched": staged.sections_searched,
-            "rejections": staged.rejections,
+            "messages": (*nudge, reply.turn),
+            "rounds": state.rounds + 1,
+            "usage": (reply.usage,),
         }
-        if result.intent is not None:
-            update["intent"] = result.intent
+        if reply.answer is not None:
+            update["outcome"] = reply.answer
+            intent = catalog_intent(ctx.broker, reply.answer.intent)
+            if intent is not None:
+                update["intent"] = intent
         return update
 
     return run_agent
 
 
+def _replied_in_prose(messages: Sequence[Turn]) -> bool:
+    last = messages[-1] if messages else None
+    return isinstance(last, AssistantTurn) and not last.tool_calls
+
+
+def tools_node(agent: Agent) -> Node:
+    """Answer the tool calls of the agent's last round: read tools from the run's context,
+    action tools staged through the rules. Nothing executes until the run commits."""
+
+    async def run_tools(state: RunState) -> RunUpdate:
+        cost = state.agent_usage[-1].cost_usd if state.agent_usage else 0.0
+        done = await agent.call_tools(
+            state.ctx,
+            state.visible_sections,
+            state.pending_calls,
+            proposals=state.proposals,
+            round_cost=cost,
+        )
+        return {
+            "messages": done.results,
+            "trajectory": done.steps,
+            "proposals": done.proposals,
+            "rejections": state.rejections + done.rejections,
+            "sections_searched": tuple(dict.fromkeys((*state.sections_searched, *done.sections))),
+        }
+
+    return run_tools
+
+
 def validate_node(rules: Sequence[Rule]) -> Node:
     """Code decides what the plan may do, with the run's broker limits. Always ends the run.
 
-    The merge point of the staged calls and the answer's actions, and a check on the fold:
-    an action the staging accepted and the rules now refuse is logged (it cannot happen
-    unless the staging and the validator judged with different rules or context).
+    A check on the staging: an action the staging accepted and the rules now refuse is
+    logged (it cannot happen unless the staging and the validator judged with different
+    rules or context).
     """
 
     async def run_validate(state: RunState) -> RunUpdate:
         ctx = state.ctx
         plan = need(state.plan, "a plan")
         outcome = validate(plan, validation_context(ctx), rules)
-        staged = state.staged or Staged()
-        _warn_on_drift(ctx, staged, outcome)
-        return {"validation": outcome, "verdict": _plan_verdict(state, plan, outcome, staged)}
+        _warn_on_drift(ctx, state.proposals, outcome)
+        return {"validation": outcome, "verdict": _plan_verdict(state, plan, outcome)}
 
     return run_validate
 
 
-def _warn_on_drift(ctx: RunContext, staged: Staged, outcome: ValidationOutcome) -> None:
+def _warn_on_drift(
+    ctx: RunContext, proposals: Sequence[Proposal], outcome: ValidationOutcome
+) -> None:
     refused = {v.action_index for v in outcome.violations}
-    for index, proposal in enumerate(staged.proposals):
+    for index, proposal in enumerate(proposals):
         if proposal.accepted and index in refused:
             logger.warning(
                 "run on event %s: action %d (%s) was accepted when staged and refused by the "
@@ -141,15 +189,13 @@ def _warn_on_drift(ctx: RunContext, staged: Staged, outcome: ValidationOutcome) 
             )
 
 
-def _plan_verdict(
-    state: RunState, plan: Plan, outcome: ValidationOutcome, staged: Staged
-) -> Verdict:
+def _plan_verdict(state: RunState, plan: Plan, outcome: ValidationOutcome) -> Verdict:
     """A high-severity violation, or more refused calls than the broker allows, escalates,
     and the approved actions still run first. An agent that found no procedure and
     approved nothing hands the event to a Hero (`sop_gap`)."""
     ctx = state.ctx
     budget = escalation.RejectionBudget(
-        refused=staged.rejections, limit=ctx.broker.limits.max_rejections
+        refused=state.rejections, limit=ctx.broker.limits.max_rejections
     )
     if outcome.has_high_severity or budget.exceeded:
         return Verdict.escalated(

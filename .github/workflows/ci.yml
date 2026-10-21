@@ -1,7 +1,7 @@
 # The quality gates of every change: lint, types, layer rules, tests with coverage and
-# the scenario evals (core, agent and docs suites) in scripted and replay mode. Each gate
-# is a Makefile target, so `make ci` runs the same checks locally. The Postgres tests and
-# the image build are jobs of their own (`make integration`, `docker build .`).
+# the SOP lint. Each gate is a Makefile target, so `make ci` runs the same checks locally.
+# The scenario evals are live LangSmith experiments that spend money, so they run by hand
+# (evals-live.yml), never here. The image build is a job of its own (`docker build .`).
 name: CI
 
 on:
@@ -24,11 +24,9 @@ env:
 
 jobs:
   checks:
-    name: Lint, types, layers, tests, evals
+    name: Lint, types, layers, tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      has-integration-tests: ${{ steps.integration.outputs.found }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -74,88 +72,8 @@ jobs:
       - name: SOP lint
         run: make sop-lint
 
-      # Every suite under evals/scenarios/ of `make eval` (core, agent, docs), each run
-      # even when one before it failed. Exit 1: a regression scenario failed; 2: the
-      # harness could not run a scenario.
-      - name: Evals, scripted mode
-        run: make eval
-
-      # The real model's recorded answers (evals/cassettes), offline and without a key.
-      # A changed prompt, SOP, scenario or model misses its recording and fails here:
-      # re-record each suite with `uv run agent eval run --suite S --mode record
-      # --cost-cap-usd 0.20`.
-      # Scenarios tagged scripted_only (guardrail controls) are skipped here.
-      - name: Evals, replay mode
-        run: make eval-replay
-
-      # pytest exits with 5 when the selection collects no test.
-      - name: Look for integration tests
-        id: integration
-        run: |
-          status=0
-          uv run pytest -m integration --collect-only -q > /dev/null || status=$?
-          case "$status" in
-            0) echo "found=true" >> "$GITHUB_OUTPUT" ;;
-            5) echo "found=false" >> "$GITHUB_OUTPUT" ;;
-            *) exit "$status" ;;
-          esac
-
-  # Runs once tests marked `integration` exist (they do since the Postgres adapter).
-  integration:
-    name: Integration tests (Postgres)
-    needs: checks
-    if: needs.checks.outputs.has-integration-tests == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        # pgvector ships the vector extension the SOP section embeddings need.
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: agent
-          POSTGRES_PASSWORD: agent
-          POSTGRES_DB: agent
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U agent -d agent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      # Same names and defaults as .env.example. There is no pooler here, so both match.
-      DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
-      DATABASE_URL_DIRECT: postgresql://agent:agent@localhost:5432/agent
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: astral-sh/setup-uv@v10.3.0
-        with:
-          version: ${{ env.UV_VERSION }}
-          python-version: ${{ env.PYTHON_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      # What `docker compose up` runs before the app: every migration from an empty
-      # database, through the CLI (0001 to 0005 once the wave 3 cards land).
-      - name: Migrations (agent db migrate)
-        run: uv run agent db migrate
-
-      # The contract suites run here too: with DATABASE_URL set, each one also runs on
-      # Postgres (the unit of work, brokers, the SOP store and index, documents: one suite
-      # per port for the memory store and Postgres). The Postgres scenario tests run every
-      # suite on both stores, and on the imported brokers and sections. `-rs` lists what
-      # was skipped and why.
-      - name: Integration and Postgres contract tests
-        run: make integration
-
   # The image `docker compose up --build` runs: it builds (web UI included), starts with
-  # no key and no database (replay, memory), answers its health check and serves the UI.
+  # no key (the platform says the model is not ready), answers and serves the UI.
   image:
     name: Docker image
     needs: checks
@@ -173,10 +91,10 @@ jobs:
         run: |
           docker run --detach --name app --publish 127.0.0.1:8000:8000 freight-agent:ci
           for _ in $(seq 30); do
-            curl --silent --fail http://127.0.0.1:8000/api/health > /dev/null && break
+            curl --silent --fail http://127.0.0.1:8000/api/sim/state > /dev/null && break
             sleep 2
           done
-          curl --silent --fail http://127.0.0.1:8000/api/health
+          curl --silent --fail http://127.0.0.1:8000/api/sim/state
           curl --silent --fail http://127.0.0.1:8000/ | grep -q '<div id="root">'
 
       - name: Container log

@@ -1,11 +1,11 @@
-# P1: a clean POD delivers the load. Acme (evals/brokers/acme.json) requires a signed POD
-# within 120 minutes of the arrival at the delivery stop: its `DocumentRequirement`
-# (pod at at_delivery, 120 min, opens the `pod` obligation) and section
-# `proof_of_delivery` (from acme_sop.md, section 3).
+# P1: a clean POD delivers the load. Acme (sops/clients/acme/) requires a signed POD
+# within 120 minutes of the arrival at the delivery stop: the `DocumentRequirement` of its
+# catalog (broker.yaml: pod at at_delivery, 120 min, opens the `pod` obligation) and its
+# section `proof_of_delivery`.
 #
-# Cards: W3-AGT (update_stage into a stage with a requirement opens its obligation and
-# timer; the agent loop folds the transcript) and W3-DOC (the document pipeline reads the
-# attachment on the tick, before the queue, and closes the obligation on a clean POD).
+# What it covers: update_stage into a stage with a requirement opens its obligation and
+# timer (staged by the agent loop), and the document pipeline reads the attachment on the
+# tick, before the queue, and closes the obligation on a clean POD.
 #
 # Expected timeline (Acme, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
 #   step 0  09:10  driver SMS: checked in at Valley DC.
@@ -31,8 +31,8 @@ description: >-
   document pipeline, closes the request as satisfied, and its document_processed run
   sets the load to delivered with a TMS note.
 load: fixtures/load_481207.json
-broker_file: brokers/acme.json
 load_overrides:
+  broker: {id: acme, name: Acme Freight}
   stage: to_delivery
 date: 2026-10-14
 start: "09:00"
@@ -40,17 +40,6 @@ steps:
   - at: "09:10"
     note: "Arrival at Valley DC: the POD becomes due at 11:11, nobody asks for it yet"
     message: {channel: sms, sender: drv_20931, body: "checked in at valley dc, they are unloading us now"}
-    script:
-      gate:
-        - {intent: status_update, act: true, reason: "The driver reports the arrival at the receiver."}
-      agent:
-        - rationale: >-
-            proof_of_delivery, step 1: the truck is at the delivery stop, so set the load
-            to at_delivery; the POD is due in 120 minutes, do not ask for it yet.
-          tool_calls:
-            - name: update_stage
-              args: {stage: at_delivery}
-              result: "accepted as action #1"
     expect:
       intent: status_update
       tools_used: [update_stage]
@@ -73,29 +62,6 @@ steps:
       body: ""
       attachments:
         - {filename: pod_clean.pdf, fixture: fixtures/docs/pod_clean.pdf, content_type: application/pdf}
-    script:
-      extract:
-        # domain.documents.Extraction: every value as text; the pipeline checks them.
-        - type_id: pod
-          confidence: 0.97
-          fields:
-            - {name: receiver, value: Valley DC}
-            - {name: po_numbers, value: "55821"}
-            - {name: signed, value: "true"}
-            - {name: delivered_at, value: "2026-10-14T09:42"}
-            - {name: exceptions, value: none}
-          notes: Signed by the receiver, Dana Whitfield, 10/14/2026 09:42.
-      agent:
-        - rationale: >-
-            The message only carries the file: the document_processed run acts on the
-            POD, so nothing here.
-        - rationale: >-
-            proof_of_delivery, step 4: the POD is clean (processed, every check ok), so set
-            the load to delivered and write a TMS note.
-          intent: document_processed
-          actions:
-            - {type: update_stage, stage: delivered}
-            - {type: write_tms_note, text: "POD received for load 481207, signed by the receiver at Valley DC at 09:42."}
     expect:
       intent: document_processed
       actions:

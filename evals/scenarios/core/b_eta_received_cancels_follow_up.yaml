@@ -10,12 +10,12 @@
 # Only inbound messages call the gate model.
 #
 # Step 0, 07:00. Ping, delay risk low -> high (intent delay_risk_high, from code).
-#   07:01 run 1: acted, 1 model call (decide).
+#   07:01 run 1: acted, 1 model call (agent).
 #   Plan: send_sms(drv_20931, eta_request) + schedule_timer(eta_request, 30).
 #   After: eta_request open, attempts 1. Pending timers: T1 at 07:31.
 #
 # Step 1, 07:20. SMS from the driver: "Should be there around 8:15".
-#   07:21 run 2: acted, 2 model calls (gate: eta_provided, act; then decide). The
+#   07:21 run 2: acted, 2 model calls (gate: eta_provided, act; then agent). The
 #   `eta_received` section applies: close the request as satisfied and write the ETA, as
 #   a local clock time, in the TMS. It asks for no message.
 #   Plan: close_obligation(eta_request, satisfied) + write_tms_note(ETA 08:15).
@@ -51,19 +51,6 @@ steps:
       timers: {pending: 1, due_at: "07:31"}
       run_status: [acted]
       llm_calls: 1
-    script:
-      decide:
-        - rationale: >-
-            delay_risk_high (Northline), first step: text the driver for the ETA and follow
-            up in 30 minutes.
-          actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: "Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?"
-            - type: schedule_timer
-              kind: eta_request
-              due_in_minutes: 30
 
   - at: "07:20"
     note: "The driver gives the ETA; at 07:21 the request closes as satisfied and the ETA goes in the TMS"
@@ -83,19 +70,6 @@ steps:
       - {kind: sms}
       - {kind: email}
       - {kind: hero_task}
-    script:
-      gate:
-        - {intent: eta_provided, act: true, reason: "The driver gives an arrival time of about 8:15."}
-      decide:
-        - rationale: >-
-            eta_received: the driver gave a clock time, so close the ETA request as
-            satisfied and write the ETA in the TMS. Closing cancels the 07:31 follow-up.
-          actions:
-            - type: close_obligation
-              kind: eta_request
-              status: satisfied
-            - type: write_tms_note
-              text: "Driver ETA to the Riverbend plant pickup: 08:15, from the driver's text at 07:20."
 
   - at: "07:31"
     note: "B3: the follow-up was cancelled, so nothing fires: no run, no model call, no action"

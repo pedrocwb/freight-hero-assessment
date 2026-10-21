@@ -1,8 +1,8 @@
-"""Tracer that exports nothing. The default in tests and when tracing is off."""
+"""Tracer that links nothing. The default in tests and when tracing is off."""
 
-from freight_agent.domain.runs import RunRecord
+from uuid import UUID
 
 
 class NullTracer:
-    async def record_run(self, run: RunRecord) -> str | None:
+    async def trace_url(self, trace_id: UUID) -> str | None:
         return None

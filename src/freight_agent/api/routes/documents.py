@@ -4,7 +4,6 @@
   and arrives as a message with that attachment (`SimulationService.upload_attachment`,
   through `ingest_message`); its document is pending until the next tick
   (`POST /api/sim/tick`), which reads it before it runs the queue.
-- `GET /api/documents/{document_id}`: one document, as the pipeline left it.
 - `GET /api/loads/{load_id}/documents`: the load's documents, oldest first.
 
 Bodies: `api.schemas.AttachmentUploadResult` and `DocumentView` (the blob reference
@@ -68,15 +67,6 @@ async def upload_attachment(
         occurred_at=occurred_at,
     )
     return await service.upload_attachment(upload)
-
-
-@router.get("/documents/{document_id}")
-async def get_document(service: Service, document_id: str) -> DocumentView:
-    async with service.uow_factory() as uow:
-        document = await uow.documents.get(document_id)
-    if document is None:
-        raise NotFound(f"unknown document {document_id!r}")
-    return DocumentView.of(document)
 
 
 @router.get("/loads/{load_id}/documents")

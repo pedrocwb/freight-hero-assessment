@@ -8,16 +8,15 @@ call the app, collect the body chunks as they come and read lines with a timeout
 import asyncio
 import json
 from collections.abc import AsyncIterator, MutableMapping
-from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
 import pytest
 from fastapi import FastAPI
 
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.api.app import create_app
 from freight_agent.api.simulation import SimulationService
+from tests.fakes import FakeModel
 from tests.integration.test_api_harness import (
     ASK_ETA,
     DECIDE,
@@ -110,8 +109,8 @@ class StreamReader:
 
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
@@ -144,8 +143,8 @@ async def test_a_run_is_published_with_its_outbox_and_the_load(api: Api) -> None
     assert clock["now"] == local(7, 1)
 
 
-async def test_an_idle_stream_sends_heartbeats(tmp_path: Path) -> None:
-    app = create_app(api_settings(tmp_path), llm=ScriptedModel(), heartbeat_s=0.01)
+async def test_an_idle_stream_sends_heartbeats() -> None:
+    app = create_app(api_settings(), llm=FakeModel(), heartbeat_s=0.01)
 
     async with StreamReader(app) as stream:
         await stream.event("clock")

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "scenario": {
+      "path": "freight_agent.studio:graph",
+      "description": "An eval scenario played live on a fresh world, each run graph inside the run node. Input: {\"scenario_id\": \"a_client_a_high_risk\"}, optionally \"until_step\"; or free form {\"load\": \"load_481207\", \"ping\": {\"delay_risk\": \"high\"}}."
+    }
+  },
+  "env": ".env",
+  "python_version": "3.13"
+}

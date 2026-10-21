@@ -1,23 +1,21 @@
-"""Reproducibility metadata: what an eval run needs to be explained or repeated later.
+"""Reproducibility metadata: what an experiment needs to be explained or repeated later.
 
-Two runs can only be compared when it is known what changed between them: the code
-(git sha, uncommitted edits), the SOP text (its version hash), the models, the prompt
-templates and the runtime's limits. Each of those is recorded as an id or a short hash,
-so a report shows at a glance whether a difference in results comes with a difference
-in inputs.
+Two experiments can only be compared when it is known what changed between them: the
+code (git sha, uncommitted edits), the SOP text (the tree's content hash), the model of
+each role, the gate's engine (and its act threshold) and the prompts the models read. A
+prompt is its template's version (the LangSmith Hub commit, or `local:<sha256 prefix>`
+of the repository copy) and the reference it was resolved from
+(`freight-agent-agent:candidate`): an experiment run on a candidate tag says which commit
+it measured, and the catalog the templates are rendered with is the SOP tree's, in
+`sop_version`. LangSmith records this on the experiment, next to its results.
 
-Collecting never fails a run: a value that cannot be read (no git, no SOP folder, a
-broken models file) is recorded as unknown (`None`), and the run itself reports the real
-problem.
+Collecting never fails a run: a value that cannot be read (no git, a broken models
+file) is recorded as unknown (`None`), and the run itself reports the real problem.
 """
 
-import dataclasses
-import hashlib
-import importlib
-import json
 import platform
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,27 +23,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.llm.models_config import load_models_config
-from freight_agent.application.runtime import RuntimeConfig
-from freight_agent.evalkit import judge
+from freight_agent.ports.prompts import Prompts
 
-# What `evalkit.runner.build_runtime` runs the agent with. Hashed, not imported from the
-# runner, because the runner builds it inline.
-EVAL_RUNTIME_CONFIG = RuntimeConfig(reraise_unexpected=True)
-
-_HASH_LENGTH = 12
 _GIT_TIMEOUT_S = 10
-
-# The modules whose source shapes what a model reads: the prompt templates and the code
-# that fills them, and the tool descriptions. Wave 3 moves the tools from `tools` to
-# `agent_tools` (card W3-AGT) and adds the document and knowledge prompts; a module that
-# does not exist (yet, or any more) is left out of the hash.
-PROMPT_MODULES = (
-    "freight_agent.application.prompts",
-    "freight_agent.application.tools",
-    "freight_agent.application.agent_tools",
-    "freight_agent.application.prompts_documents",
-    "freight_agent.application.prompts_knowledge",
-)
 
 # Runs a git command in a folder: its stdout, or None when git is missing or fails.
 GitRunner = Callable[[Path, list[str]], str | None]
@@ -57,49 +37,59 @@ class RunMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     created_at: datetime  # UTC, when the run started
-    mode: str
-    model_set: str = "default"
+    suite: str
+    k: int
+    cost_cap_usd: float
     git_sha: str | None = None
     git_dirty: bool | None = None  # uncommitted or untracked files in the checkout
     sop_version: str | None = None
-    models: dict[str, list[str]] = {}  # role -> [primary, *fallbacks], from the models config
-    models_config_sha256: str | None = None
-    prompts_sha256: str | None = None
-    config_sha256: str | None = None  # the runtime and validation config
+    models: dict[str, list[str]] = {}  # role -> [primary, *fallbacks]; decision_<role>
+    gate_engine: str | None = None  # llm or jev
+    gate_act_threshold: float | None = None  # the jev engine's; None on llm
+    prompts: dict[str, str] = {}  # role -> template version (Hub commit, or local:<hash>)
+    prompt_refs: dict[str, str] = {}  # role -> what the version was resolved from
     python: str | None = None
-    settings: dict[str, str] = {}  # `Settings.describe()`: secrets show only as set or unset
-    broker: str | None = None  # `acme@v2` when the run played a broker export
+
+    def for_langsmith(self) -> dict[str, Any]:
+        """Flat values, as LangSmith shows and filters an experiment's metadata:
+        `prompt_agent` is the commit, `prompt_ref_agent` the pin it came from."""
+        nested = {"models", "prompts", "prompt_refs"}
+        data: dict[str, Any] = self.model_dump(mode="json", exclude=nested)
+        data.update({f"model_{role}": ", ".join(chain) for role, chain in self.models.items()})
+        data.update({f"prompt_{role}": version for role, version in self.prompts.items()})
+        data.update({f"prompt_ref_{role}": ref for role, ref in self.prompt_refs.items()})
+        return data
 
 
 def collect_metadata(
     *,
     created_at: datetime,
-    mode: str,
-    model_set: str,
+    suite: str,
+    k: int,
+    cost_cap_usd: float,
     sop_version: str | None,
     models_config: Path,
+    prompts: Prompts,
     repo: Path,
-    settings: Mapping[str, str] | None = None,
     git: GitRunner | None = None,
-    broker: str | None = None,
+    gate_engine: str | None = None,
+    gate_act_threshold: float | None = None,
 ) -> RunMetadata:
-    git = git or run_git
-    sha, dirty = git_state(repo, git)
-    models, models_sha = _models(models_config)
+    sha, dirty = git_state(repo, git or run_git)
     return RunMetadata(
         created_at=created_at,
-        mode=mode,
-        model_set=model_set,
+        suite=suite,
+        k=k,
+        cost_cap_usd=cost_cap_usd,
         git_sha=sha,
         git_dirty=dirty,
         sop_version=sop_version,
-        models=models,
-        models_config_sha256=models_sha,
-        prompts_sha256=prompts_sha256(),
-        config_sha256=config_sha256(EVAL_RUNTIME_CONFIG),
+        models=_models(models_config),
+        gate_engine=gate_engine,
+        gate_act_threshold=gate_act_threshold if gate_engine == "jev" else None,
+        prompts=prompts.versions(),
+        prompt_refs=prompts.refs(),
         python=platform.python_version(),
-        settings=dict(settings or {}),
-        broker=broker,
     )
 
 
@@ -130,48 +120,11 @@ def git_state(repo: Path, git: GitRunner = run_git) -> tuple[str | None, bool | 
     return sha.strip(), (None if status is None else bool(status.strip()))
 
 
-def prompts_sha256(modules: tuple[str, ...] = PROMPT_MODULES) -> str:
-    """Hash of the prompt sources: the templates and the rendering code that fills them
-    shape the prompt alike, and so do the tool descriptions the agent reads and the
-    judge's prompt."""
-    digest = hashlib.sha256()
-    for name in modules:
-        try:
-            module = importlib.import_module(name)
-        except ModuleNotFoundError as exc:
-            if exc.name != name:  # the module exists and one of its own imports is missing
-                raise
-            continue
-        source = Path(module.__file__ or "").read_bytes()
-        digest.update(module.__name__.encode() + b"\0" + source)
-    digest.update(b"judge\0" + judge.prompt_fingerprint().encode())
-    return digest.hexdigest()[:_HASH_LENGTH]
-
-
-def config_sha256(config: RuntimeConfig) -> str:
-    """Hash of every runtime setting, the validation limits and the ping filter included."""
-    return _short_hash(json.dumps(_plain(config), sort_keys=True, default=str))
-
-
-def _plain(config: RuntimeConfig) -> dict[str, Any]:
-    plain: dict[str, Any] = {}
-    for item in dataclasses.fields(config):
-        value = getattr(config, item.name)
-        plain[item.name] = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
-    return plain
-
-
-def _models(path: Path) -> tuple[dict[str, list[str]], str | None]:
+def _models(path: Path) -> dict[str, list[str]]:
     try:
-        data = path.read_bytes()
         config = load_models_config(path)
     except (OSError, ValueError):
-        return {}, None
-    chains = {
-        role.value: [settings.model, *settings.fallbacks] for role, settings in config.roles.items()
-    }
-    return chains, hashlib.sha256(data).hexdigest()[:_HASH_LENGTH]
-
-
-def _short_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_HASH_LENGTH]
+        return {}
+    models = {role.value: list(role_config.models) for role, role_config in config.roles.items()}
+    models.update({f"decision_{role.value}": [d.model] for role, d in config.decisions.items()})
+    return models

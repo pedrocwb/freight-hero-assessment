@@ -3,7 +3,7 @@
 #
 # Expected timeline (Client A, load 481207, 2026-10-13, America/Los_Angeles):
 #   step 0  07:12  driver SMS "What's the PO number?", message_id e3-sms-7731.
-#           07:13  run: gate -> question, decide. driver_questions: the PO number is in the
+#           07:13  run: gate -> question -> agent. driver_questions: the PO number is in the
 #                  load instructions (PO 55821), so reply by SMS with it. One SMS.
 #   step 1  07:15  the same message_id again. Ingest dedupes on message_id: no event is
 #                  logged or queued, so there is no run and no model call, and nothing is
@@ -27,16 +27,6 @@ steps:
       sender: drv_20931
       body: What's the PO number?
       message_id: e3-sms-7731
-    script:
-      gate:
-        - {intent: question, act: true, reason: The driver asks for the PO number.}
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: reply
-              text: The PO number is 55821. You will need it at the gate.
-          rationale: driver_questions, the PO number is in the load instructions, so answer it.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: reply, contains: ["55821"], count: 1}

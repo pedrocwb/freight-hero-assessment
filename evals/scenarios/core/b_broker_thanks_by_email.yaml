@@ -11,7 +11,7 @@
 # Step 0, 07:05. Email from the broker brk_0087 (a contact of the load, so the prefilter
 #   lets it through): "Thanks!". Ledger: nothing open, no timers.
 #   07:06 run 1: noop, 1 model call (gate: acknowledgement, act false). The run ends at
-#   the gate: no SOP resolution, no decide, no outbox item.
+#   the gate: no SOP selection, no agent loop, no outbox item.
 #   After: still no obligation and no timer.
 
 id: b_broker_thanks_by_email
@@ -39,6 +39,3 @@ steps:
       timers: {pending: 0}
       run_status: [noop]
       llm_calls: 1
-    script:
-      gate:
-        - {intent: acknowledgement, act: false, reason: "The broker only says thanks; nothing is asked."}

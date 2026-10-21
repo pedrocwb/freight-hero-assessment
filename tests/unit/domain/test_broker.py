@@ -1,6 +1,7 @@
-"""The broker catalog: the standard broker, its lookups, its validation and the canary.
+"""The broker catalog: the standard broker, its lookups, a client's overrides and the
+validation.
 
-Owner: card W3-BRK. The canary's properties over arbitrary load ids are in
+Owner: card W3-BRK. Properties over generated catalogs are in
 `tests/property/test_broker_properties.py`.
 """
 
@@ -10,7 +11,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from freight_agent.application.prompts import GATE_SYSTEM_PROMPT
+from freight_agent.application.prompts import render_gate_system_prompt
 from freight_agent.domain.broker import (
     MAX_COST_USD,
     MAX_STEPS,
@@ -18,22 +19,22 @@ from freight_agent.domain.broker import (
     SYSTEM_INTENTS_FROM_CODE,
     Broker,
     BrokerLimits,
+    CatalogOverrides,
     DocumentRequirement,
     DocumentTypeDef,
     FieldDef,
     IntentDef,
     ObligationDef,
-    Rollout,
     catalog_problems,
-    choose_version,
+    client_broker,
     new_broker,
     standard_broker,
-    with_follow_up_intents,
 )
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.obligations import DeferralPolicy, ObligationKind
 from freight_agent.domain.validation import ValidationConfig
+from tests.prompts import PROMPTS
 
 # What `domain.intents.MUST_ACT` and `NOOP_ELIGIBLE` held before brokers were data.
 MUST_ACT_BEFORE = {
@@ -113,14 +114,6 @@ def _with_pod_obligation(pod: ObligationDef) -> dict[str, Any]:
     return {"obligations": (*standard_broker().obligations, pod), "intents": (*_intents(), POD_DUE)}
 
 
-def _versions(percent: int) -> tuple[Broker, Broker]:
-    previous = new_broker("acme", "Acme")
-    current = previous.revised(
-        config_version=2, rollout=Rollout(percent=percent, previous_version=1)
-    )
-    return current, previous
-
-
 @pytest.mark.unit
 def test_the_standard_catalog_has_every_standard_intent_once() -> None:
     broker = standard_broker()
@@ -128,7 +121,6 @@ def test_the_standard_catalog_has_every_standard_intent_once() -> None:
     ids = [i.intent_id for i in broker.intents]
     assert sorted(ids) == sorted(Intent)
     assert broker.broker_id == STANDARD_BROKER_ID
-    assert broker.config_version == 1
 
 
 @pytest.mark.unit
@@ -136,8 +128,9 @@ def test_message_intents_follow_the_gate_prompt_order_and_wording() -> None:
     broker = standard_broker()
 
     assert tuple(i.intent_id for i in broker.message_intents()) == GATE_ORDER
+    gate_prompt = render_gate_system_prompt(PROMPTS.gate, broker)
     for intent in broker.message_intents():
-        assert f"- {intent.intent_id}: {intent.description}" in GATE_SYSTEM_PROMPT
+        assert f"- {intent.intent_id}: {intent.description}" in gate_prompt
 
 
 @pytest.mark.unit
@@ -234,37 +227,84 @@ def test_requirements_are_listed_by_stage() -> None:
 def test_a_new_broker_copies_the_standard_catalog_under_its_own_id() -> None:
     broker = new_broker("acme", "Acme Logistics")
 
-    assert (broker.broker_id, broker.name, broker.config_version) == ("acme", "Acme Logistics", 1)
+    assert (broker.broker_id, broker.name) == ("acme", "Acme Logistics")
     assert broker.intents == standard_broker().intents
     assert broker.obligations == standard_broker().obligations
 
 
-@pytest.mark.unit
-def test_full_rollout_and_no_previous_version_give_the_current_one() -> None:
-    current, previous = _versions(100)
+# --- a client's overrides ---------------------------------------------------------------
 
-    assert choose_version(current, previous, "481207") is current
-    assert choose_version(current, None, "481207") is current
-
-
-@pytest.mark.unit
-def test_a_rollback_gives_every_load_the_previous_version() -> None:
-    current, previous = _versions(0)
-
-    assert all(choose_version(current, previous, f"load-{i}") is previous for i in range(50))
+DETENTION = IntentDef(
+    intent_id="detention_request",
+    title="Detention request",
+    description="The truck waited more than 2 hours at a facility.",
+    priority=55,
+)
+POD_AT_DELIVERY = DocumentRequirement(
+    type_id="pod", at_stage=Stage.AT_DELIVERY, within_minutes=120, opens_obligation="pod"
+)
 
 
 @pytest.mark.unit
-def test_a_canary_splits_the_loads_and_keeps_each_load_on_its_version() -> None:
-    current, previous = _versions(30)
-    loads = [f"load-{i}" for i in range(400)]
+def test_no_overrides_give_the_standard_catalog_under_the_client_s_id() -> None:
+    broker = client_broker("acme", CatalogOverrides())
 
-    first = [choose_version(current, previous, load) for load in loads]
-    again = [choose_version(current, previous, load) for load in loads]
+    assert (broker.broker_id, broker.name) == ("acme", "acme")
+    assert broker.revised(broker_id="standard", name="Standard") == standard_broker()
 
-    assert first == again
-    on_current = sum(1 for version in first if version is current)
-    assert 80 < on_current < 160  # about 30% of 400
+
+@pytest.mark.unit
+def test_a_standard_id_replaces_its_entry_in_place_and_a_new_one_comes_after() -> None:
+    faster = (
+        standard_broker()
+        .obligations[0]
+        .model_copy(update={"follow_up_minutes": 20, "max_attempts": 3})
+    )
+    overrides = CatalogOverrides(
+        name="Acme Freight",
+        intents=(DETENTION, POD_DUE),
+        obligations=(POD, faster),
+        documents=(POD_AT_DELIVERY,),
+    )
+
+    broker = client_broker("acme", overrides)
+
+    assert broker.name == "Acme Freight"
+    assert broker.obligations == (faster, POD)  # eta_request where it stood, then pod
+    standard = standard_broker().intents
+    assert broker.intents == (*standard, DETENTION, POD_DUE)
+    assert [i.intent_id for i in broker.message_intents()][4:6] == [
+        "document",
+        "detention_request",
+    ]  # by priority: 55 sits between document (50) and status_update (60)
+    assert broker.documents == (POD_AT_DELIVERY,)
+    assert broker.document_types == standard_broker().document_types
+    assert broker.validation_config().attempt_cap(ObligationKind.ETA_REQUEST) == 3
+
+
+@pytest.mark.unit
+def test_triage_and_limits_replace_the_standard_ones_when_given() -> None:
+    limits = BrokerLimits(max_steps=2)
+
+    broker = client_broker("acme", CatalogOverrides(triage=False, limits=limits))
+
+    assert (broker.triage, broker.limits) == (False, limits)
+
+
+@pytest.mark.unit
+def test_the_overridden_catalog_is_validated_as_a_whole() -> None:
+    with pytest.raises(ValidationError, match="pod_follow_up_due, which is not in the catalog"):
+        client_broker("acme", CatalogOverrides(obligations=(POD,)))
+    with pytest.raises(ValidationError, match="broker id"):
+        client_broker("Acme Corp", CatalogOverrides())
+
+
+@pytest.mark.unit
+def test_an_id_given_twice_in_the_overrides_is_refused() -> None:
+    with pytest.raises(ValidationError, match="intent id detention_request appears 2 times"):
+        CatalogOverrides(intents=(DETENTION, DETENTION))
+    with pytest.raises(ValidationError, match="obligation kind pod appears 2 times"):
+        CatalogOverrides(obligations=(POD, POD))
 
 
 # --- catalog validation -------------------------------------------------------------------
@@ -279,7 +319,7 @@ def test_the_standard_catalog_and_a_new_broker_are_valid() -> None:
 
 @pytest.mark.unit
 def test_a_broker_survives_a_json_round_trip() -> None:
-    """What Postgres stores (jsonb) and the API returns comes back equal."""
+    """What the API returns comes back equal."""
     broker = _with_pod(max_attempts=3)
 
     assert Broker.model_validate_json(broker.model_dump_json()) == broker
@@ -301,11 +341,11 @@ def test_validation_runs_on_every_way_in_but_model_copy() -> None:
 @pytest.mark.unit
 def test_every_problem_is_reported_at_once() -> None:
     with pytest.raises(ValidationError) as caught:
-        Broker.model_validate(_changed(name="", config_version=0))
+        Broker.model_validate(_changed(name="", limits=BrokerLimits(max_steps=-1)))
 
     message = str(caught.value)
     assert "broker standard has no name" in message
-    assert "config_version must be at least 1" in message
+    assert "limits.max_steps must be between 1 and 20" in message
 
 
 @pytest.mark.unit
@@ -496,7 +536,7 @@ def test_the_eta_request_stays_with_its_follow_up_intent() -> None:
 
 @pytest.mark.unit
 def test_a_broker_may_tune_the_eta_request() -> None:
-    """Acme: every 20 minutes, at most 3 SMS (evals/fixtures/sops/README.md)."""
+    """Acme: every 20 minutes, at most 3 SMS (sops/clients/acme/broker.yaml)."""
     eta = standard_broker().obligations[0]
     acme = eta.model_copy(update={"follow_up_minutes": 20, "max_attempts": 3})
 
@@ -589,12 +629,14 @@ def test_a_document_is_required_once_per_stage() -> None:
 @pytest.mark.parametrize(
     ("limits", "expected"),
     [
-        (BrokerLimits(max_steps=-1), f"limits.max_steps must be between 0 and {MAX_STEPS}"),
-        (BrokerLimits(max_steps=MAX_STEPS + 1), "limits.max_steps must be between 0"),
-        (BrokerLimits(max_cost_usd=-0.01), "limits.max_cost_usd must be between 0 and"),
-        (BrokerLimits(max_cost_usd=MAX_COST_USD * 2), "limits.max_cost_usd must be between 0"),
-        (BrokerLimits(max_cost_usd=math.inf), "limits.max_cost_usd must be between 0"),
-        (BrokerLimits(max_cost_usd=math.nan), "limits.max_cost_usd must be between 0"),
+        (BrokerLimits(max_steps=0), f"limits.max_steps must be between 1 and {MAX_STEPS}"),
+        (BrokerLimits(max_steps=-1), f"limits.max_steps must be between 1 and {MAX_STEPS}"),
+        (BrokerLimits(max_steps=MAX_STEPS + 1), "limits.max_steps must be between 1"),
+        (BrokerLimits(max_cost_usd=-0.01), "limits.max_cost_usd must be above 0 and"),
+        (BrokerLimits(max_cost_usd=0.0), "limits.max_cost_usd must be above 0 and"),
+        (BrokerLimits(max_cost_usd=MAX_COST_USD * 2), "limits.max_cost_usd must be above 0"),
+        (BrokerLimits(max_cost_usd=math.inf), "limits.max_cost_usd must be above 0"),
+        (BrokerLimits(max_cost_usd=math.nan), "limits.max_cost_usd must be above 0"),
         (BrokerLimits(max_rejections=-1), "limits.max_rejections must be between 0 and 20"),
         (
             BrokerLimits(validation=ValidationConfig(sms_max_per_window=0)),
@@ -622,44 +664,18 @@ def test_limits_are_sane(limits: BrokerLimits, expected: str) -> None:
 
 @pytest.mark.unit
 def test_the_strictest_limits_are_allowed() -> None:
-    """`max_steps=0` is the per-broker switch back to one plan with no action tools."""
-    strict = BrokerLimits(max_steps=0, max_cost_usd=0.0, max_rejections=0)
+    """One round is the least, since the agent acts only through its tools, and some spend
+    (none would force the first round to answer); no refused call is accepted."""
+    strict = BrokerLimits(max_steps=1, max_cost_usd=0.0001, max_rejections=0)
 
     assert _problems(limits=strict) == ()
-
-
-@pytest.mark.unit
-def test_a_rollout_falls_back_to_an_earlier_version() -> None:
-    assert _problems(config_version=3, rollout=Rollout(percent=10, previous_version=2)) == ()
-    assert _problems(config_version=2, rollout=Rollout(percent=10, previous_version=2)) == (
-        "rollout.previous_version must be an earlier version than 2, not 2",
-    )
-    assert _problems(config_version=2, rollout=Rollout(percent=10, previous_version=0)) == (
-        "rollout.previous_version must be an earlier version than 2, not 0",
-    )
 
 
 @pytest.mark.unit
 def test_revised_keeps_what_it_is_not_told_to_change() -> None:
     broker = new_broker("acme", "Acme")
 
-    renamed = broker.revised(name="Acme Freight", config_version=2)
+    renamed = broker.revised(name="Acme Freight", triage=False)
 
-    assert (renamed.name, renamed.config_version) == ("Acme Freight", 2)
+    assert (renamed.name, renamed.triage) == ("Acme Freight", False)
     assert renamed.intents == broker.intents and renamed.limits == broker.limits
-
-
-@pytest.mark.unit
-def test_with_follow_up_intents_adds_the_missing_ones_as_system_intents() -> None:
-    standard = standard_broker()
-    obligations = (*standard.obligations, POD)
-
-    intents = with_follow_up_intents(standard.intents, obligations)
-    again = with_follow_up_intents(intents, obligations)
-
-    added = intents[len(standard.intents) :]
-    assert [i.intent_id for i in added] == ["pod_follow_up_due"]
-    assert added[0].system and added[0].must_act and not added[0].noop_eligible
-    assert "Proof of delivery" in added[0].title
-    assert again == intents  # present ones are kept as they are
-    assert _problems(obligations=obligations, intents=intents) == ()

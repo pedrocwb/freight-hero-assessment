@@ -1,11 +1,12 @@
-"""Ingress and channels: the assignment's sequence played through the API.
+"""Ingress: the assignment's sequence played through the API.
 
 A ping or a message goes in through `/api/v1`, the API lets `latency_seconds` of virtual
-time pass and ticks, and what the agent sent shows up in the load's conversation.
+time pass and ticks; the message is in the load's event log and what the agent sent is
+in its outbox (`GET /api/loads/{load_id}`).
 """
 
 from collections.abc import AsyncIterator
-from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,22 +34,23 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
-def outbound_sms(at: str, text: str) -> dict[str, object]:
-    return {
-        "at": at,
-        "direction": "out",
-        "channel": "sms",
-        "who": "agent",
-        "role": "agent",
-        "text": text,
-        "status": "sent",
-        "to": [DRIVER],
-    }
+async def sent_sms(api: Api) -> list[tuple[str, str, str, str]]:
+    """Each SMS the agent sent: when, to whom, what, and its delivery status."""
+    return [
+        (o["created_at"], o["payload"]["contact_id"], o["payload"]["text"], o["status"])
+        for o in await api.outbox("sms")
+    ]
+
+
+async def inbound(api: Api) -> list[dict[str, Any]]:
+    """The messages the load received, oldest first."""
+    snapshot = await api.get(f"/api/loads/{LOAD_ID}")
+    return [e for e in snapshot["events"] if e["type"] == "inbound_message"]
 
 
 async def test_a_ping_to_high_runs_the_agent_and_its_sms_is_in_the_conversation(api: Api) -> None:
@@ -66,8 +68,7 @@ async def test_a_ping_to_high_runs_the_agent_and_its_sms_is_in_the_conversation(
     assert result["event_id"].startswith("risk:")
     runs = await api.get(f"/api/loads/{LOAD_ID}/runs")
     assert [(r["status"], r["started_at"]) for r in runs] == [("acted", local(7, 1))]
-    conversation = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="sms")
-    assert conversation == [outbound_sms(local(7, 1), ASK_ETA.text)]
+    assert await sent_sms(api) == [(local(7, 1), DRIVER, ASK_ETA.text, "sent")]
 
 
 async def test_a_driver_sms_goes_through_the_gate_and_decide_and_gets_a_reply(api: Api) -> None:
@@ -79,19 +80,18 @@ async def test_a_driver_sms_goes_through_the_gate_and_decide_and_gets_a_reply(ap
 
     assert result["accepted"] is True
     assert result["event_id"]  # the API fills the message id
-    assert [call.role for call in api.model.calls] == [DECIDE, GATE, DECIDE]
-    conversation = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="sms")
-    assert conversation == [
-        outbound_sms(local(7, 1), ASK_ETA.text),
-        {
-            "at": local(7, 12),
-            "direction": "in",
-            "channel": "sms",
-            "who": DRIVER,
-            "role": "driver",
-            "text": "What's the PO number?",
-        },
-        outbound_sms(local(7, 13), PO_REPLY.text),
+    # Each agent loop is two rounds: one stages the actions, the next finishes.
+    assert [call.role for call in api.model.calls] == [DECIDE, DECIDE, GATE, DECIDE, DECIDE]
+    [message] = await inbound(api)
+    assert (message["event_id"], message["occurred_at"], message["channel"]) == (
+        result["event_id"],
+        local(7, 12),
+        "sms",
+    )
+    assert (message["sender_contact_id"], message["body"]) == (DRIVER, "What's the PO number?")
+    assert await sent_sms(api) == [
+        (local(7, 1), DRIVER, ASK_ETA.text, "sent"),
+        (local(7, 13), DRIVER, PO_REPLY.text, "sent"),
     ]
     [_, reply] = await api.get(f"/api/loads/{LOAD_ID}/runs")
     assert reply["gate"] == {
@@ -114,8 +114,7 @@ async def test_advancing_to_0731_sends_the_follow_up(api: Api) -> None:
         ("acted", "eta_follow_up_due")
     ]
     assert result["state"]["next_timer_due_at"] == local(8, 1)
-    conversation = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="sms")
-    assert conversation[-1] == outbound_sms(local(7, 31), ASK_AGAIN.text)
+    assert (await sent_sms(api))[-1] == (local(7, 31), DRIVER, ASK_AGAIN.text, "sent")
     snapshot = await api.get(f"/api/loads/{LOAD_ID}")
     [obligation] = snapshot["obligations"]
     assert (obligation["status"], obligation["attempts"]) == ("open", 2)
@@ -216,36 +215,32 @@ async def test_ingress_for_an_unknown_load_is_a_404(api: Api) -> None:
     assert responses[0].json() == {"detail": "unknown load 'nope'"}
 
 
-async def test_the_slack_conversation_resolves_the_broker_role(api: Api) -> None:
+async def test_a_slack_message_from_the_broker_is_logged_on_its_channel(api: Api) -> None:
     await api.create_load()
     api.model.push(GATE, GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="thanks"))
 
     await api.message("Thanks team", local(7, 0), sender=BROKER, channel="slack")
 
-    conversation = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="slack")
-    assert [(c["who"], c["role"], c["direction"]) for c in conversation] == [
-        (BROKER, "broker", "in")
-    ]
-    assert await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="sms") == []
+    [message] = await inbound(api)
+    assert (message["channel"], message["sender_contact_id"], message["direction"]) == (
+        "slack",
+        BROKER,
+        "inbound",
+    )
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+    assert (run["status"], run["gate"]["intent"]) == ("noop", "acknowledgement")
+    assert await sent_sms(api) == []
 
 
-async def test_an_unknown_sender_shows_as_unknown(api: Api) -> None:
-    await api.create_load()
-
-    await api.message("hello?", local(7, 0), sender="stranger")
-
-    [entry] = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="sms")
-    assert (entry["who"], entry["role"]) == ("stranger", "unknown")
-
-
-async def test_tms_notes_are_listed_with_their_time(api: Api) -> None:
+async def test_a_tms_note_the_agent_writes_is_in_the_outbox_with_its_time(api: Api) -> None:
     await api.create_load()
     api.model.push(GATE, GateDecision(intent=Intent.STATUS_UPDATE, act=True, reason="update"))
     api.model.push(DECIDE, plan(WriteTmsNote(text="Driver loading at door 4.")))
 
     await api.message("loading at door 4", local(7, 0))
 
-    assert await api.get(f"/api/loads/{LOAD_ID}/tms") == [
-        {"at": local(7, 1), "text": "Driver loading at door 4."}
+    notes = await api.outbox("tms_note")
+    assert [(n["created_at"], n["payload"]["text"]) for n in notes] == [
+        (local(7, 1), "Driver loading at door 4.")
     ]
     assert api.model.remaining(ModelRole.AGENT) == 0

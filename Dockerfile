@@ -2,12 +2,12 @@
 #
 # The whole simulation platform in one image: the API on port 8000 serves the built web UI.
 #
-#   docker compose up --build             # app, postgres and the migration job
+#   docker compose up --build             # the app, with a volume for its blobs
 #   docker build -t freight-agent .       # the image alone
 #
 # No key and no .env go into the image (.dockerignore keeps them out of the context). Every
-# setting comes from the environment at run time, and the default LLM_MODE=replay (recorded
-# answers in evals/cassettes) needs no key and no network.
+# setting comes from the environment at run time. The model is always the live one:
+# without OPENROUTER_API_KEY the platform starts and says the model is not ready.
 
 # --- stage 1: the web UI ------------------------------------------------------------------
 FROM node:22-alpine AS web
@@ -43,43 +43,40 @@ COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-# Then the project itself. It stays an editable install on purpose: `agent db migrate`
-# finds migrations/ next to src/ (adapters/persistence/postgres/migrate.py).
+# Then the project itself, as an editable install.
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 # What the app reads at run time, at the Settings defaults (relative to /app): the SOP
-# tree (`agent sop import sops/` seeds a database from it), the scenarios, their fixtures
-# (load metadata, the Acme SOP, the POD and BOL PDFs) and cassettes, the model sets, the
-# migrations and the built UI.
+# tree (with the clients' catalogs), the scenarios and their fixtures (load metadata, the
+# POD and BOL PDFs), the models config and the prompt pins, the repository copy of the
+# prompt templates (what runs without LANGSMITH_API_KEY) and the built UI.
 COPY sops ./sops
 COPY evals ./evals
 COPY config ./config
-COPY migrations ./migrations
+COPY prompts ./prompts
 COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
-# them; it may only write eval results (`agent eval run`) and blobs: the uploaded
-# attachments and SOP files (BLOBS_DIR, a volume in docker-compose.yml).
+# them; it may only write blobs: the uploaded attachments (BLOBS_DIR, a volume in
+# docker-compose.yml).
 RUN useradd --system --user-group --no-log-init --create-home --uid 10001 app \
-    && mkdir -p evals/results blobs \
-    && chown app:app evals/results blobs
+    && mkdir -p blobs \
+    && chown app:app blobs
 USER app
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    LLM_MODE=replay \
     WEB_DIST=/app/web/dist \
     BLOBS_DIR=/app/blobs
 
 EXPOSE 8000
 
-# Liveness: /api/health answers 200 while the app serves (its status field is about the
-# simulation, not the process). No curl in the slim image, so the venv's Python asks.
+# Liveness: /api/sim/state answers 200 while the app serves. No curl in the slim image, so
+# the venv's Python asks.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/sim/state', timeout=4)"]
 
-# The `agent` CLI of the venv, so `docker compose run --rm app eval run --mode replay`
-# and `... app db migrate` work too.
+# The `agent` CLI of the venv, so `docker compose run --rm app eval list` works too.
 ENTRYPOINT ["agent"]
 CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]

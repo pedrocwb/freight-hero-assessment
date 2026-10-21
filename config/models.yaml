@@ -1,7 +1,8 @@
-# Models per role, their fallbacks, prices and the bake-off candidates.
+# Models per role, their fallbacks and prices.
 #
-# Switching a model is a change to this file. Rule from the plan: cheap, light models
-# first; prompt and SOP improvement rounds run on them before any model is upgraded.
+# Switching a model is a change to this file, measured with the live evals first
+# (evals/RESULTS.md). Cheap, light models first; prompts and SOPs are improved on them
+# before any model is upgraded.
 #
 # Every model here comes from the public catalog https://openrouter.ai/api/v1/models,
 # fetched on 2026-10-19, and lists `tools`, `tool_choice` and `structured_outputs` among
@@ -11,54 +12,82 @@
 # Role settings:
 #   model             OpenRouter model id (primary)
 #   fallbacks         ordered; walked by the resilient wrapper (adapters/llm/resilient.py),
-#                     one OpenRouterModel per id. Pick another provider family for
-#                     availability.
+#                     one OpenRouterModel per entry, once the model before it failed (its
+#                     retries included). An entry is a model id, which runs with the
+#                     primary's settings, or a mapping with `model` and the settings below
+#                     it changes (temperature, max_tokens, reasoning_effort, provider).
+#                     Pick another provider family for availability, and a model that
+#                     passes the suites on its settings.
 #   temperature       null: not sent. Some reasoning models (Claude Haiku 5.5, GPT-6 Luna)
 #                     take no temperature; with require_parameters on, sending one leaves
-#                     them no endpoint, so a role on such a model sets null.
+#                     them no endpoint, so a role or a fallback on such a model sets null.
 #   max_tokens        completion cap, reasoning tokens included
 #   reasoning_effort  optional: none | minimal | low | medium | high
-#   provider          OpenRouter provider routing for the PRIMARY model only (fallbacks use
-#                     default routing). Pinned for reproducible evals; a pinned provider
-#                     that is down fails the call and the chain moves to the next model.
+#   provider          OpenRouter provider routing for the primary model (a fallback uses
+#                     default routing unless its entry sets one). `order` puts the
+#                     preferred provider first, the one the evals measured and the prices
+#                     below assume; `allow_fallbacks: true` lets OpenRouter serve the same
+#                     model from another provider that passes the other filters when that
+#                     one fails or rate limits, before the chain moves to another model.
+#                     The trade-off is reproducibility: such a call ran on another
+#                     endpoint, maybe at another price, and the run records which
+#                     (`Usage.provider`, from OpenRouter's routing metadata).
 #                     require_parameters defaults to true: only endpoints that honour every
-#                     parameter we send (notably tool_choice).
+#                     parameter we send (notably a forced tool_choice), which can leave a
+#                     single endpoint to route to.
+#
+# A call the provider rate limits or reports overloaded (HTTP 429, 502, 503, 529) is
+# retried on the same model first: at most twice, after about 1 s then 2 s with jitter, or
+# the provider's Retry-After when it is 8 s or less, and always within the call's timeout
+# (RetryPolicy in adapters/llm/resilient.py). Then the next fallback serves it.
 
 roles:
   gate:
     # Classification into a small enum, the cheapest reliable structured output.
     # GPT-4.1 Nano: no reasoning, fast first token, forced tool calls are solid.
+    # OpenAI first, then the same model on Azure (both force tool calls).
     model: openai/gpt-4.1-nano
     fallbacks: [google/gemini-2.5-flash-lite]
     temperature: 0
     max_tokens: 256
     provider:
       order: [openai]
-      allow_fallbacks: false
+      allow_fallbacks: true
 
   agent:
-    # The role was `decide` before wave 3. The agent loop (card W3-AGT) runs on it: read
-    # and action tools for at most the broker's `limits.max_steps` rounds and
-    # `limits.max_cost_usd`, then the AgentOutcome as a forced tool call. The wave 3
-    # bake-off (`make bakeoff`, evals/RESULTS.md "Wave 3") decides this model again on the
-    # loop; until then it is the wave 2 choice, made on the single plan:
-    # gpt-oss-120b, chosen in the bake-off (evals/RESULTS.md): 22/22 core scenarios at
-    # pass^3, the cheapest set that met every threshold, about $0.0002 per agent run and
-    # about $0.024 for a long load (100 messages, 80 decide calls). Claude Haiku 5.5 also
-    # passed 22/22 at about 5 times the cost (config/models.haiku.yaml). gpt-oss always
-    # reasons; low effort keeps the decide call near 5 s (p95 8 to 11 s).
-    # Pinned to DeepInfra at bf16, the cheapest full-precision endpoint; fp4/int4 ones
-    # are cheaper still but were not measured. The fallback is another family and takes
-    # `reasoning` too: the chain sends every fallback the same settings, and GPT-4.1
-    # has no endpoint for `reasoning` (it failed that way in the bake-off).
+    # The agent loop: one model round per graph step, with read and action tools, for at
+    # most the client's `limits.max_steps` rounds and `limits.max_cost_usd`, then `finish`.
+    # gpt-oss-120b is the only model of the bake-off that met every threshold
+    # (evals/RESULTS.md, "How the agent model was chosen"), at about $0.0007 per run;
+    # Claude Haiku 5.5 passed too, at about 3.6 times the cost, and is the first upgrade.
+    # gpt-oss always reasons; low effort keeps an agent call near 8 s (p95 about 13 s).
+    # DeepInfra at bf16 first, the endpoint the evals measured, and fallbacks allowed to
+    # any other bf16 endpoint that takes every parameter sent. On 2026-10-20 there is
+    # none: DekaLLM, AkashML and Crusoe serve gpt-oss at bf16 but take only
+    # `tool_choice: auto`, and every agent round forces a tool call (`required`, or the
+    # answer tool by name), so OpenRouter's routing reports "available=1" and a DeepInfra
+    # rate limit comes back as a 429 (evals/RESULTS.md): the same-model retries absorb
+    # most, the next fallback the rest. The other endpoints that force tool calls are fp16
+    # (Cerebras, $0.35 / $0.75 per 1M), fp4/int4 or of unlisted precision, none measured,
+    # so the filter stays at bf16 until one is.
+    # Then Claude Haiku 5.5, with the settings it passed the core suite with as the agent
+    # model (22/22 at k = 3): no temperature (no Anthropic endpoint takes one with
+    # require_parameters), its own reasoning default, a 2048-token cap. Gemini 2.5 Flash
+    # Lite is the last resort: it serves a round when both are down, but loses steps of
+    # the loop (evals/RESULTS.md), so a run it finishes is less reliable.
     model: openai/gpt-oss-120b
-    fallbacks: [google/gemini-2.5-flash-lite]
+    fallbacks:
+      - model: anthropic/claude-haiku-5.5
+        temperature: null
+        reasoning_effort: null
+        max_tokens: 2048
+      - google/gemini-2.5-flash-lite
     temperature: 0
     max_tokens: 4096
     reasoning_effort: low
     provider:
       order: [deepinfra]
-      allow_fallbacks: false
+      allow_fallbacks: true
       quantizations: [bf16]
 
   judge:
@@ -80,22 +109,12 @@ roles:
     max_tokens: 400
 
   extract:
-    # Wave 3 (card W3-DOC): classifies a document and extracts its values in one call,
-    # page images included (scans, phone photos), so a vision model. Settled once the
-    # document fixtures exist (one call each).
+    # Classifies a document and extracts its values in one call, page images included
+    # (scans, phone photos), so a vision model. About $0.0008 per one-page POD.
     model: google/gemini-2.5-flash
     fallbacks: [openai/gpt-4.1-mini]
     temperature: 0
     max_tokens: 4096
-
-  compile:
-    # Wave 3 (card W3-KNW): turns a broker's SOP document into a draft (sections, proposed
-    # intents and document requirements) and drafts eval scenarios. A person reviews every
-    # draft, and an upload that fails is retried by the editor, so no fallback.
-    model: openai/gpt-4.1-mini
-    fallbacks: []
-    temperature: 0
-    max_tokens: 8192
 
 # USD per 1M tokens and context length, as listed in the catalog on 2026-10-19.
 # cached_input: price of a prompt-cache read (omitted when the catalog lists none, then
@@ -125,8 +144,9 @@ pricing:
     input: 0.09
     output: 0.30
     context_length: 262144
-  # The pinned DeepInfra bf16 endpoint's price (the catalog's model-level price is
-  # 0.15 / 0.60). No cache-read price is listed, so cached tokens cost the input price.
+  # The preferred DeepInfra bf16 endpoint's price (the catalog's model-level price is
+  # 0.15 / 0.60); a call another bf16 endpoint serves is billed at that one's price.
+  # No cache-read price is listed, so cached tokens cost the input price.
   openai/gpt-oss-120b:
     input: 0.037
     output: 0.17
@@ -137,34 +157,34 @@ pricing:
     output: 0.50
     cached_input: 0.01
     context_length: 1000000
-  # Wave 3. Not re-fetched from the catalog with C0: check both before the bake-off
-  # (card W3-BAKE). An embedding has no output tokens.
+  # Not re-checked against the catalog since it was added.
   google/gemini-2.5-flash:
     input: 0.30
     output: 2.50
     cached_input: 0.075
     context_length: 1048576
-  openai/text-embedding-3-small:
-    input: 0.02
+  # TypeSafe's Jev decision model (the `decisions` block below). Output is free; the
+  # provider reports each call's cost in USD, which the adapter records. Text over about
+  # 32,000 bytes, or any image, runs in a slower, less accurate long-context mode.
+  typesafe/jev-1.14:
+    input: 0.042
     output: 0
-    context_length: 8192
+    context_length: 262144
 
-# The bake-off candidates (evals/RESULTS.md has the runs; config/models.NAME.yaml has each
-# candidate's set, run with --model-set NAME). Five at most: Mistral Small 3.2 was
-# measured too (config/models.mistral.yaml) and left the list when Claude Haiku 5.5 joined.
-# Open-weight ones (Qwen, gpt-oss) are served by several providers at different
-# quantizations: pin `provider.order` and `quantizations` when one goes on a role.
-# gpt-oss-120b always reasons: give it reasoning_effort: low. Claude Haiku 5.5 takes no
-# temperature: set it to null.
-bakeoff_candidates:
-  - openai/gpt-4.1-nano
-  - google/gemini-2.5-flash-lite
-  - qwen/qwen3-30b-a3b-instruct-2507
-  - openai/gpt-oss-120b
-  - anthropic/claude-haiku-5.5
-
-# The SOP index's embedding model (live and record only; scripted, replay and CI use a
-# deterministic fake, adapters/knowledge/fake_embedder.py). dim is the vector column's.
-embedding:
-  model: openai/text-embedding-3-small
-  dim: 1536
+# Roles that can run on a decision model instead of their chat model, through
+# OpenRouter's Decisions API (adapters/decisions/openrouter.py): a typed answer with
+# probabilities, no text. The gate runs on it by default (GATE_ENGINE=jev; llm runs the
+# gate's chat model above), with the policy of application/gate_decision.py. One model, no
+# fallback: the act threshold belongs to this model's probabilities, so an outage
+# escalates the run instead.
+#   model              pinned version; ~typesafe/jev-latest is an alias that moves
+#   attempt_timeout_s  one HTTP attempt; the call's own budget is the runtime's
+#   max_attempts       sends in all, retrying a 429, 502, 503, 529 or a dropped connection
+#   backoff_s          wait before the second send, doubled after, with jitter, at most
+#                      8 s (the chat models' RetryPolicy; a short Retry-After wins)
+decisions:
+  gate:
+    model: typesafe/jev-1.14
+    attempt_timeout_s: 10
+    max_attempts: 3
+    backoff_s: 0.5

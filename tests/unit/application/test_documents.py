@@ -3,7 +3,7 @@
 Owner: card W3-DOC (C0 wrote the tests of the null processor and of the pending
 document; DOC adds the pipeline's). The pipeline runs on the memory store with
 `FakePageReader` (text files are text, anything else goes down the vision path) and a
-`ScriptedModel` that answers the `extract` role.
+`FakeModel` (tests/fakes.py) that gives the `extract` role its forced answers.
 """
 
 import asyncio
@@ -18,15 +18,19 @@ import pytest
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
-from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
 from freight_agent.application.documents import DocumentPipeline, NullDocumentProcessor
+from freight_agent.application.prompts_documents import (
+    EXTRACT_SYSTEM_VARIABLES,
+    EXTRACT_USER_VARIABLES,
+)
 from freight_agent.domain.broker import (
+    Broker,
     DocumentRequirement,
     DocumentTypeDef,
     FieldDef,
     ObligationDef,
-    Rollout,
     new_broker,
 )
 from freight_agent.domain.documents import (
@@ -40,7 +44,9 @@ from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.llm import ImageInput, LlmError, ModelRole
+from freight_agent.ports.llm import ChatRequest, ImageInput, LlmError, ModelRole
+from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
@@ -60,14 +66,16 @@ def answer(name: str, **values: str | None) -> Extraction:
 
 
 class World:
-    """A memory store with load 481207, a blob store and the pipeline over them."""
+    """A memory store with load 481207, a blob store and the pipeline over them, and the
+    catalogs the knowledge index gives (`brokers`; none: the standard catalog)."""
 
     def __init__(self, load: Load) -> None:
         self.load = load
+        self.brokers: list[Broker] = []
         self.store = MemoryStore()
         self.clock = VirtualClock(AT)
         self.blobs = MemoryBlobStore()
-        self.model = ScriptedModel()
+        self.model = FakeModel()
         self.pages: Any = FakePageReader()
         self.attachments = 0
 
@@ -79,6 +87,8 @@ class World:
             llm=self.model,
             blobs=self.blobs,
             pages=self.pages,
+            knowledge=MemorySopIndex([], brokers=self.brokers),
+            prompt=PROMPTS.extract,
             timeout_s=12.0,
         )
 
@@ -162,9 +172,7 @@ class World:
                 "documents": (requirement, requirement),  # twice: closed once
             }
         )
-        async with self.store.unit_of_work() as uow:
-            await uow.brokers.save(broker)
-            await uow.commit()
+        self.brokers.append(broker)
         await self.save(
             Obligation.open(
                 obligation_id="obl_pod",
@@ -264,7 +272,8 @@ async def test_the_extract_call_carries_the_types_and_the_text_but_no_value_of_t
     (call,) = world.model.calls
     request = call.request
     assert (call.role, call.schema, request.images) == (EXTRACT, "Extraction", ())
-    assert (request.max_tool_rounds, request.timeout_s) == (0, 12.0)
+    assert not isinstance(request, ChatRequest)  # a forced answer, no tool loop
+    assert (request.timeout_s, request.prompt_version) == (12.0, PROMPTS.extract.version)
     assert "`pod` (Proof of delivery)" in request.system
     assert "`receiver` (text): The receiving facility (consignee)" in request.system
     assert "`rate_confirmation`" in request.system
@@ -377,11 +386,9 @@ async def test_a_seal_reported_by_a_message_of_the_load_is_checked(world: World)
 async def test_a_broker_without_document_types_sends_every_document_to_review(
     world: World,
 ) -> None:
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(
-            new_broker("northline", "Northline").model_copy(update={"document_types": ()})
-        )
-        await uow.commit()
+    world.brokers.append(
+        new_broker("northline", "Northline").model_copy(update={"document_types": ()})
+    )
     await world.receive()
 
     (event,) = await world.pipeline().process_pending()
@@ -392,26 +399,15 @@ async def test_a_broker_without_document_types_sends_every_document_to_review(
     )
 
 
-async def test_the_broker_version_of_the_load_gives_the_types(world: World) -> None:
-    """In a canary at 0 percent the load runs on the previous version, without its new type."""
+async def test_the_catalog_of_the_load_s_broker_gives_the_types(world: World) -> None:
+    """On the standard catalog a lumper receipt has no type; the broker's catalog adds it."""
     lumper = DocumentTypeDef(
         type_id="lumper_receipt",
         title="Lumper receipt",
         description="Paid to unload.",
         fields=(FieldDef(name="amount", description="Paid", kind="number"),),
     )
-    first = new_broker("northline", "Northline")
-    second = first.model_copy(
-        update={
-            "document_types": (*first.document_types, lumper),
-            "config_version": 2,
-            "rollout": Rollout(percent=0, previous_version=1),
-        }
-    )
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(first)
-        await uow.brokers.save(second)
-        await uow.commit()
+    standard = new_broker("northline", "Northline")
     await world.receive(b"LUMPER RECEIPT $250")
     lumper_answer = Extraction(
         type_id="lumper_receipt",
@@ -424,11 +420,7 @@ async def test_the_broker_version_of_the_load_gives_the_types(world: World) -> N
 
     assert "lumper_receipt" not in world.model.calls[0].request.system
     assert event.data["status"] == "needs_review"
-    async with world.store.unit_of_work() as uow:
-        await uow.brokers.save(
-            second.model_copy(update={"rollout": Rollout(percent=100, previous_version=1)})
-        )
-        await uow.commit()
+    world.brokers.append(standard.revised(document_types=(*standard.document_types, lumper)))
     await world.receive(b"LUMPER RECEIPT $250")
     (event,) = await world.pipeline().process_pending()
     assert (event.data["type_id"], event.data["status"]) == ("lumper_receipt", "processed")
@@ -659,3 +651,8 @@ async def test_a_document_that_cannot_be_saved_stays_pending_and_the_others_go_o
 
     assert [e.event_id for e in events] == ["doc:doc_2"]
     assert (await world.document("doc_1")).status is DocumentStatus.PENDING
+
+
+def test_the_extract_template_uses_every_variable_the_pipeline_computes() -> None:
+    assert PROMPTS.extract.system.variables == EXTRACT_SYSTEM_VARIABLES
+    assert PROMPTS.extract.user.variables == EXTRACT_USER_VARIABLES

@@ -8,7 +8,7 @@
 #                  is the first one: the tracker holds it as pending and no event is
 #                  created. No run, no model call, nothing changes.
 #   step 2  07:20  ping, risk low again: second confirmation, transition high -> low.
-#           07:21  run: intent delay_risk_low from code, decide only. delay_risk_cleared:
+#           07:21  run: intent delay_risk_low from code, agent only. delay_risk_cleared:
 #                  close the open ETA request as cancelled, send no message, create no
 #                  Hero task. Closing cancels T1.
 #   step 3  07:31  nothing fires: no run, no reminder SMS.
@@ -29,15 +29,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -61,11 +52,6 @@ steps:
   - at: "07:20"
     note: Second consecutive low ping confirms the downgrade; the run at 07:21 cancels the request.
     ping: {delay_risk: low}
-    script:
-      decide:
-        - actions:
-            - {type: close_obligation, kind: eta_request, status: cancelled}
-          rationale: delay_risk_cleared, the risk is back to normal, so close the open ETA request as cancelled and send nothing.
     expect:
       obligations:
         eta_request: {status: cancelled, attempts: 1}

@@ -2,7 +2,7 @@
 
 Owner: card W3-DOC. Rows live in `_State.documents`, so the store's transactions cover
 them like every other row. Lists sort by `received_at`, then by natural id (`doc_9`
-before `doc_10`), as the Postgres repository does.
+before `doc_10`).
 """
 
 from typing import TYPE_CHECKING

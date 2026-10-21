@@ -5,74 +5,85 @@ The API, the worker, the CLI and the eval harness all build the agent here, from
 Nothing else imports adapters into the core, and `application`, `domain` and `ports`
 never import this module (the import-linter contracts forbid it).
 
-Local mode is the default and needs no secret and no network: in-memory storage,
-recording gateways (there are no real integrations), recorded model answers (`replay`)
-and no tracing. Each outside system is switched on by its setting.
+The model is always the live one on OpenRouter, per role (`config/models.yaml`), behind
+the fallback chain, its retries and its circuit breakers. Storage is in memory and the
+gateways record what they would send (there are no real integrations). Tracing is
+LangGraph's own, on LangSmith, when `LANGSMITH_TRACING` is on and its key is set;
+switched on without its key it falls back to no tracing, with a warning that names no
+secret. Without `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run
+that needs the model escalates to a Hero, saying the key is missing.
 
-The Postgres adapter is imported lazily, by name, through `LazyAdapter`, so a memory-only
-deployment never loads the database driver; choosing it while it is missing is a clear
-error. Tracing that is switched on without its key falls back to no tracing, with a
-warning that names no secret.
+The gate's engine is `GATE_ENGINE` (`build_runtime_config`). On `jev`, the default, the
+gate runs on the decision model of `config/models.yaml` (`decisions.gate`), through
+OpenRouter's Decisions API (`build_decisions`); without the key it is a decision model
+whose every call fails saying so, as for the chat models. On `llm` it runs on the gate's
+chat model.
 
-Wave 3 adapters are found by name too, so a card plugs in without editing this file:
+The prompt templates come from the LangSmith Prompt Hub, at the references
+`config/prompts.yaml` pins (`build_prompts`), resolved once per process and checked
+against the code that renders them before anything runs. Without `LANGSMITH_API_KEY`, or
+with `PROMPTS_SOURCE=local`, they are the repository copy in `prompts/`, with a warning
+for the missing key; a pin the Hub cannot serve stops the start, naming the fix.
+
+Wave 3 adapters are found by name, through `LazyAdapter`, so a card plugs in without
+editing this file:
 
 | Adapter (card) | Name | Chosen when |
 |---|---|---|
-| SOP index (KNW) | `adapters.knowledge.postgres.knowledge_index` | `PERSISTENCE=postgres` |
 | Document pipeline (DOC) | `application.documents.DocumentPipeline` | always |
 | Page reader (DOC) | `adapters.documents.pdfium.PdfiumPageReader` | with the pipeline |
-| Embedder (KNW) | `adapters.knowledge.embeddings.OpenRouterEmbedder` | `LLM_MODE` live or record |
 
-Until one exists, the runtime behaves as before wave 3: it reads the `sops/` files, reads
-no document, and an embedder is a clear error in the live modes. Offline (`scripted`,
-`replay`) the embedder is `FakeEmbedder`, sized to the index's vectors: tools never run
-offline, so no real query needs a real vector.
+Until one exists, the runtime behaves as before wave 3: it reads no document. The runs
+read the SOP files of `SOPS_DIR`, and each client's catalog there.
 """
 
 import importlib
 import logging
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 from pydantic import SecretStr
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
 from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
+from freight_agent.adapters.decisions.unavailable import UnavailableDecisions
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
-from freight_agent.adapters.knowledge.fake_embedder import FakeEmbedder
-from freight_agent.adapters.knowledge.memory import MemorySopIndex, StoreSopIndex
-from freight_agent.adapters.llm.cassette import CassetteModel
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.llm.models_config import ModelsConfig, load_models_config
 from freight_agent.adapters.llm.openrouter import models_for_role
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
-from freight_agent.adapters.llm.scripted import ScriptedModel
-from freight_agent.adapters.observability.langsmith import LangSmithTracer, langsmith_client_factory
+from freight_agent.adapters.llm.unavailable import UnavailableModel
+from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.adapters.sop.files import FileSopRepository
+from freight_agent.adapters.prompts.hub import LangSmithPromptRegistry, langsmith_hub
+from freight_agent.adapters.prompts.local import LocalPromptRegistry
+from freight_agent.adapters.prompts.pins import load_pins
 from freight_agent.application.documents import NullDocumentProcessor
+from freight_agent.application.gate import GateEngine
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.ports.clock import Clock
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.knowledge import Embedder, SopIndex
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
+from freight_agent.ports.prompts import PromptError, PromptRegistry, Prompts
 from freight_agent.ports.repositories import UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
-from freight_agent.settings import LlmMode, PersistenceKind, Settings, is_set
+from freight_agent.settings import MissingSetting, Settings, is_set
 
 logger = logging.getLogger(__name__)
 
 # One role's fallback chain as (model id, model) pairs, primary first: the seam where
 # tests replace OpenRouter.
 LiveChain = Callable[[ModelsConfig, ModelRole, SecretStr], Sequence[tuple[str, LanguageModel]]]
-PersistenceBuilder = Callable[[Settings], UnitOfWorkFactory]
 
 
 class BootstrapError(Exception):
@@ -84,7 +95,7 @@ class LazyAdapter:
     """An adapter found by module and attribute name, imported only when chosen.
 
     So the root can register an adapter whose card has not merged yet, and a heavy
-    dependency (a database driver, a tracing SDK) loads only for the runs that use it.
+    dependency loads only for the runs that use it.
     """
 
     module: str
@@ -106,19 +117,10 @@ class LazyAdapter:
         return getattr(module, self.attribute, None)
 
 
-# `unit_of_work_factory(conninfo: str) -> UnitOfWorkFactory`, its pool opened on first use.
-POSTGRES = LazyAdapter("freight_agent.adapters.persistence.postgres", "unit_of_work_factory")
-# `knowledge_index(settings: Settings) -> SopIndex` (card W3-KNW).
-KNOWLEDGE_POSTGRES = LazyAdapter("freight_agent.adapters.knowledge.postgres", "knowledge_index")
-# `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, timeout_s=)` and
-# `PdfiumPageReader()` (card W3-DOC).
+# `DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=, knowledge=,
+# prompt=, timeout_s=)` and `PdfiumPageReader()` (card W3-DOC).
 DOCUMENT_PIPELINE = LazyAdapter("freight_agent.application.documents", "DocumentPipeline")
 PAGE_READER = LazyAdapter("freight_agent.adapters.documents.pdfium", "PdfiumPageReader")
-# `OpenRouterEmbedder(config: EmbeddingConfig, api_key: SecretStr)` (card W3-KNW).
-EMBEDDER_OPENROUTER = LazyAdapter(
-    "freight_agent.adapters.knowledge.embeddings", "OpenRouterEmbedder"
-)
-LIVE_MODES: tuple[LlmMode, ...] = ("live", "record")
 
 
 # --- language model ------------------------------------------------------------
@@ -132,61 +134,31 @@ def openrouter_chain(
 
 
 def build_llm(
-    settings: Settings,
-    *,
-    mode: LlmMode | None = None,
-    clock: Clock,
-    live_chain: LiveChain = openrouter_chain,
+    settings: Settings, *, clock: Clock, live_chain: LiveChain = openrouter_chain
 ) -> LanguageModel:
-    """The model the runtime calls, for `mode` (default: `settings.llm_mode`).
-
-    - `scripted`: a `ScriptedModel`; tests and the scripted eval path push its outputs.
-    - `replay`: per role, the recorded answers of the role's primary model. No key.
-    - `live`: per role, the fallback chain behind circuit breakers on `clock`.
-    - `record`: per role, the primary model, its answers saved for `replay`.
+    """The model the runtime calls: per role, the fallback chain behind circuit breakers
+    on `clock`. Raises `MissingSetting` without `OPENROUTER_API_KEY`.
 
     Every role in `config/models.yaml` gets a model, so the eval judge, the simulated
-    driver, the document extractor and the SOP compiler are served by the same router as
-    the gate and the agent.
+    driver and the document extractor are served by the same router as the gate and the
+    agent.
     """
-    mode = mode or settings.llm_mode
-    if mode == "scripted":
-        return ScriptedModel()
     config = _models_config(settings.models_config)
-    roles = tuple(config.roles)
-    if mode == "replay":
-        return RoleRouter(
-            {
-                role: CassetteModel(settings.cassettes_dir, config.role(role).model, "replay")
-                for role in roles
-            }
-        )
-    if mode not in LIVE_MODES:
-        raise ValueError(f"unknown llm mode {mode!r}: use scripted, replay, live or record")
     key = settings.require_openrouter_key()
-    if mode == "live":
-        return RoleRouter(
-            {role: ResilientModel(live_chain(config, role, key), clock) for role in roles}
-        )
     return RoleRouter(
-        {
-            role: CassetteModel(
-                settings.cassettes_dir,
-                config.role(role).model,
-                "record",
-                inner=_primary(live_chain(config, role, key)),
-            )
-            for role in roles
-        }
+        {role: ResilientModel(live_chain(config, role, key), clock) for role in config.roles}
     )
 
 
-def _primary(chain: Sequence[tuple[str, LanguageModel]]) -> LanguageModel:
-    """Record from the primary alone. Cassettes are filed under the primary's id and
-    replayed as its answers, so a fallback's answer must never be recorded there: a
-    failed primary call fails the recording run, and the next run records it again."""
-    (_, model), *_ = chain
-    return model
+def platform_llm(
+    settings: Settings, *, clock: Clock, live_chain: LiveChain = openrouter_chain
+) -> LanguageModel:
+    """`build_llm`, or without the key a model whose every call fails saying so: the
+    platform starts anyway, and each run that needs the model escalates to a Hero."""
+    try:
+        return build_llm(settings, clock=clock, live_chain=live_chain)
+    except MissingSetting as exc:
+        return UnavailableModel(str(exc))
 
 
 def _models_config(path: Path) -> ModelsConfig:
@@ -199,41 +171,54 @@ def _models_config(path: Path) -> ModelsConfig:
         ) from None
 
 
+def build_decisions(settings: Settings) -> DecisionModel:
+    """The gate's decision model on OpenRouter (`decisions.gate` of `config/models.yaml`),
+    or without `OPENROUTER_API_KEY` one whose every call fails saying so. A models file
+    without a `decisions.gate` entry is a `BootstrapError`."""
+    config = _models_config(settings.models_config)
+    entry = config.decisions.get(ModelRole.GATE)
+    if entry is None:
+        raise BootstrapError(
+            f"GATE_ENGINE=jev, and {settings.models_config} has no decisions.gate entry: add "
+            "one (the decision model), or set GATE_ENGINE=llm"
+        )
+    try:
+        key = settings.require_openrouter_key()
+    except MissingSetting as exc:
+        return UnavailableDecisions(str(exc))
+    return OpenRouterDecisions(entry, config.pricing_for(entry.model), key)
+
+
+def gate_decisions(settings: Settings) -> DecisionModel | None:
+    """`build_decisions` when the gate runs on it (`GATE_ENGINE=jev`), else None."""
+    return build_decisions(settings) if settings.gate_engine == GateEngine.JEV else None
+
+
+def build_runtime_config(settings: Settings) -> RuntimeConfig:
+    """The process's runtime settings: the gate's engine and its act threshold."""
+    return RuntimeConfig(
+        gate_engine=GateEngine(settings.gate_engine),
+        gate_act_threshold=settings.gate_act_threshold,
+    )
+
+
 # --- persistence ---------------------------------------------------------------
 
 
-def _memory(settings: Settings) -> UnitOfWorkFactory:
-    """One store per runtime, shared by every unit of work it opens."""
-    return MemoryStore().unit_of_work
-
-
-def _postgres(settings: Settings) -> UnitOfWorkFactory:
-    factory = POSTGRES.load()
-    if factory is None:
-        raise BootstrapError(
-            "PERSISTENCE=postgres, but the Postgres adapter is not available yet "
-            f"({POSTGRES.module}.{POSTGRES.attribute}): set PERSISTENCE=memory"
-        )
-    return factory(settings.require_database_url().get_secret_value())
-
-
-PERSISTENCE: Mapping[PersistenceKind, PersistenceBuilder] = MappingProxyType(
-    {"memory": _memory, "postgres": _postgres}
-)
-
-
 def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
-    return PERSISTENCE[settings.persistence](settings)
+    """One in-memory store per runtime, shared by every unit of work it opens."""
+    return MemoryStore().unit_of_work
 
 
 # --- tracing -------------------------------------------------------------------
 
 
-def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = None) -> Tracer:
-    """LangSmith when `LANGSMITH_TRACING` is on and its key is set, otherwise no tracing.
+def build_tracer(settings: Settings) -> Tracer:
+    """Trace links on LangSmith when `LANGSMITH_TRACING` is on and its key is set (and
+    LangGraph's native tracing switched on), otherwise no tracing.
 
-    Tracing is optional and must never stop the agent, so a missing key or a missing
-    adapter falls back to `NullTracer` with a warning (which names no secret).
+    Tracing is optional and must never stop the agent, so a missing key falls back to
+    `NullTracer` with a warning (which names no secret).
     """
     if not settings.langsmith_tracing:
         return NullTracer()
@@ -242,10 +227,9 @@ def build_tracer(settings: Settings, *, sop_version: Callable[[], str] | None = 
         logger.warning("LANGSMITH_TRACING is on but LANGSMITH_API_KEY is not set: no tracing")
         return NullTracer()
     enable_native_tracing(settings)
-    return LangSmithTracer(
-        langsmith_client_factory(key.get_secret_value()),
+    return LangSmithLinks(
+        langsmith_client_factory(key.get_secret_value(), os.environ.get("LANGSMITH_ENDPOINT")),
         project_name=settings.langsmith_project,
-        sop_version=sop_version,
     )
 
 
@@ -262,65 +246,50 @@ def enable_native_tracing(settings: Settings) -> None:
     os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
 
 
+# --- prompts -------------------------------------------------------------------
+
+
+def build_prompt_registry(settings: Settings) -> PromptRegistry:
+    """The Hub, at the pins of `PROMPTS_CONFIG` (every role at `PROMPTS_TAG` when it is
+    set), or the repository copy in `PROMPTS_DIR`: with `PROMPTS_SOURCE=local`, or
+    without `LANGSMITH_API_KEY` (a warning, which names no secret)."""
+    local = LocalPromptRegistry(settings.prompts_dir)
+    if settings.prompts_source == "local":
+        return local
+    key = settings.langsmith_api_key
+    if not is_set(key):
+        logger.warning(
+            "LANGSMITH_API_KEY is not set: the prompts are the repository copy in %s, "
+            "not the LangSmith Hub's pinned versions",
+            settings.prompts_dir,
+        )
+        return local
+    pins = load_pins(settings.prompts_config, tag=settings.prompts_tag)
+    hub = langsmith_hub(key.get_secret_value(), os.environ.get("LANGSMITH_ENDPOINT"))
+    return LangSmithPromptRegistry(hub, pins)
+
+
+def build_prompts(settings: Settings) -> Prompts:
+    """Every role's template. The Hub's are pulled once per process and kept (the
+    registry's cache), so a platform reset or a new runtime reads the same versions."""
+    try:
+        return Prompts.resolve(build_prompt_registry(settings))
+    except PromptError as exc:
+        raise BootstrapError(str(exc)) from None
+
+
 # --- knowledge, blobs and documents ----------------------------------------------
 
 
-def build_knowledge(
-    settings: Settings, *, uow_factory: UnitOfWorkFactory | None = None
-) -> SopIndex:
-    """The SOP index the runs read.
-
-    - `PERSISTENCE=postgres`: the sections published in the database
-      (`adapters.knowledge.postgres.knowledge_index`), embedding a live `search_sop` query
-      with `build_embedder`; without that adapter, the `sops/` tree.
-    - The memory store, given its unit of work: `StoreSopIndex`, the versions published in
-      that store, with the `sops/` tree for every layer never published. A broker onboarded
-      through the API therefore reaches the runs of the same simulation.
-    - Otherwise the `sops/` tree (`MemorySopIndex.from_files`).
-    """
-    if settings.persistence == "postgres":
-        factory = KNOWLEDGE_POSTGRES.load()
-        if factory is not None:
-            return factory(settings, embedder=build_embedder(settings))
-        logger.info("no Postgres SOP index: the runs read the SOP files in SOPS_DIR")
-    elif uow_factory is not None:
-        return StoreSopIndex(uow_factory, files=settings.sops_dir)
+def build_knowledge(settings: Settings) -> SopIndex:
+    """The SOP index the runs read: the `sops/` tree (`MemorySopIndex.from_files`), read on
+    every call, so an edited file applies to the next run."""
     return MemorySopIndex.from_files(settings.sops_dir)
 
 
 def build_blobs(settings: Settings) -> BlobStore:
-    """Attachment and SOP file bytes, under `BLOBS_DIR` (created on the first upload)."""
+    """Attachment bytes, under `BLOBS_DIR` (created on the first upload)."""
     return FsBlobStore(settings.blobs_dir)
-
-
-def build_embedder(settings: Settings, *, mode: LlmMode | None = None) -> Embedder:
-    """What the SOP index embeds with: the sections of a version at publish, and a live
-    `search_sop` query. For `mode` (default: `settings.llm_mode`):
-
-    - `live` and `record`: OpenRouter's embeddings endpoint, with the model and the
-      dimensions of `embedding` in the models config (card W3-KNW). Needs the key. There
-      is no embedding cassette: a recording run embeds live.
-    - `scripted` and `replay`: `FakeEmbedder`, offline and deterministic, with the same
-      dimensions, so its vectors fit the index's column.
-    """
-    mode = mode or settings.llm_mode
-    embedding = _models_config(settings.models_config).embedding
-    if mode not in LIVE_MODES:
-        return FakeEmbedder() if embedding is None else FakeEmbedder(dim=embedding.dim)
-    if embedding is None:
-        raise BootstrapError(
-            f"LLM_MODE={mode} embeds SOP sections, but {settings.models_config} has no "
-            "`embedding` entry (model and dim): add it, or set LLM_MODE=replay"
-        )
-    key = settings.require_openrouter_key()
-    factory = EMBEDDER_OPENROUTER.load()
-    if factory is None:
-        raise BootstrapError(
-            f"LLM_MODE={mode}, but the OpenRouter embedder is not available yet "
-            f"({EMBEDDER_OPENROUTER.module}.{EMBEDDER_OPENROUTER.attribute}): "
-            "set LLM_MODE=replay"
-        )
-    return factory(embedding, key)
 
 
 def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
@@ -336,6 +305,8 @@ def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
         llm=deps.llm,
         blobs=deps.blobs,
         pages=pages(),
+        knowledge=deps.knowledge,
+        prompt=deps.prompts.extract,
         timeout_s=deps.config.llm_timeout_s,
     )
 
@@ -352,26 +323,34 @@ def build_runtime_deps(
     persistence: UnitOfWorkFactory | None = None,
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
+    tracer: Tracer | None = None,
+    prompts: Prompts | None = None,
+    decisions: DecisionModel | None = None,
 ) -> RuntimeDeps:
     """Every port of the runtime, from the settings; what the caller passes wins.
 
     `gateways` defaults to recording fakes: this build has no real integrations, so
-    deliveries are recorded, not sent.
+    deliveries are recorded, not sent. `prompts` default to `build_prompts`. The
+    decision model is built only for the jev gate engine (`build_decisions`).
     """
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
     if knowledge is None:
-        knowledge = build_knowledge(settings, uow_factory=uow_factory)
+        knowledge = build_knowledge(settings)
+    if decisions is None:
+        decisions = gate_decisions(settings)
     deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=clock,
         ids=UuidIdGenerator(),
-        llm=build_llm(settings, clock=clock) if llm is None else llm,
+        llm=platform_llm(settings, clock=clock) if llm is None else llm,
         knowledge=knowledge,
         gateways=RecordingGateways().as_gateways() if gateways is None else gateways,
-        tracer=build_tracer(settings, sop_version=FileSopRepository(settings.sops_dir).version),
+        tracer=build_tracer(settings) if tracer is None else tracer,
         blobs=build_blobs(settings) if blobs is None else blobs,
-        config=RuntimeConfig(),
+        prompts=build_prompts(settings) if prompts is None else prompts,
+        config=build_runtime_config(settings),
+        decisions=decisions,
     )
     return replace(deps, documents=build_documents(deps))
 
@@ -385,6 +364,9 @@ def build_runtime(
     persistence: UnitOfWorkFactory | None = None,
     knowledge: SopIndex | None = None,
     blobs: BlobStore | None = None,
+    tracer: Tracer | None = None,
+    prompts: Prompts | None = None,
+    decisions: DecisionModel | None = None,
 ) -> AgentRuntime:
     """The agent, wired from the settings (see `build_runtime_deps`)."""
     return AgentRuntime(
@@ -396,6 +378,9 @@ def build_runtime(
             persistence=persistence,
             knowledge=knowledge,
             blobs=blobs,
+            tracer=tracer,
+            prompts=prompts,
+            decisions=decisions,
         )
     )
 
@@ -414,7 +399,7 @@ def build_simulation(
     settings: Settings, start: datetime, *, llm: LanguageModel | None = None
 ) -> Simulation:
     """A simulation starting at `start` (timezone-aware). Storage and model come from the
-    settings, as for the product; `llm` replaces the model (a scripted one, in tests)."""
+    settings, as for the product; `llm` replaces the model (a fake one, in tests)."""
     clock = VirtualClock(start)
     gateways = RecordingGateways()
     runtime = build_runtime(settings, clock=clock, gateways=gateways.as_gateways(), llm=llm)

@@ -1,9 +1,5 @@
-"""Command line entry point: `agent eval run|list|report|lint|draft`, `agent sop ...` (in
-`cli_sop.py`), `agent serve` and `agent db migrate`.
-
-`--broker-file` (a broker export, `evals/brokers/README.md`) plays a suite on one broker's
-catalog and published sections; `agent eval lint` lists the broker's intents no scenario
-covers, and `agent eval draft` drafts scenarios for them on the `compile` role.
+"""Command line entry point: `agent eval run|list`, `agent sop ...` (in `cli_sop.py`),
+`agent prompts ...` (in `cli_prompts.py`) and `agent serve`.
 
 Paths come from `Settings` (environment or `.env`; the defaults are relative to the
 repository root), so the CLI, the API and the evals read the same folders.
@@ -23,27 +19,26 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
+from freight_agent.cli_prompts import prompts_app
 from freight_agent.cli_sop import sop_app
-from freight_agent.settings import LlmMode, Settings
+from freight_agent.settings import MissingSetting, Settings
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from freight_agent.domain.broker import Broker
-    from freight_agent.evalkit.brokers import BrokerExport, LintIssue
-    from freight_agent.evalkit.graders import Budget
-    from freight_agent.evalkit.langsmith_experiment import LangSmithExperiment
-    from freight_agent.evalkit.metadata import RunMetadata
-    from freight_agent.evalkit.spec import Scenario
-    from freight_agent.evalkit.suite import ModelFactory
+    from freight_agent.evalkit.experiment import ExperimentRun
 
 app = typer.Typer(no_args_is_help=True, help="Freight load agent.", add_completion=False)
-eval_app = typer.Typer(no_args_is_help=True, help="Run, list and report the scenario evals.")
+eval_app = typer.Typer(
+    no_args_is_help=True, help="Run the scenario evals as LangSmith experiments, list them."
+)
 app.add_typer(eval_app, name="eval")
 app.add_typer(sop_app, name="sop")
+app.add_typer(prompts_app, name="prompts")
 
-DEFAULT_MODEL_SET = "default"
-HARNESS_ERROR = 2  # `evalkit.suite.ExitCode.HARNESS_ERROR`, without importing the harness
+# Exit codes of `agent eval run`.
+PASSED = 0
+FAILED = 1  # a regression scenario failed pass^k
+HARNESS_ERROR = 2  # the run could not start: a bad scenario, no key, LangSmith down
+COST_CAP = 3  # the cost cap stopped the run before every example played
 
 
 class UsageProblem(Exception):
@@ -78,315 +73,207 @@ def main(
 @eval_app.command("run")
 def eval_run(
     suite: Annotated[str, typer.Option(help="Scenario folder under evals/scenarios.")] = "core",
-    mode: Annotated[
-        LlmMode,
-        typer.Option(
-            help="scripted: each scenario's own script, no model. replay: recorded answers "
-            "(evals/cassettes). live: the models of the model set. record: live, and save "
-            "the answers for replay."
-        ),
-    ] = "scripted",
-    k: Annotated[
-        int,
-        typer.Option("--k", min=1, help="Trials per scenario. A scenario passes when all pass."),
-    ] = 1,
-    model_set: Annotated[
-        str,
-        typer.Option(
-            help="'default' is config/models.yaml; NAME is config/models.NAME.yaml.",
-        ),
-    ] = DEFAULT_MODEL_SET,
-    cost_cap_usd: Annotated[
-        float, typer.Option(min=0, help="Stop the run once it has spent more than this.")
-    ] = 5.0,
-    tags: Annotated[
-        list[str] | None,
-        typer.Option(help="Only scenarios with any of these tags. Repeat or comma-separate."),
-    ] = None,
     scenario: Annotated[
         list[str] | None,
         typer.Option(help="Only these scenario ids. Repeat or comma-separate."),
     ] = None,
-    compare: Annotated[
-        Path | None,
-        typer.Option(help="Baseline to compare with: a results folder or its results.json."),
-    ] = None,
-    out: Annotated[
-        Path | None,
-        typer.Option(help="Folder for the run folders.", show_default="EVALS_DIR/results"),
-    ] = None,
-    max_tokens_per_run: Annotated[
-        int | None, typer.Option(min=1, help="Fail a trial when one run uses more tokens.")
-    ] = None,
-    max_latency_ms_per_run: Annotated[
-        int | None,
-        typer.Option(min=1, help="Fail a trial when one run's model calls take longer."),
-    ] = None,
-    langsmith: Annotated[
-        bool,
+    k: Annotated[
+        int,
+        typer.Option("--k", min=1, help="Repetitions per scenario: pass^k needs all to pass."),
+    ] = 1,
+    cost_cap_usd: Annotated[
+        float,
+        typer.Option(min=0, help="Stop playing examples once the experiment spent this."),
+    ] = 0.25,
+    concurrency: Annotated[int, typer.Option(min=1, help="Examples played at the same time.")] = 4,
+    prompt_tag: Annotated[
+        str | None,
         typer.Option(
-            "--langsmith",
-            help="Record the run as a LangSmith experiment (live and record modes only): the "
-            "suite's scenarios as a dataset, one row per trial with its steps and model calls, "
-            "and the graders' verdicts as feedback. Needs LANGSMITH_API_KEY.",
+            help="Run every prompt at this Hub tag (a candidate) instead of its pin in "
+            "config/prompts.yaml.",
+            show_default="the pins",
         ),
-    ] = False,
-    broker_file: Annotated[
-        Path | None,
+    ] = None,
+    gate_engine: Annotated[
+        str | None,
         typer.Option(
-            help="Play every scenario on this broker export (evals/brokers/*.json): its "
-            "catalog in the trial's store, its published sections in the SOP index."
+            help="The gate's engine: llm (the gate's chat model) or jev (the decision model).",
+            show_default="GATE_ENGINE, else jev",
         ),
     ] = None,
 ) -> None:
-    """Run a suite, grade it, write results.json and report.md, and exit with the verdict.
+    """Run a suite live, as a LangSmith experiment, and print its pass^k table.
 
-    Exit code 0: every regression scenario passed. 1: a regression scenario failed.
+    Spends from OPENROUTER_API_KEY and needs LANGSMITH_API_KEY.
 
-    Exit code 2: the harness could not run (a bad scenario, a missing cassette or key).
+    Exit code 0: every regression scenario passed pass^k. 1: one failed.
 
-    Exit code 3: the cost cap stopped the run.
+    Exit code 2: the run could not start (a bad scenario, a missing key, LangSmith down).
+
+    Exit code 3: the cost cap stopped the run before every example played.
     """
+    settings = Settings()
+    if prompt_tag:
+        settings = settings.model_copy(update={"prompts_tag": prompt_tag})
+    if gate_engine:
+        if gate_engine not in ("llm", "jev"):
+            typer.echo(f"error: --gate-engine is llm or jev, not {gate_engine!r}", err=True)
+            raise typer.Exit(HARNESS_ERROR)
+        settings = settings.model_copy(update={"gate_engine": gate_engine})
     try:
         code = _run(
-            settings=Settings(),
+            settings,
             suite=suite,
-            mode=mode,
-            k=k,
-            model_set=model_set,
-            cost_cap_usd=cost_cap_usd,
-            tags=_split(tags),
             ids=_split(scenario),
-            baseline=compare,
-            out=out,
-            budget=_budget(max_tokens_per_run, max_latency_ms_per_run),
-            langsmith=langsmith,
-            broker=_read_broker(broker_file),
+            k=k,
+            cost_cap_usd=cost_cap_usd,
+            concurrency=concurrency,
         )
-    except UsageProblem as exc:
+    except (UsageProblem, MissingSetting) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(HARNESS_ERROR) from None
     raise typer.Exit(code)
 
 
 def _run(
+    settings: Settings,
     *,
-    settings: Settings,
     suite: str,
-    mode: LlmMode,
-    k: int,
-    model_set: str,
-    cost_cap_usd: float,
-    tags: list[str],
     ids: list[str],
-    baseline: Path | None,
-    out: Path | None,
-    budget: "Budget | None",
-    langsmith: bool = False,
-    broker: "BrokerExport | None" = None,
-) -> int:
-    from freight_agent.adapters.knowledge.memory import MemorySopIndex
-    from freight_agent.evalkit.brokers import broker_index
-    from freight_agent.evalkit.metadata import collect_metadata
-    from freight_agent.evalkit.report import (
-        REPORT_FILE,
-        ReportError,
-        compare,
-        read_baseline,
-        render_scenario_line,
-        render_summary,
-        write_run,
-    )
-    from freight_agent.evalkit.suite import SuiteError, SuiteRunner, discover, select
-
-    if langsmith and mode not in ("live", "record"):
-        raise UsageProblem(
-            "--langsmith records live runs only: scripted and replay runs measure the code, "
-            "not the model (use --mode live)"
-        )
-    if langsmith and settings.langsmith_api_key is None:
-        raise UsageProblem("--langsmith needs LANGSMITH_API_KEY (environment or .env)")
-    models_config = models_config_for(settings, model_set)
-    # The flags win over the environment, and the metadata shows what actually ran.
-    settings = settings.model_copy(update={"models_config": models_config, "llm_mode": mode})
-    if not settings.sops_dir.is_dir():
-        raise UsageProblem(f"the SOP folder {settings.sops_dir} does not exist (SOPS_DIR)")
-    try:
-        suite_scenarios = discover(settings.evals_dir, suite)
-        scenarios = select(suite_scenarios, tags=tags, ids=ids)
-        before = read_baseline(baseline) if baseline is not None else None
-    except (SuiteError, ReportError) as exc:
-        raise UsageProblem(str(exc)) from exc
-    factory = _checked_model_factory(settings, mode)
-    knowledge = MemorySopIndex.from_files(settings.sops_dir)
-    sop_version = knowledge.content_version
-    if broker is not None:
-        played = broker_index(knowledge, broker)
-        sop_version = getattr(played, "content_version", sop_version)
-    metadata = collect_metadata(
-        created_at=datetime.now(UTC),
-        mode=mode,
-        model_set=model_set,
-        sop_version=sop_version,
-        models_config=models_config,
-        repo=Path.cwd(),
-        settings=settings.describe(),
-        broker=None if broker is None else broker.label(),
-    )
-    experiment = (
-        _langsmith_experiment(settings, suite, suite_scenarios, metadata, k, cost_cap_usd)
-        if langsmith
-        else None
-    )
-    runner = SuiteRunner(
-        evals_dir=settings.evals_dir,
-        knowledge=knowledge,
-        mode=mode,
-        model_factory=factory,
-        budget=budget,
-        observer=experiment,
-        broker=broker,
-    )
-    on_broker = "" if broker is None else f", broker {broker.label()}"
-    typer.echo(f"{suite}: {len(scenarios)} scenarios, mode {mode}, k={k}{on_broker}")
-    if experiment is not None:
-        linked = f", agent {settings.langsmith_project}" if experiment.linked_to_agent else ""
-        typer.echo(f"langsmith experiment: {experiment.name}{linked}")
-    result = asyncio.run(
-        runner.run(
-            scenarios,
-            suite=suite,
-            metadata=metadata,
-            k=k,
-            cost_cap_usd=cost_cap_usd,
-            on_scenario=lambda summary: typer.echo(render_scenario_line(summary)),
-        )
-    )
-    comparison = compare(result, before) if before is not None else None
-    folder = write_run(result, out or settings.evals_dir / "results", comparison)
-    typer.echo("")
-    typer.echo(render_summary(result, comparison, report=folder / REPORT_FILE))
-    if experiment is not None:
-        url = experiment.finish(result)
-        typer.echo(f"langsmith: {experiment.name}" + (f"\n  {url}" if url else ""))
-    return int(result.exit_code)
-
-
-def _langsmith_experiment(
-    settings: Settings,
-    suite: str,
-    scenarios: "Sequence[Scenario]",
-    metadata: "RunMetadata",
     k: int,
     cost_cap_usd: float,
-) -> "LangSmithExperiment":
-    """The experiment, created before the first trial: a live run never spends money for
-    an experiment LangSmith cannot store."""
+    concurrency: int,
+) -> int:
     import os
 
     from langsmith import Client
 
-    from freight_agent.evalkit.langsmith_experiment import (
-        LangSmithExperiment,
+    from freight_agent.adapters.clock import SystemClock
+    from freight_agent.adapters.knowledge.memory import MemorySopIndex
+    from freight_agent.bootstrap import (
+        BootstrapError,
+        build_llm,
+        build_prompts,
+        build_runtime_config,
+        enable_native_tracing,
+        gate_decisions,
+    )
+    from freight_agent.evalkit.experiment import (
+        CostMeter,
         LangSmithUnavailable,
+        ScenarioTarget,
+        run_experiment,
     )
+    from freight_agent.evalkit.metadata import collect_metadata
+    from freight_agent.evalkit.suite import SuiteError, discover, select
 
-    key = settings.langsmith_api_key
-    assert key is not None  # checked with the other flags
-    client = Client(
-        api_key=key.get_secret_value(), api_url=os.environ.get("LANGSMITH_ENDPOINT") or None
-    )
-    experiment = LangSmithExperiment(
-        client,  # pyright: ignore[reportArgumentType]
+    langsmith_key = settings.require_langsmith_key()
+    settings.require_openrouter_key()
+    build_llm(settings, clock=SystemClock())  # a broken models file stops the run here
+    if not settings.sops_dir.is_dir():
+        raise UsageProblem(f"the SOP folder {settings.sops_dir} does not exist (SOPS_DIR)")
+    try:
+        suite_scenarios = discover(settings.evals_dir, suite)
+        chosen = select(suite_scenarios, ids=ids)
+    except SuiteError as exc:
+        raise UsageProblem(str(exc)) from exc
+    try:
+        prompts = build_prompts(settings)  # each pin pulled once, before anything plays
+        decisions = gate_decisions(settings)  # the jev engine's model, else None
+    except BootstrapError as exc:
+        raise UsageProblem(str(exc)) from exc
+    config = build_runtime_config(settings)
+    # The examples' traces carry each graph node and model round: LangChain traces them
+    # into the experiment through LangSmith's context.
+    enable_native_tracing(settings)
+    knowledge = MemorySopIndex.from_files(settings.sops_dir)
+    metadata = collect_metadata(
+        created_at=datetime.now(UTC),
         suite=suite,
-        dataset_scenarios=scenarios,
-        metadata=metadata,
         k=k,
         cost_cap_usd=cost_cap_usd,
-        agent=settings.langsmith_project,  # the agent page of the tracing project
+        sop_version=knowledge.content_version,
+        models_config=settings.models_config,
+        prompts=prompts,
+        repo=Path.cwd(),
+        gate_engine=config.gate_engine.value,
+        gate_act_threshold=config.gate_act_threshold,
     )
+    target = ScenarioTarget(
+        {s.id: s for s in suite_scenarios},
+        evals_dir=settings.evals_dir,
+        knowledge=knowledge,
+        prompts=prompts,
+        model_factory=lambda: build_llm(settings, clock=SystemClock()),
+        meter=CostMeter(cap_usd=cost_cap_usd),
+        config=config,
+        decisions=decisions,
+    )
+    client = Client(
+        api_key=langsmith_key.get_secret_value(),
+        api_url=os.environ.get("LANGSMITH_ENDPOINT") or None,
+    )
+    typer.echo(
+        f"{suite}: {len(chosen)} scenarios, k={k}, live on OpenRouter, cost cap ${cost_cap_usd:.2f}"
+    )
+    typer.echo("prompts: " + ", ".join(p.describe() for p in prompts.all()))
+    typer.echo(f"gate engine: {config.gate_engine.value}")
     try:
-        experiment.start()
+        run = asyncio.run(
+            run_experiment(
+                client,
+                suite=suite,
+                suite_scenarios=suite_scenarios,
+                chosen=chosen,
+                target=target,
+                metadata=metadata,
+                k=k,
+                agent=settings.langsmith_project,
+                concurrency=concurrency,
+            )
+        )
     except LangSmithUnavailable as exc:
         raise UsageProblem(f"LangSmith: {exc}; nothing was run") from exc
-    return experiment
+    typer.echo(render_table(run, k))
+    return exit_code(run)
 
 
-def models_config_for(settings: Settings, model_set: str) -> Path:
-    """The models file of a model set: `default` is MODELS_CONFIG (config/models.yaml), any
-    other NAME is the file next to it named models.NAME.yaml."""
-    base = settings.models_config
-    if model_set == DEFAULT_MODEL_SET:
-        path = base
-    else:
-        path = base.with_name(f"{base.stem}.{model_set}{base.suffix}")
-    if not path.is_file():
-        raise UsageProblem(
-            f"unknown model set {model_set!r}: {path} does not exist "
-            f"(use --model-set {DEFAULT_MODEL_SET} for {base})"
-        )
-    return path
+def render_table(run: "ExperimentRun", k: int) -> str:
+    """One line per scenario (pass^k, the repetitions that passed, the first failure),
+    then the totals and the experiment's link."""
+    lines = [f"experiment {run.name}"]
+    width = max((len(o.scenario.id) for o in run.outcomes), default=10)
+    for o in run.outcomes:
+        verdict = "FAIL" if not all(o.passed) else ("pass" if o.pass_hat_k else "not run")
+        line = f"  {o.scenario.id:<{width}}  {verdict:<7}  {sum(o.passed)}/{k}  ${o.cost_usd:.4f}"
+        first = next((f for fs in o.failures for f in fs), None)
+        if first is not None:
+            line += f"  {first.describe()[:160]}"
+        lines.append(line)
+    passed = sum(o.pass_hat_k for o in run.outcomes)
+    lines.append(f"pass^{k}: {passed}/{len(run.outcomes)} scenarios, ${run.cost_usd:.4f} spent")
+    if run.not_run:
+        lines.append(f"not run (cost cap): {', '.join(run.not_run)}")
+    lines.append(f"  {run.url}" if run.url else "  (no experiment link)")
+    return "\n".join(lines)
 
 
-def eval_model_factory(settings: Settings, mode: LlmMode) -> "ModelFactory | None":
-    """The model of each trial for replay, live and record, from the composition root.
+def exit_code(run: "ExperimentRun") -> int:
+    from freight_agent.evalkit.experiment import regressions
 
-    None in scripted mode: the runner feeds each scenario's own script. The factory gets
-    each trial's virtual clock, which the circuit breakers of a live model read.
-    """
-    if mode == "scripted":
-        return None
-    from freight_agent.bootstrap import build_llm
-    from freight_agent.ports.clock import Clock
-    from freight_agent.ports.llm import LanguageModel
-
-    def build(clock: Clock) -> LanguageModel:
-        return build_llm(settings, mode=mode, clock=clock)
-
-    return build
-
-
-def _checked_model_factory(settings: Settings, mode: LlmMode) -> "ModelFactory | None":
-    """Build one model before any trial runs, so a missing key or a broken models file
-    stops the run at once with its own message instead of failing every trial."""
-    factory = eval_model_factory(settings, mode)
-    if factory is None:
-        return None
-    from freight_agent.adapters.clock import SystemClock
-    from freight_agent.bootstrap import BootstrapError
-
-    try:
-        factory(SystemClock())
-    except (BootstrapError, ValueError) as exc:  # MissingSetting is a ValueError
-        raise UsageProblem(f"cannot build the {mode} model: {exc}") from exc
-    return factory
-
-
-def _budget(max_tokens: int | None, max_latency_ms: int | None) -> "Budget | None":
-    if max_tokens is None and max_latency_ms is None:
-        return None
-    from freight_agent.evalkit.graders import Budget
-
-    return Budget(max_tokens_per_run=max_tokens, max_latency_ms_per_run=max_latency_ms)
+    if regressions(run.outcomes):
+        return FAILED
+    if run.not_run:
+        return COST_CAP
+    return PASSED
 
 
 def _split(values: Iterable[str] | None) -> list[str]:
-    """`--tags a,b --tags c` -> [a, b, c]."""
+    """`--scenario a,b --scenario c` -> [a, b, c]."""
     return [part.strip() for value in values or () for part in value.split(",") if part.strip()]
 
 
-def _read_broker(path: Path | None) -> "BrokerExport | None":
-    if path is None:
-        return None
-    from freight_agent.evalkit.brokers import BrokerFileError, read_broker_export
-
-    try:
-        return read_broker_export(path)
-    except BrokerFileError as exc:
-        raise UsageProblem(str(exc)) from exc
-
-
-# --- agent eval list / report ---------------------------------------------------------
+# --- agent eval list ------------------------------------------------------------------
 
 
 @eval_app.command("list")
@@ -413,195 +300,7 @@ def eval_list(
         raise typer.Exit(HARNESS_ERROR) from None
 
 
-@eval_app.command("report")
-def eval_report(
-    path: Annotated[Path, typer.Argument(help="A results folder or its results.json.")],
-    compare: Annotated[
-        Path | None,
-        typer.Option(help="Baseline to compare with: a results folder or its results.json."),
-    ] = None,
-) -> None:
-    """Render report.md again from a results.json, and print the summary."""
-    from freight_agent.evalkit.report import (
-        ReportError,
-        load_results,
-        render_scenario_line,
-        render_summary,
-        results_path,
-        write_report,
-    )
-    from freight_agent.evalkit.report import compare as compare_with
-
-    try:
-        result = load_results(path)
-        comparison = compare_with(result, compare) if compare is not None else None
-    except ReportError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(HARNESS_ERROR) from None
-    report = write_report(result, results_path(path).parent, comparison)
-    for summary in result.scenarios:
-        typer.echo(render_scenario_line(summary))
-    typer.echo("")
-    typer.echo(render_summary(result, comparison, report=report))
-
-
-# --- agent eval lint / draft (a broker's coverage) ------------------------------------------
-
-
-@eval_app.command("lint")
-def eval_lint(
-    broker_file: Annotated[
-        Path | None,
-        typer.Option(
-            help="The broker export to check (evals/brokers/*.json).",
-            show_default="the standard catalog",
-        ),
-    ] = None,
-) -> None:
-    """Check that every intent of a broker's catalog has a scenario.
-
-    Exit code 1 when an intent has none (`agent eval draft` drafts one), 2 when the
-    scenarios or the broker file cannot be read.
-    """
-    try:
-        broker = _read_broker(broker_file)
-        issues, catalog, scenarios = _lint(Settings().evals_dir, broker)
-    except UsageProblem as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(HARNESS_ERROR) from None
-    for issue in issues:
-        typer.echo(str(issue))
-    typer.echo(
-        f"{len(issues)} errors: {catalog.broker_id}, {len(catalog.intents)} intents, "
-        f"{scenarios} scenarios"
-    )
-    raise typer.Exit(1 if issues else 0)
-
-
-def _lint(evals_dir: Path, broker: "BrokerExport | None") -> "tuple[list[LintIssue], Broker, int]":
-    from freight_agent.domain.broker import standard_broker
-    from freight_agent.evalkit.brokers import exports_by_file, lint_broker
-    from freight_agent.evalkit.suite import SuiteError, discover, suites
-
-    catalog = standard_broker() if broker is None else broker.broker
-    try:
-        every = [s for name in suites(evals_dir) for s in discover(evals_dir, name)]
-    except SuiteError as exc:
-        raise UsageProblem(str(exc)) from exc
-    issues = lint_broker(catalog, every, exports_by_file(evals_dir, every))
-    return issues, catalog, len(every)
-
-
-@eval_app.command("draft")
-def eval_draft(
-    broker_file: Annotated[
-        Path, typer.Option(help="The broker export to draft for (evals/brokers/*.json).")
-    ],
-    mode: Annotated[
-        LlmMode,
-        typer.Option(
-            help="live (or record) calls the compile model, about $0.002 per intent; replay "
-            "reads recorded answers. Scripted has no model to draft with."
-        ),
-    ],
-    intent: Annotated[
-        list[str] | None,
-        typer.Option(
-            help="Intents to draft. Repeat or comma-separate.",
-            show_default="the intents `agent eval lint` reports",
-        ),
-    ] = None,
-    model_set: Annotated[
-        str, typer.Option(help="'default' is config/models.yaml; NAME is models.NAME.yaml.")
-    ] = DEFAULT_MODEL_SET,
-    cost_cap_usd: Annotated[
-        float, typer.Option(min=0, help="Stop drafting once this much was spent.")
-    ] = 0.05,
-    out: Annotated[
-        Path | None,
-        typer.Option(help="Scenario folder root.", show_default="EVALS_DIR/scenarios"),
-    ] = None,
-) -> None:
-    """Draft scenarios for a broker's intents from its sections, on the compile role.
-
-    Each draft goes to <out>/<broker>/_draft_<intent>.yaml, tagged draft (and capability,
-    so it never gates a run). An existing draft is never overwritten. Exit code 1 when a
-    draft failed, 2 when the command cannot run.
-    """
-    try:
-        code = _draft(
-            settings=Settings(),
-            broker_file=broker_file,
-            mode=mode,
-            intents=_split(intent),
-            model_set=model_set,
-            cost_cap_usd=cost_cap_usd,
-            out=out,
-        )
-    except UsageProblem as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(HARNESS_ERROR) from None
-    raise typer.Exit(code)
-
-
-def _draft(
-    *,
-    settings: Settings,
-    broker_file: Path,
-    mode: LlmMode,
-    intents: list[str],
-    model_set: str,
-    cost_cap_usd: float,
-    out: Path | None,
-) -> int:
-    from freight_agent.adapters.clock import SystemClock
-    from freight_agent.adapters.knowledge.memory import MemorySopIndex
-    from freight_agent.evalkit.draft import draft_scenarios
-
-    if mode == "scripted":
-        raise UsageProblem("drafting calls the compile model: use --mode live, record or replay")
-    broker = _read_broker(broker_file)
-    assert broker is not None
-    if not intents:
-        issues, _, _ = _lint(settings.evals_dir, broker)
-        intents = [issue.intent for issue in issues]
-    if not intents:
-        typer.echo(f"nothing to draft: every intent of {broker.broker_id} has a scenario")
-        return 0
-    settings = settings.model_copy(
-        update={"models_config": models_config_for(settings, model_set), "llm_mode": mode}
-    )
-    factory = _checked_model_factory(settings, mode)
-    assert factory is not None
-    results, usage = asyncio.run(
-        draft_scenarios(
-            factory(SystemClock()),
-            broker,
-            intents=intents,
-            knowledge=MemorySopIndex.from_files(settings.sops_dir),
-            evals_dir=settings.evals_dir,
-            broker_file=_relative_to(broker_file, settings.evals_dir),
-            out_dir=out,
-            cost_cap_usd=cost_cap_usd,
-        )
-    )
-    for result in results:
-        where = str(result.path) if result.path is not None else result.message
-        detail = f" ({result.message})" if result.path is not None and result.message else ""
-        typer.echo(f"{result.status:<8} {result.intent:<30} {where}{detail}")
-    typer.echo(f"{len(usage)} compile call(s), ${sum(u.cost_usd for u in usage):.4f}")
-    return 1 if any(r.status == "failed" for r in results) else 0
-
-
-def _relative_to(path: Path, folder: Path) -> str:
-    """How a scenario under `folder` names `path`: relative when it is inside."""
-    try:
-        return path.resolve().relative_to(folder.resolve()).as_posix()
-    except ValueError:
-        return str(path.resolve())
-
-
-# --- agent serve and agent db -------------------------------------------------------------
+# --- agent serve --------------------------------------------------------------------------
 
 
 @app.command("serve")
@@ -613,29 +312,3 @@ def serve(
     from freight_agent.api.__main__ import main as serve_api
 
     serve_api(["--host", host, "--port", str(port)])
-
-
-db_app = typer.Typer(no_args_is_help=True, help="Postgres schema migrations.")
-app.add_typer(db_app, name="db")
-
-
-@db_app.command("migrate")
-def db_migrate() -> None:
-    """Apply pending migrations to DATABASE_URL_DIRECT (or DATABASE_URL), from env or .env."""
-    from freight_agent.adapters.persistence.postgres.migrate import MigrationError, migrate
-
-    settings = Settings()
-    url = settings.database_url_direct or settings.database_url
-    from psycopg import OperationalError
-
-    try:
-        applied = migrate(url.get_secret_value() if url is not None else None)
-    except MigrationError as exc:
-        typer.echo(f"error: {exc}")
-        raise typer.Exit(2) from exc
-    except OperationalError as exc:  # the message names host and port, never the password
-        typer.echo(f"error: cannot reach the database: {str(exc).strip().splitlines()[0]}")
-        raise typer.Exit(2) from exc
-    typer.echo(
-        f"applied {len(applied)} migration(s)" + (f": {', '.join(applied)}" if applied else "")
-    )

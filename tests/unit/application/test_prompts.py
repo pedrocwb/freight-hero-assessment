@@ -10,7 +10,14 @@ import pytest
 from freight_agent.application.agent import sections_in_progress
 from freight_agent.application.context import RunContext
 from freight_agent.application.prompts import (
-    GATE_SYSTEM_PROMPT,
+    AGENT_SYSTEM_VARIABLES,
+    AGENT_USER_VARIABLES,
+    GATE_SYSTEM_VARIABLES,
+    GATE_USER_VARIABLES,
+    agent_system_variables,
+    agent_user_variables,
+    gate_system_variables,
+    gate_user_variables,
     render_agent_prompt,
     render_agent_system_prompt,
     render_gate_prompt,
@@ -30,8 +37,11 @@ from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationKind, ObligationStatus
 from freight_agent.domain.sop import CatalogEntry, ResolvedSection, ResolvedSop
 from freight_agent.domain.timers import Timer
+from tests.prompts import PROMPTS
 
 LA = ZoneInfo("America/Los_Angeles")
+# The standard catalog's gate prompt: the text the bake-off tuned (evals/RESULTS.md).
+GATE_SYSTEM_PROMPT = render_gate_system_prompt(PROMPTS.gate, standard_broker())
 DRIVER = "drv_20931"
 ETA_SMS = "What time will you arrive at the pickup?"
 HIGH_RISK_BODY = (
@@ -176,7 +186,9 @@ def a2_context(load: Load) -> RunContext:
 def a2_prompt(load: Load) -> str:
     ctx = a2_context(load)
     sop = resolved(COMMUNICATION, QUESTIONS, ESCALATION)
-    return render_agent_prompt(ctx, QUESTION, sop, sections_in_progress(ctx, sop, VISIBLE))
+    return render_agent_prompt(
+        PROMPTS.agent, ctx, QUESTION, sop, sections_in_progress(ctx, sop, VISIBLE)
+    )
 
 
 def context(load: Load, trigger: Event, *earlier: Event, **kwargs: Any) -> RunContext:
@@ -191,7 +203,7 @@ def context(load: Load, trigger: Event, *earlier: Event, **kwargs: Any) -> RunCo
 
 
 def decide_prompt(ctx: RunContext, sop: ResolvedSop | None = None) -> str:
-    return render_agent_prompt(ctx, QUESTION, sop or resolved(QUESTIONS))
+    return render_agent_prompt(PROMPTS.agent, ctx, QUESTION, sop or resolved(QUESTIONS))
 
 
 # A2: the decide prompt at 07:13 carries everything the model needs.
@@ -277,7 +289,9 @@ def test_a2_prompt_lists_only_the_other_sections_in_the_catalog(load: Load) -> N
 @pytest.mark.unit
 def test_rendering_is_deterministic(load: Load) -> None:
     assert a2_prompt(load) == a2_prompt(load)
-    assert render_gate_prompt(a2_context(load)) == render_gate_prompt(a2_context(load))
+    assert render_gate_prompt(PROMPTS.gate, a2_context(load)) == render_gate_prompt(
+        PROMPTS.gate, a2_context(load)
+    )
 
 
 @pytest.mark.unit
@@ -411,7 +425,7 @@ def test_an_unknown_sender_id_is_quoted_so_it_cannot_break_out(load: Load) -> No
     ctx = context(load, inbound(at(7, 12), "ok"), stranger)
 
     decide = decide_prompt(ctx)
-    gate = render_gate_prompt(ctx)
+    gate = render_gate_prompt(PROMPTS.gate, ctx)
 
     assert decide.count("\n## Your task") == 1
     assert "\n## Your task" not in gate
@@ -434,7 +448,7 @@ def test_attachment_values_are_quoted_so_they_cannot_break_out(load: Load) -> No
     ctx = context(load, inbound(at(7, 12), "", attachments=(evil,)), earlier)
 
     decide = decide_prompt(ctx)
-    gate = render_gate_prompt(ctx)
+    gate = render_gate_prompt(PROMPTS.gate, ctx)
 
     assert decide.count("\n## Your task") == 1
     assert "\n## Your task" not in gate
@@ -566,7 +580,7 @@ def test_open_obligation_without_a_pending_timer(load: Load) -> None:
 def test_risk_change_event_block(load: Load) -> None:
     ctx = context(load, risk_event(), now=at(7, 1))
 
-    prompt = render_agent_prompt(ctx, QUESTION, resolved(HIGH_RISK))
+    prompt = render_agent_prompt(PROMPTS.agent, ctx, QUESTION, resolved(HIGH_RISK))
 
     assert "type: risk_changed" in prompt
     assert "change: delay risk changed low -> high" in prompt
@@ -712,7 +726,7 @@ def test_empty_sop_and_instructions_are_explicit(load: Load) -> None:
     bare = load.model_copy(update={"instructions": "", "load_types": ("reefer",)})
     ctx = context(bare, inbound(at(7, 12), "ok"))
 
-    prompt = render_agent_prompt(ctx, QUESTION, ResolvedSop(sections=(), catalog=()))
+    prompt = render_agent_prompt(PROMPTS.agent, ctx, QUESTION, ResolvedSop(sections=(), catalog=()))
 
     assert "instructions: none" in prompt
     assert "load types: reefer" in prompt
@@ -755,7 +769,7 @@ def test_naive_times_are_read_as_utc(load: Load) -> None:
 
 @pytest.mark.unit
 def test_gate_prompt_has_message_sender_obligations_and_recent_events(load: Load) -> None:
-    prompt = render_gate_prompt(a2_context(load))
+    prompt = render_gate_prompt(PROMPTS.gate, a2_context(load))
 
     for fragment in (
         "from: drv_20931 (driver)",
@@ -774,7 +788,7 @@ def test_gate_prompt_has_message_sender_obligations_and_recent_events(load: Load
 @pytest.mark.unit
 def test_gate_prompt_keeps_only_the_last_five_earlier_events(load: Load) -> None:
     earlier = [inbound(at(6, m), f"msg {m}", event_id=f"m{m}") for m in range(10, 17)]
-    prompt = render_gate_prompt(context(load, inbound(at(7, 12), "ok"), *earlier))
+    prompt = render_gate_prompt(PROMPTS.gate, context(load, inbound(at(7, 12), "ok"), *earlier))
 
     assert '"msg 10"' not in prompt
     assert '"msg 11"' not in prompt
@@ -785,7 +799,9 @@ def test_gate_prompt_keeps_only_the_last_five_earlier_events(load: Load) -> None
 @pytest.mark.unit
 def test_gate_prompt_lists_attachments_and_says_none_when_nothing_is_open(load: Load) -> None:
     bol = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
-    prompt = render_gate_prompt(context(load, inbound(at(7, 12), "", attachments=(bol,))))
+    prompt = render_gate_prompt(
+        PROMPTS.gate, context(load, inbound(at(7, 12), "", attachments=(bol,)))
+    )
 
     assert (
         'attachments: {"id": "att_1", "filename": "bol.jpg", "content_type": "image/jpeg"}'
@@ -827,10 +843,9 @@ def test_gate_prompt_lists_attachments_and_says_none_when_nothing_is_open(load: 
         "no_procedure: true only when no SOP section covers the event",
     ],
 )
-@pytest.mark.parametrize("max_steps", [8, 0], ids=["tools", "plan"])
-def test_agent_system_prompt_states_the_rules(fragment: str, max_steps: int) -> None:
-    """Both modes keep every hard-won rule of the decide prompt (evals/RESULTS.md)."""
-    assert fragment in render_agent_system_prompt(_with_steps(max_steps))
+def test_agent_system_prompt_states_the_rules(fragment: str) -> None:
+    """The prompt keeps every hard-won rule of the decide prompt (evals/RESULTS.md)."""
+    assert fragment in render_agent_system_prompt(PROMPTS.agent, standard_broker())
 
 
 def _with_steps(max_steps: int) -> Broker:
@@ -840,23 +855,20 @@ def _with_steps(max_steps: int) -> Broker:
 
 
 @pytest.mark.unit
-def test_the_tool_mode_stages_actions_and_the_plan_mode_returns_them() -> None:
-    tools = render_agent_system_prompt(_with_steps(8))
-    plan = render_agent_system_prompt(_with_steps(0))
+def test_the_agent_stages_actions_with_its_tools_within_the_brokers_budget() -> None:
+    """The answer has no actions: the prompt never asks for a plan in `finish`."""
+    prompt = render_agent_system_prompt(PROMPTS.agent, _with_steps(5))
 
-    assert 'answers "accepted as action #n" or "rejected by <rule>: <why>"' in tools
-    assert "Staging nothing is the right answer" in tools
-    assert "You have at most 8 rounds of tool calls. More than 3 rejected actions" in tools
-    assert "- actions: leave it empty." in tools
-    assert "You return a plan" in plan
-    assert "An empty plan (no actions) is the right answer" in plan
-    assert "rounds of tool calls" not in plan
-    assert "- actions: the plan, possibly empty." in plan
+    assert 'answers "accepted as action #n" or "rejected by <rule>: <why>"' in prompt
+    assert "Staging nothing is the right answer" in prompt
+    assert "You have at most 5 rounds of tool calls. More than 3 rejected actions" in prompt
+    assert "- actions:" not in prompt
+    assert "You return a plan" not in prompt
 
 
 @pytest.mark.unit
 def test_the_agent_prompt_lists_the_catalog_of_the_broker() -> None:
-    prompt = render_agent_system_prompt(standard_broker())
+    prompt = render_agent_system_prompt(PROMPTS.agent, standard_broker())
 
     assert "- question: asks us something:" in prompt
     assert "- eta_follow_up_due (set by code): The follow-up timer" in prompt
@@ -906,8 +918,8 @@ def test_a_brokers_own_intents_obligations_and_requirements_are_rendered() -> No
         }
     )
 
-    gate = render_gate_system_prompt(acme)
-    agent = render_agent_system_prompt(acme)
+    gate = render_gate_system_prompt(PROMPTS.gate, acme)
+    agent = render_agent_system_prompt(PROMPTS.agent, acme)
 
     assert (
         '- detention_request: asks to be paid for waiting: "been here 3 hours, detention?".' in gate
@@ -940,8 +952,8 @@ def test_a_catalog_without_the_standard_intents_renders_a_generic_gate_prompt() 
         }
     )
 
-    gate = render_gate_system_prompt(minimal)
-    agent = render_agent_system_prompt(minimal)
+    gate = render_gate_system_prompt(PROMPTS.gate, minimal)
+    agent = render_agent_system_prompt(PROMPTS.agent, minimal)
 
     assert "pick the first that applies in this order: question, other." in gate
     assert '"9:40" right after' not in gate
@@ -955,7 +967,7 @@ def test_a_catalog_without_the_standard_intents_renders_a_generic_gate_prompt() 
 def test_the_eta_examples_need_the_eta_request_obligation() -> None:
     no_eta = standard_broker().model_copy(update={"obligations": ()})
 
-    gate = render_gate_system_prompt(no_eta)
+    gate = render_gate_system_prompt(PROMPTS.gate, no_eta)
 
     assert '"9:40" right after we asked for the ETA' not in gate
     assert "and an open request goes on by itself." in gate
@@ -974,7 +986,7 @@ def test_a_quiet_intent_without_examples_is_still_named() -> None:
     )
     broker = standard.model_copy(update={"intents": (*standard.intents, quiet)})
 
-    gate = render_gate_system_prompt(broker)
+    gate = render_gate_system_prompt(PROMPTS.gate, broker)
 
     assert "- An update is always act false, whatever is open: it answers nothing" in gate
     assert (
@@ -1000,17 +1012,14 @@ def _matches_snapshot(name: str, text: str) -> None:
 @pytest.mark.unit
 def test_the_standard_gate_prompt_is_the_tuned_one_word_for_word() -> None:
     _matches_snapshot("gate_system_standard.txt", GATE_SYSTEM_PROMPT)
-    assert render_gate_system_prompt(standard_broker()) == GATE_SYSTEM_PROMPT
+    assert render_gate_system_prompt(PROMPTS.gate, standard_broker()) == GATE_SYSTEM_PROMPT
 
 
 @pytest.mark.unit
 def test_the_standard_agent_prompt_snapshot() -> None:
-    _matches_snapshot("agent_system_standard.txt", render_agent_system_prompt(standard_broker()))
-
-
-@pytest.mark.unit
-def test_the_standard_agent_prompt_without_action_tools_snapshot() -> None:
-    _matches_snapshot("agent_system_plan_only.txt", render_agent_system_prompt(_with_steps(0)))
+    _matches_snapshot(
+        "agent_system_standard.txt", render_agent_system_prompt(PROMPTS.agent, standard_broker())
+    )
 
 
 @pytest.mark.unit
@@ -1048,3 +1057,25 @@ def test_gate_system_prompt_never_acts_on_an_acknowledgement() -> None:
     """GPT-4.1 Nano said acknowledgement with act true for a bare "ok" in 1 of 3 trials, a
     wasted decide call that B1 counts."""
     assert "An acknowledgement is always act false, whatever is open" in GATE_SYSTEM_PROMPT
+
+
+# --- the templates and the variables code computes ----------------------------------------
+
+
+def test_each_message_gets_exactly_the_variables_it_is_allowed(load: Load) -> None:
+    """The declared sets are what the code computes, so `check_variables` checks a
+    template against the truth."""
+    ctx = a2_context(load)
+    sop = resolved(QUESTIONS)
+
+    assert set(gate_system_variables(standard_broker())) == GATE_SYSTEM_VARIABLES
+    assert set(gate_user_variables(ctx)) == GATE_USER_VARIABLES
+    assert set(agent_system_variables(standard_broker())) == AGENT_SYSTEM_VARIABLES
+    assert set(agent_user_variables(ctx, QUESTION, sop)) == AGENT_USER_VARIABLES
+
+
+def test_the_shipped_templates_use_every_block_the_code_computes() -> None:
+    assert PROMPTS.gate.system.variables == GATE_SYSTEM_VARIABLES
+    assert PROMPTS.gate.user.variables == GATE_USER_VARIABLES
+    assert PROMPTS.agent.system.variables == AGENT_SYSTEM_VARIABLES
+    assert PROMPTS.agent.user.variables == AGENT_USER_VARIABLES

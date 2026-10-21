@@ -9,10 +9,10 @@ a database would hold the claimed rows):
 
 1. claim: one unit of work claims the next event, reads its context
    (`load_run_context`) and commits the claim;
-2. think: the run graph (prefilter, triage, knowledge, agent, validate) runs
-   outside any transaction, under the run deadline; it reads the SOP through the
-   knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of work, and
-   the agent's read tools answer from the context read in phase 1;
+2. think: the run graph (prefilter, gate, knowledge, the agent and tools loop,
+   validate) runs outside any transaction, under the run deadline; it reads the SOP
+   through the knowledge index (`RuntimeDeps.knowledge`), which is not on the unit of
+   work, and the agent's read tools answer from the context read in phase 1;
 3. commit: one unit of work checks again that no other run finished the event,
    executes the verdict's actions, saves the run record and completes the event.
 
@@ -21,7 +21,20 @@ while releasing) leaves its event in flight. The claim lease takes it back: ever
 `process_all` first releases the claims older than `claim_lease_s`, each counted as a
 failed attempt (the watchdog of the plan).
 
-The tracer exports the run after the commit, and can never break it.
+LangGraph traces the run itself when tracing is on; the runtime gives the run's root span
+an id, and after the commit the tracer turns it into the trace link the run record keeps
+(`RunRecord.trace_url`). Tracing can never break a run.
+
+The prompt templates (`RuntimeDeps.prompts`) are resolved before the runtime is built, once
+for the process. The run record keeps the version of each one the run sent to a model
+(`RunRecord.prompts`): the gate's when the triage called its model, the agent's when the
+run reached the agent loop, failed calls included.
+
+The gate's engine is the process's (`RuntimeConfig.gate_engine`): `jev`, the decision
+model on `RuntimeDeps.decisions` with the policy of `gate_decision.py` (the process
+default, `GATE_ENGINE`), or `llm`, the gate model on `RuntimeDeps.llm` (this class's own
+default, the engine that needs no other port). The run record names the engine that read a message
+(`RunRecord.gate_engine`) and keeps the jev engine's probabilities (`gate_scores`).
 
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
@@ -34,6 +47,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
+from uuid import UUID, uuid4
 
 from freight_agent.application import escalation
 from freight_agent.application.agent import Agent
@@ -46,8 +60,17 @@ from freight_agent.application.contracts import (
 )
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.executor import ExecutionResult, Executor
-from freight_agent.application.gate import Gate
-from freight_agent.application.graph import GraphDeps, RunState, Verdict, build_graph, need
+from freight_agent.application.gate import Gate, GateEngine, Triage
+from freight_agent.application.gate_decision import DEFAULT_ACT_THRESHOLD, DecisionGate
+from freight_agent.application.graph import (
+    GraphDeps,
+    RunGraph,
+    RunState,
+    Verdict,
+    build_graph,
+    need,
+)
+from freight_agent.application.graph.build import AGENT, TRIAGE
 from freight_agent.application.prefilter import SkipReason
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
@@ -62,12 +85,13 @@ from freight_agent.domain.ping_filter import (
 )
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.domain.validation import ValidationConfig
 from freight_agent.ports.clock import Clock, IdGenerator
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.documents import BlobStore, DocumentProcessor
 from freight_agent.ports.gateways import DeliveryError, Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, LlmError
+from freight_agent.ports.prompts import PromptRole, Prompts
 from freight_agent.ports.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
 from freight_agent.ports.tracing import Tracer
 
@@ -80,9 +104,6 @@ class RuntimeConfig:
     rounds, cost and rejection budgets) is its broker's (`Broker.limits`), not here."""
 
     ping_filter: PingFilterConfig = field(default_factory=PingFilterConfig)
-    # Not read by the runs since wave 3: each run validates with its broker's
-    # `BrokerLimits.validation`. Kept because the eval metadata still hashes it.
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
     recent_events_limit: int = 30  # the transcript in the agent's prompt
     history_events_limit: int = 200  # what the agent's get_history tool can read
     run_deadline_s: float = 240.0
@@ -90,14 +111,18 @@ class RuntimeConfig:
     # None: `run_deadline_s` plus a minute, so a run that is still thinking keeps it.
     claim_lease_s: float | None = None
     max_delivery_attempts: int = 5
-    llm_timeout_s: float = 60.0  # per model call (the whole tool loop); the adapter enforces it
+    llm_timeout_s: float = 60.0  # per model call (one round); the adapter enforces it
     outbox_batch_size: int = 100  # items one `dispatch_outbox` call sends at most
     recent_pings_per_load: int = 64  # ping ids the risk tracker keeps to drop redeliveries
     # Production keeps the worker going: an unexpected error becomes a failed attempt
     # and the event is released for a retry. The eval harness sets this so that a
-    # harness error (a missing cassette) ends the trial with its own message; the
-    # event is still released first. Domain errors are failed attempts either way.
+    # harness error (a bug) ends the trial with its own message; the event is still
+    # released first. Domain errors are failed attempts either way.
     reraise_unexpected: bool = False
+    # What reads an inbound message at the gate, and, on the jev engine, the P(act) under
+    # which a quiet intent ends the run (`gate_decision.py`).
+    gate_engine: GateEngine = GateEngine.LLM
+    gate_act_threshold: float = DEFAULT_ACT_THRESHOLD
 
     @property
     def effective_claim_lease_s(self) -> float:
@@ -120,8 +145,10 @@ class RuntimeDeps:
     gateways: Gateways
     tracer: Tracer
     blobs: BlobStore  # attachment bytes, for the document pipeline
+    prompts: Prompts  # every role's template, resolved for the process
     documents: DocumentProcessor = field(default_factory=NullDocumentProcessor)
     config: RuntimeConfig = field(default_factory=RuntimeConfig)
+    decisions: DecisionModel | None = None  # the jev gate engine's model
 
 
 @dataclass
@@ -138,26 +165,60 @@ class _Attempt:
     started_at: datetime
     state: RunState | None = None
     error: Exception | None = None
+    trace_id: UUID = field(default_factory=uuid4)  # the root span of the run's trace
 
 
 @dataclass(frozen=True)
 class _Finished:
     record: RunRecord
     stored: bool  # a failed attempt is stored only when it dead-letters the event
+    trace_id: UUID | None = None  # None: the graph never ran, so there is no trace
+
+
+def graph_deps(deps: RuntimeDeps) -> GraphDeps:
+    """The run graph's services on the runtime's ports and prompt templates: what the
+    runtime streams, and what another entry point (LangGraph Studio) can compile."""
+    timeout_s = deps.config.llm_timeout_s
+    return GraphDeps(
+        gate=build_gate(deps),
+        agent=Agent(deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=timeout_s),
+        knowledge=deps.knowledge,
+    )
+
+
+def build_gate(deps: RuntimeDeps) -> Triage:
+    """The gate of `RuntimeConfig.gate_engine`. `ValueError` for the jev engine without a
+    decision model."""
+    config = deps.config
+    if config.gate_engine is GateEngine.JEV:
+        if deps.decisions is None:
+            raise ValueError("the jev gate engine needs a decision model (RuntimeDeps.decisions)")
+        return DecisionGate(
+            deps.decisions,
+            deps.prompts.gate_decision,
+            act_threshold=config.gate_act_threshold,
+            timeout_s=config.llm_timeout_s,
+        )
+    return Gate(deps.llm, deps.prompts.gate, timeout_s=config.llm_timeout_s)
 
 
 class AgentRuntime:
     def __init__(self, deps: RuntimeDeps) -> None:
         self._deps = deps
-        config = deps.config
-        self._graph = build_graph(
-            GraphDeps(
-                gate=Gate(deps.llm, timeout_s=config.llm_timeout_s),
-                agent=Agent(deps.llm, deps.knowledge, timeout_s=config.llm_timeout_s),
-                knowledge=deps.knowledge,
-            )
-        )
+        services = graph_deps(deps)
+        self._gate, self._agent = services.gate, services.agent
+        self._graph = build_graph(services)
         self._executor = Executor(deps.clock, deps.ids)
+
+    @property
+    def graph(self) -> RunGraph:
+        """The run graph, for the platform's drawing of it."""
+        return self._graph
+
+    @property
+    def prompts(self) -> Prompts:
+        """The templates the runtime renders, for the eval judge on the same versions."""
+        return self._deps.prompts
 
     def _uow(self) -> UnitOfWork:
         return self._deps.uow_factory()
@@ -361,6 +422,7 @@ class AgentRuntime:
                 ctx = await load_run_context(
                     uow,
                     event,
+                    knowledge=deps.knowledge,
                     now=attempt.started_at,
                     recent_limit=deps.config.recent_events_limit,
                     history_limit=deps.config.history_events_limit,
@@ -378,7 +440,8 @@ class AgentRuntime:
         deadline = asyncio.timeout(deadline_s)
         try:
             async with deadline:
-                async for state in self._graph.stream(ctx, run_id=attempt.run_id):
+                stream = self._graph.stream(ctx, run_id=attempt.run_id, trace_id=attempt.trace_id)
+                async for state in stream:
                     attempt.state = state
         except LlmError as exc:
             return Verdict.escalated(escalation.model_failure(ctx, exc))
@@ -405,7 +468,7 @@ class AgentRuntime:
             await uow.runs.save(record)
             await uow.queue.complete(event_id)
             await uow.commit()
-        return _Finished(record, stored=True)
+        return _Finished(record, stored=True, trace_id=attempt.trace_id)
 
     async def _fail(self, attempt: _Attempt, exc: Exception) -> _Finished:
         error = f"{type(exc).__name__}: {exc}"
@@ -424,7 +487,8 @@ class AgentRuntime:
             if dead:
                 await uow.runs.save(record)
             await uow.commit()
-        return _Finished(record, stored=dead)
+        traced = attempt.state is not None and attempt.error is None
+        return _Finished(record, stored=dead, trace_id=attempt.trace_id if traced else None)
 
     def _record(self, attempt: _Attempt, verdict: Verdict) -> RunRecord:
         state = attempt.state
@@ -446,17 +510,34 @@ class AgentRuntime:
             error=verdict.error,
             intent=state.intent if state else None,
             broker_id=broker.broker_id if broker else None,
-            broker_config_version=broker.config_version if broker else None,
             trajectory=state.trajectory if state else (),
             sections_searched=state.sections_searched if state else (),
             rejections=state.rejections if state else 0,
+            nodes=state.nodes if state else (),
+            prompts=self._prompts_used(state),
+            gate_engine=state.gate.engine if state and state.gate else None,
+            gate_scores=state.gate.scores if state and state.gate else None,
         )
 
+    def _prompts_used(self, state: RunState | None) -> dict[str, str]:
+        """The version of each template the run sent to a model. A node visit counts from
+        its start, so a model call that failed still names the prompt it was sent."""
+        if state is None:
+            return {}
+        used: dict[str, str] = {}
+        if TRIAGE in state.nodes and self._gate.calls_model(state.ctx):
+            used[self._gate.prompt.role.value] = self._gate.prompt.version
+        if AGENT in state.nodes:
+            used[PromptRole.AGENT.value] = self._agent.prompt.version
+        return used
+
     async def _export(self, finished: _Finished) -> RunRecord:
-        """Trace the run, fail-open. A stored run keeps its trace URL."""
+        """The run's trace link, fail-open. A stored run keeps it."""
         record = finished.record
+        if finished.trace_id is None:
+            return record
         try:
-            url = await self._deps.tracer.record_run(record)
+            url = await self._deps.tracer.trace_url(finished.trace_id)
             if url is not None:
                 record = record.model_copy(update={"trace_url": url})
                 if finished.stored:
@@ -464,7 +545,7 @@ class AgentRuntime:
                         await uow.runs.save(record)
                         await uow.commit()
         except Exception:
-            logger.warning("tracing run %s failed", record.run_id, exc_info=True)
+            logger.warning("the trace link of run %s failed", record.run_id, exc_info=True)
         return record
 
     # --- delivery ---------------------------------------------------------------------------
@@ -521,12 +602,19 @@ class AgentRuntime:
         return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
 
     async def tick(self) -> list[RunRecord]:
-        """fire_due_timers, then the document pipeline, then process_all, then dispatch_outbox."""
-        await self.fire_due_timers()
-        await self._deps.documents.process_pending()
+        """queue_due_events, then process_all, then dispatch_outbox."""
+        await self.queue_due_events()
         runs = await self.process_all()
         await self.dispatch_outbox()
         return runs
+
+    async def queue_due_events(self) -> None:
+        """The start of a tick: fire the due timers, then read the pending documents, so
+        every event of the tick is queued before its first run. LangGraph Studio's scenario
+        graph (`freight_agent.studio`) calls the three parts of a tick one by one, so that
+        each run is a node of its own."""
+        await self.fire_due_timers()
+        await self._deps.documents.process_pending()
 
     # --- read model -------------------------------------------------------------------------
 

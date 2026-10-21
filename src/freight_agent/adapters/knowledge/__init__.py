@@ -1,1 +1,1 @@
-"""The knowledge base adapters: SOP indexes and embedders (card W3-KNW)."""
+"""The knowledge base adapters: the SOP index (card W3-KNW)."""

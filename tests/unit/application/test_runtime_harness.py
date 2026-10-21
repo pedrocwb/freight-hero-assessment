@@ -1,8 +1,12 @@
 """Shared setup for the runtime tests (no tests here).
 
-One load in a memory store, a virtual clock, a scripted model, recording gateways
-and a small in-test SOP: the standard sections the scenarios need plus the
-Northline (Client A) high-risk procedure. The real `sops/` tree is not read.
+One load in a memory store, a virtual clock, the fake model (`tests/fakes.py`),
+recording gateways and a small in-test SOP: the standard sections the scenarios need
+plus the Northline (Client A) high-risk procedure. The real `sops/` tree is not read.
+
+A `Plan` pushed for the agent role (`DECIDE`) is two agent rounds: one that stages its
+actions through the real action tools and rules, and one that finishes with its
+rationale (`plan()` with no action is the finish round alone).
 """
 
 from collections.abc import Callable, Sequence
@@ -13,7 +17,6 @@ from freight_agent.adapters.channels.fakes.recording import Delivery, RecordingG
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.knowledge.memory import MemorySopIndex
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.contracts import (
@@ -24,6 +27,7 @@ from freight_agent.application.contracts import (
 )
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.domain.actions import Action, Plan, Purpose, ScheduleTimer, SendSms
+from freight_agent.domain.broker import Broker
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
@@ -31,10 +35,13 @@ from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.gateways import Gateways
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel, ModelRole
 from freight_agent.ports.tracing import Tracer
+from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 LA = ZoneInfo("America/Los_Angeles")
 LOAD_ID = "481207"
@@ -43,7 +50,7 @@ DISPATCHER = "dsp_4410"
 BROKER = "brk_0087"
 ETA = ObligationKind.ETA_REQUEST
 GATE = ModelRole.GATE
-DECIDE = ModelRole.AGENT  # the role was named decide before wave 3
+DECIDE = ModelRole.AGENT  # the agent loop's role (named decide before wave 3)
 
 
 def at(hour: int, minute: int, second: int = 0) -> datetime:
@@ -122,10 +129,13 @@ SECTIONS = (*STANDARD, *NORTHLINE)
 
 
 class FakeSop(MemorySopIndex):
-    """The SopIndex contract over a fixed list of sections, at version "test"."""
+    """The SopIndex contract over a fixed list of sections, at version "test", and the
+    catalogs given (a broker not given runs on the standard catalog)."""
 
-    def __init__(self, sections: Sequence[SopSection] = SECTIONS) -> None:
-        super().__init__(sections, version="test")
+    def __init__(
+        self, sections: Sequence[SopSection] = SECTIONS, *, brokers: Sequence[Broker] = ()
+    ) -> None:
+        super().__init__(sections, version="test", brokers=brokers)
 
 
 ASK_ETA = SendSms(
@@ -159,13 +169,15 @@ class World:
         knowledge: SopIndex | None = None,
         tracer: Tracer | None = None,
         wrap_gateways: Callable[[Gateways], Gateways] | None = None,
+        decisions: DecisionModel | None = None,
     ) -> None:
-        """`wrap_gateways` puts test gateways in front of the recording ones."""
+        """`wrap_gateways` puts test gateways in front of the recording ones; `decisions`
+        is the jev gate engine's model (with `config.gate_engine`)."""
         self.load = load
         self.store = MemoryStore()
         self.clock = VirtualClock(at(6, 55))
         self.ids = SequentialIdGenerator()
-        self.model = ScriptedModel()
+        self.model = FakeModel()
         self.gateways = RecordingGateways()
         recording = self.gateways.as_gateways()
         self.deps = RuntimeDeps(
@@ -177,7 +189,9 @@ class World:
             gateways=wrap_gateways(recording) if wrap_gateways else recording,
             tracer=tracer or NullTracer(),
             blobs=MemoryBlobStore(),
+            prompts=PROMPTS,
             config=config or RuntimeConfig(),
+            decisions=decisions,
         )
         self.runtime = AgentRuntime(self.deps)
 
@@ -244,7 +258,8 @@ class World:
         return self.gateways.log.of(channel)
 
     def calls(self, role: ModelRole) -> int:
-        return sum(1 for call in self.model.calls if call.role is role)
+        """The model requests of `role`: one per gate answer, one per agent round."""
+        return len(self.model.rounds_of(role))
 
     async def high_risk_at_seven(self) -> list[RunRecord]:
         """07:00 a high ping; 07:01 the first ETA SMS and its 07:31 follow-up timer."""

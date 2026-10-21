@@ -18,6 +18,7 @@
 **/node_modules
 web/dist
 *.egg-info
+.langgraph_api
 
 # Caches
 **/__pycache__
@@ -31,9 +32,6 @@ web/dist
 htmlcov
 .pgtest
 .DS_Store
-
-# Eval runs of this machine
-evals/results
 
 # Not in the image
 tests

@@ -11,13 +11,18 @@ from freight_agent.settings import Settings
 
 pytestmark = pytest.mark.unit
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 @pytest.fixture(autouse=True)
 def offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No variable from the developer's shell and no `.env`: a scripted, untraced app."""
+    """No variable from the developer's shell and no `.env`: an untraced app without the
+    model key (it starts anyway; its runs would escalate). The models file is the
+    repository's, since the working directory is a temporary one."""
     for name in Settings.model_fields:
         monkeypatch.delenv(name.upper(), raising=False)
-    monkeypatch.setenv("LLM_MODE", "scripted")
+    monkeypatch.setenv("MODELS_CONFIG", str(ROOT / "config" / "models.yaml"))
+    monkeypatch.setenv("PROMPTS_DIR", str(ROOT / "prompts"))
     monkeypatch.chdir(tmp_path)
 
 

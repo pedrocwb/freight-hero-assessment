@@ -1,7 +1,7 @@
 """One `LanguageModel` for the runtime, a different model behind each role.
 
 The runtime holds a single `LanguageModel`, and every request names its role (gate,
-agent, judge, driver_sim, extract, compile). `config/models.yaml` gives each role its
+agent, judge, driver_sim, extract). `config/models.yaml` gives each role its
 own model and fallback chain, so the composition root builds one model per role and
 puts this router in front: the application never learns which model serves which call.
 """
@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from freight_agent.ports.llm import (
+    ChatReply,
+    ChatRequest,
     LanguageModel,
     LlmError,
     LlmRequest,
@@ -50,3 +52,6 @@ class RoleRouter:
 
     async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
         return await self.model_for(request.role).generate(request, schema)
+
+    async def chat(self, request: ChatRequest, schema: type[SchemaT]) -> ChatReply[SchemaT]:
+        return await self.model_for(request.role).chat(request, schema)

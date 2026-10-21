@@ -1,4 +1,4 @@
-"""A `PageReader` for tests and scripted evals, with no PDF library.
+"""A `PageReader` for tests, with no PDF library.
 
 Owner: card W3-DOC (C0 wrote a working version). Plain text and Markdown are one page
 of text; anything else is one page with an empty image and no text, which sends the

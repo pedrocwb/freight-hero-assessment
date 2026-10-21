@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.context import RunContext, load_run_context
 from freight_agent.application.prefilter import (
@@ -259,7 +260,12 @@ async def test_the_deferral_race_through_the_store(store: MemoryStore, load: Loa
 
     async with store.unit_of_work() as uow:
         ctx = await load_run_context(
-            uow, event, now=_at(31), recent_limit=30, outbound_window_minutes=60
+            uow,
+            event,
+            knowledge=MemorySopIndex([]),
+            now=_at(31),
+            recent_limit=30,
+            outbound_window_minutes=60,
         )
 
     assert ctx.event_timer == fired

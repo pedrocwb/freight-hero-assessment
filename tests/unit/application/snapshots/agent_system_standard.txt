@@ -81,7 +81,6 @@ Most events need no read tool: the prompt already holds the sections, the ledger
 # Finish
 Call finish once, at the end:
 - rationale: one or two sentences that name the SOP section and the step you followed, and what you staged (or why nothing).
-- actions: leave it empty. Stage actions with the action tools, so you see whether each one is accepted; an action listed here is checked only after you finish.
 - intent: only when the event means something else than the gate said: an intent id of the list above.
 - no_procedure: true only when no SOP section covers the event, neither shown nor found with search_sop. Then stage nothing: a person takes the event.
 

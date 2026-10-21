@@ -1,7 +1,7 @@
 """The runtime facade end to end: ingest, timers, runs through the graph, delivery.
 
 Every test drives `AgentRuntime` the way the eval runner and the API do, on the
-memory store, a virtual clock, a scripted model and recording gateways.
+memory store, a virtual clock, the fake model and recording gateways.
 """
 
 from dataclasses import replace
@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from freight_agent.application.contracts import IngestResult
-from freight_agent.application.runtime import RuntimeConfig
+from freight_agent.application.runtime import RuntimeConfig, graph_deps
 from freight_agent.domain.actions import (
     CloseObligation,
     CloseStatus,
@@ -28,6 +28,7 @@ from freight_agent.domain.outbox import OutboxKind, OutboxStatus
 from freight_agent.domain.ping_filter import PingFilterConfig, RiskTracker
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import (
     ASK_AGAIN,
     ASK_ETA,
@@ -128,8 +129,9 @@ async def test_assignment_sequence_for_client_a(load: Load) -> None:
     assert await world.pending_timers() == []
     assert await world.runtime.next_timer_due_at() is None
 
-    # One gate call (the question) and four plans; nothing scripted is left over.
-    assert (world.calls(GATE), world.calls(DECIDE), world.model.remaining()) == (1, 4, 0)
+    # One gate call (the question) and four plans of two agent rounds each (one stages
+    # the actions, one finishes); nothing queued is left over.
+    assert (world.calls(GATE), world.calls(DECIDE), world.model.remaining()) == (1, 8, 0)
     snapshot = await world.snapshot()
     assert [r.status for r in snapshot.runs] == [RunStatus.ACTED] * 4
     assert {i.status for i in snapshot.outbox} == {OutboxStatus.SENT}
@@ -150,7 +152,8 @@ async def test_acknowledgement_after_the_eta_request_is_a_noop(load: Load) -> No
     assert runs[0].gate is not None and runs[0].gate.intent == Intent.ACKNOWLEDGEMENT
     assert len(runs[0].usage) == 1 and runs[0].usage[0].role == "gate"
     assert runs[0].plan is None
-    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 1)
+    assert runs[0].nodes == ("prefilter", "gate")  # the triage ends the run
+    assert (world.calls(GATE), world.calls(DECIDE)) == (1, 2)  # 07:01's two rounds
     assert len(world.sent("sms")) == 1
     obligation = await world.eta_request()
     assert obligation is not None and obligation.is_open and obligation.attempts == 1
@@ -585,11 +588,118 @@ async def test_a_run_records_the_broker_config_it_followed(load: Load) -> None:
 
     (run,) = await world.tick(at(7, 1))
 
-    assert (run.broker_id, run.broker_config_version) == ("standard", 1)
-    # The triage intent; a scripted plan in the answer stages nothing and searches nothing.
-    assert (run.intent, run.trajectory, run.sections_searched, run.rejections) == (
-        Intent.DELAY_RISK_HIGH,
-        (),
-        (),
-        0,
-    )
+    assert run.broker_id == "standard"
+    # The triage intent, and the two action calls that staged the plan; nothing searched.
+    assert [(s.tool, s.accepted, s.result) for s in run.trajectory] == [
+        ("send_sms", True, "accepted as action #1"),
+        ("schedule_timer", True, "accepted as action #2"),
+    ]
+    assert (run.intent, run.sections_searched, run.rejections) == (Intent.DELAY_RISK_HIGH, (), 0)
+
+
+# --- the run record: the graph's path and the model's rounds ----------------------------------
+
+
+ACTED_PATH = ("prefilter", "gate", "knowledge", "agent", "tools", "agent", "validate")
+
+
+async def test_an_acted_run_records_every_node_and_one_usage_per_agent_round(load: Load) -> None:
+    """A risk event has its intent from code: no gate call, and the two agent rounds of
+    the plan (staging, then the answer) are the run's two model calls."""
+    world = await World(load).start()
+
+    (run,) = await world.high_risk_at_seven()
+
+    assert run.status is RunStatus.ACTED
+    assert run.nodes == ACTED_PATH
+    assert [(u.role, u.model) for u in run.usage] == [("agent", "fake"), ("agent", "fake")]
+    (stored,) = (await world.snapshot()).runs
+    assert (stored.nodes, stored.usage) == (run.nodes, run.usage)
+
+
+async def test_a_message_run_records_the_gate_call_then_each_agent_round(load: Load) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO number?")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    reply = SendSms(contact_id=DRIVER, text="The PO number is 55821.", purpose=Purpose.REPLY)
+    world.model.push(DECIDE, plan(reply))
+
+    (run,) = await world.tick(at(7, 13))
+
+    assert run.status is RunStatus.ACTED
+    assert run.nodes == ACTED_PATH
+    assert [u.role for u in run.usage] == ["gate", "agent", "agent"]
+    assert len(run.usage) == len(world.model.calls)  # one usage per model request
+
+
+async def test_a_noop_answer_skips_the_tools(load: Load) -> None:
+    """An agent that answers at once with nothing staged goes straight to validate."""
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO?")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    world.model.push(DECIDE, plan())
+
+    (run,) = await world.tick(at(7, 13))
+
+    assert run.status is RunStatus.NOOP
+    assert run.nodes == ("prefilter", "gate", "knowledge", "agent", "validate")
+    assert [u.role for u in run.usage] == ["gate", "agent"]
+    assert run.plan is not None and run.plan.actions == ()
+
+
+async def test_a_skipped_run_went_through_the_prefilter_alone(load: Load) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "   ")
+
+    (run,) = await world.tick(at(7, 13))
+
+    assert (run.status, run.nodes, run.usage) == (RunStatus.SKIPPED, ("prefilter",), ())
+
+
+# --- the prompt versions a run records ----------------------------------------------------
+
+
+async def test_a_message_run_records_the_gate_and_the_agent_prompt_versions(load: Load) -> None:
+    world = await World(load).start()
+    await world.message(at(7, 12), "What's the PO number?")
+    world.model.push(GATE, decision(Intent.QUESTION))
+    world.model.push(DECIDE, plan())
+
+    (run,) = await world.tick(at(7, 13))
+
+    assert run.prompts == {"gate": PROMPTS.gate.version, "agent": PROMPTS.agent.version}
+    assert [c.request.prompt_version for c in world.model.calls] == [
+        PROMPTS.gate.version,
+        PROMPTS.agent.version,
+    ]
+    (stored,) = (await world.snapshot()).runs
+    assert stored.prompts == run.prompts
+
+
+async def test_a_run_records_only_the_prompts_it_sent(load: Load) -> None:
+    """A risk event has its intent from code (no gate prompt), an acknowledgement ends at
+    the gate (no agent prompt), and a skipped run sent nothing."""
+    world = await World(load).start()
+    (risk,) = await world.high_risk_at_seven()
+    await world.message(at(7, 20), "ok")
+    world.model.push(GATE, decision(Intent.ACKNOWLEDGEMENT, act=False))
+    await world.message(at(7, 21), "   ", message_id="msg_blank")
+
+    ack, blank = await world.tick(at(7, 22))
+
+    assert risk.prompts == {"agent": PROMPTS.agent.version}
+    assert (ack.status, ack.prompts) == (RunStatus.NOOP, {"gate": PROMPTS.gate.version})
+    assert (blank.status, blank.prompts) == (RunStatus.SKIPPED, {})
+
+
+def test_the_graph_services_run_on_the_runtimes_model_and_templates(load: Load) -> None:
+    world = World(load)
+
+    services = graph_deps(world.deps)
+
+    assert (services.gate.prompt, services.agent.prompt) == (PROMPTS.gate, PROMPTS.agent)
+    assert services.knowledge is world.deps.knowledge
+    assert services.prompt_versions() == {
+        "gate": PROMPTS.gate.version,
+        "agent": PROMPTS.agent.version,
+    }

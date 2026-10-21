@@ -1,43 +1,59 @@
-"""The `agent` command line: eval run, list and report, sop lint, and the exit codes.
+"""The `agent` command line: eval run and list, sop lint, and the exit codes.
 
 Every test runs from an empty temporary folder with the variables of `Settings` cleared,
 so no `.env` or shell variable of the developer leaks in; the paths point back at the
 repository's evals, SOPs and models through the same variables a deployment would set.
-Run folders always go to a temporary `--out`.
+
+`agent eval run` is live by design (a LangSmith experiment on OpenRouter), so here it
+never reaches either: `run_experiment`, the LangSmith client, the model, the prompt
+templates (the repository copy, in place of the Hub's) and the native tracing switch are
+replaced, and the test checks what the command hands them and how it reports what comes
+back.
 """
 
-import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
+import langsmith
 import pytest
 from typer.testing import CliRunner, Result
 
-from freight_agent import cli
-from freight_agent.domain.actions import Plan
-from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.domain.runs import Usage
-from freight_agent.evalkit.report import REPORT_FILE, RESULTS_FILE
-from freight_agent.evalkit.suite import ModelFactory
-from freight_agent.ports.clock import Clock
-from freight_agent.ports.llm import LanguageModel, LlmRequest, LlmResponse, SchemaT
-from freight_agent.settings import LlmMode, Settings
+from freight_agent import bootstrap, cli
+from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
+from freight_agent.application.gate import GateEngine
+from freight_agent.evalkit import experiment
+from freight_agent.evalkit.experiment import (
+    ExperimentRun,
+    LangSmithUnavailable,
+    ScenarioOutcome,
+    ScenarioTarget,
+)
+from freight_agent.evalkit.metadata import RunMetadata
+from freight_agent.evalkit.results import Failure
+from freight_agent.evalkit.suite import discover
+from freight_agent.settings import Settings
+from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
+CORE = {s.id: s for s in discover(ROOT / "evals", "core")}
 runner = CliRunner()
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    for name in Settings.model_fields:
+    for name in [*Settings.model_fields, "langsmith_endpoint"]:
         monkeypatch.delenv(name.upper(), raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EVALS_DIR", str(ROOT / "evals"))
     monkeypatch.setenv("SOPS_DIR", str(ROOT / "sops"))
     monkeypatch.setenv("MODELS_CONFIG", str(ROOT / "config" / "models.yaml"))
-    monkeypatch.setenv("CASSETTES_DIR", str(tmp_path / "cassettes"))
+    monkeypatch.setenv("PROMPTS_CONFIG", str(ROOT / "config" / "prompts.yaml"))
+    monkeypatch.setenv("PROMPTS_DIR", str(ROOT / "prompts"))
     return tmp_path
 
 
@@ -45,45 +61,78 @@ def agent(*args: str) -> Result:
     return runner.invoke(cli.app, list(args))
 
 
-def run_folders(out: Path) -> list[Path]:
-    return sorted(p for p in out.iterdir() if p.is_dir())
+class Offline:
+    """Stands in for everything `agent eval run` would reach: the LangSmith client, the
+    model, the Hub's prompts (`prompt_settings` keeps what they were asked with), the
+    tracing switch and `run_experiment`, which records its arguments and returns `run`
+    (or raises it)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.run: ExperimentRun | Exception | None = None
+        self.calls: list[dict[str, Any]] = []
+        self.clients: list[dict[str, Any]] = []
+        self.prompt_settings: list[Settings] = []
+        monkeypatch.setattr(langsmith, "Client", self._client)
+        monkeypatch.setattr(bootstrap, "build_llm", lambda settings, **kwargs: FakeModel())
+        monkeypatch.setattr(bootstrap, "build_prompts", self._prompts)
+        monkeypatch.setattr(bootstrap, "enable_native_tracing", lambda settings: None)
+        monkeypatch.setattr(experiment, "run_experiment", self._run_experiment)
+
+    def _prompts(self, settings: Settings) -> Any:
+        self.prompt_settings.append(settings)
+        return PROMPTS
+
+    def _client(self, **kwargs: Any) -> object:
+        self.clients.append(kwargs)
+        return object()
+
+    async def _run_experiment(self, client: Any, **kwargs: Any) -> ExperimentRun:
+        self.calls.append({"client": client, **kwargs})
+        if isinstance(self.run, Exception):
+            raise self.run
+        assert self.run is not None, "the test did not say what the experiment returns"
+        return self.run
 
 
-def own_evals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenarios: dict[str, str]) -> Path:
-    """A private evals folder with the shipped fixture and the given scenario files."""
-    evals = tmp_path / "evals"
-    (evals / "fixtures").mkdir(parents=True)
-    shutil.copy(ROOT / "evals" / "fixtures" / "load_481207.json", evals / "fixtures")
-    (evals / "scenarios" / "core").mkdir(parents=True)
-    for name, text in scenarios.items():
-        (evals / "scenarios" / "core" / f"{name}.yaml").write_text(text, encoding="utf-8")
-    monkeypatch.setenv("EVALS_DIR", str(evals))
-    return evals
+@pytest.fixture
+def offline(monkeypatch: pytest.MonkeyPatch) -> Offline:
+    return Offline(monkeypatch)
 
 
-def ack_scenario(scenario_id: str, *, llm_calls: int = 1) -> str:
-    """The driver says "ok" with nothing open: a gate-only noop (1 model call)."""
-    return f"""\
-id: {scenario_id}
-title: {scenario_id}
-suite: core
-tags: [regression, sop:acknowledgements]
-load: fixtures/load_481207.json
-date: 2026-10-13
-start: "06:55"
-steps:
-  - at: "07:05"
-    message: {{channel: sms, sender: drv_20931, body: "ok"}}
-    expect: {{no_actions: true, run_status: [noop], llm_calls: {llm_calls}}}
-    script:
-      gate: [{{intent: acknowledgement, act: false, reason: only ok}}]
-"""
+@pytest.fixture
+def keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+
+
+def outcome(
+    scenario_id: str, *passed: bool, not_run: int = 0, cost_usd: float = 0.0
+) -> ScenarioOutcome:
+    failed = (Failure(step_index=0, check="expect.llm_calls", message="expected 1, got 2"),)
+    return ScenarioOutcome(
+        scenario=CORE[scenario_id],
+        passed=passed,
+        failures=tuple(() if p else failed for p in passed),
+        cost_usd=cost_usd,
+        not_run=not_run,
+    )
+
+
+def experiment_run(
+    *outcomes: ScenarioOutcome, not_run: tuple[str, ...] = (), url: str | None = "https://ls/x"
+) -> ExperimentRun:
+    return ExperimentRun(
+        name="core-k1-abc",
+        url=url,
+        outcomes=outcomes,
+        cost_usd=sum(o.cost_usd for o in outcomes),
+        not_run=not_run,
+    )
 
 
 # --- top level --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_version() -> None:
     result = agent("--version")
 
@@ -91,20 +140,19 @@ def test_version() -> None:
     assert result.output.strip() == "freight-agent 0.1.0"
 
 
-@pytest.mark.unit
 def test_help_lists_the_command_groups() -> None:
     result = agent("--help")
 
     assert result.exit_code == 0
     assert "eval" in result.output
     assert "sop" in result.output
+    assert "prompts" in result.output
 
 
-@pytest.mark.unit
 def test_importing_the_cli_loads_neither_the_harness_nor_langchain() -> None:
     probe = (
         "import sys, freight_agent.cli; "
-        "heavy = ('langchain', 'langgraph', 'freight_agent.evalkit.runner', "
+        "heavy = ('langchain', 'langgraph', 'langsmith', 'freight_agent.evalkit.runner', "
         "'freight_agent.bootstrap'); "
         "print(sorted(m for m in heavy if m in sys.modules))"
     )
@@ -115,278 +163,334 @@ def test_importing_the_cli_loads_neither_the_harness_nor_langchain() -> None:
     assert done.stdout.strip() == "[]"
 
 
-# --- eval run ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_the_core_suite_passes_in_scripted_mode_and_writes_its_report(env: Path) -> None:
-    out = env / "results"
-
-    result = agent("eval", "run", "--suite", "core", "--mode", "scripted", "--out", str(out))
-
-    assert result.exit_code == 0, result.output
-    assert "22 scenarios: 22 passed, 0 failed, 0 errors" in result.output
-    assert "verdict: passed (exit code 0)" in result.output
-    (folder,) = run_folders(out)
-    assert folder.name.endswith("-core-scripted")
-    data = json.loads((folder / RESULTS_FILE).read_text(encoding="utf-8"))
-    assert len(data["scenarios"]) == 22
-    assert data["metadata"]["settings"]["LLM_MODE"] == "scripted"
-    assert "| a_client_a_high_risk |" in (folder / REPORT_FILE).read_text(encoding="utf-8")
-    assert f"report: {folder / REPORT_FILE}" in result.output
-
-
-@pytest.mark.unit
-def test_filters_pick_scenarios_by_id_and_tag(env: Path) -> None:
-    out = env / "results"
-
-    by_id = agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--out", str(out))
-    by_tag = agent("eval", "run", "--tags", "capability", "--out", str(out))
-
-    assert by_id.exit_code == 0, by_id.output
-    assert "1 scenarios: 1 passed" in by_id.output
-    assert by_tag.exit_code == 0, by_tag.output
-    assert "c3_relative_eta" in by_tag.output
-    assert "d4_lumper_no_sop" in by_tag.output
-    assert "2 scenarios: 2 passed" in by_tag.output
-
-
-@pytest.mark.unit
-def test_comma_separated_filters_are_split(env: Path) -> None:
-    result = agent(
-        "eval",
-        "run",
-        "--scenario",
-        "b_ack_with_nothing_open,c3_relative_eta",
-        "--out",
-        str(env / "results"),
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "2 scenarios: 2 passed" in result.output
-
-
-@pytest.mark.unit
-def test_k_above_one_in_scripted_mode_warns(env: Path) -> None:
-    result = agent(
-        "eval", "run", "--scenario", "b_ack_with_nothing_open", "--k", "2", "--out", str(env)
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "warning: scripted mode is deterministic" in result.output
-
-
-@pytest.mark.unit
-def test_a_failing_regression_scenario_exits_1(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
-    own_evals(
-        monkeypatch, env, {"good": ack_scenario("good"), "bad": ack_scenario("bad", llm_calls=3)}
-    )
-
-    result = agent("eval", "run", "--out", str(env / "results"))
-
-    assert result.exit_code == 1, result.output
-    assert "FAIL       bad" in result.output
-    assert "step 0 expect.llm_calls: expected 3 model call(s), got 1" in result.output
-    assert "verdict: failed (exit code 1)" in result.output
-
-
-@pytest.mark.unit
-def test_a_bad_scenario_file_exits_2_and_names_the_file(
-    monkeypatch: pytest.MonkeyPatch, env: Path
-) -> None:
-    own_evals(monkeypatch, env, {"good": ack_scenario("good"), "broken": "id: [unclosed\n"})
-
-    result = agent("eval", "run", "--out", str(env / "results"))
+def test_eval_report_is_gone() -> None:
+    result = agent("eval", "report", "results.json")
 
     assert result.exit_code == 2
-    assert "broken.yaml" in result.stderr
-    assert not (env / "results").exists()
+    assert "No such command 'report'" in result.output
 
 
-@pytest.mark.unit
-def test_an_unknown_scenario_or_suite_exits_2(env: Path) -> None:
-    unknown_scenario = agent("eval", "run", "--scenario", "nope", "--out", str(env))
-    unknown_suite = agent("eval", "run", "--suite", "nope", "--out", str(env))
+# --- eval run: what it refuses ----------------------------------------------------------
+
+
+def test_eval_run_needs_the_langsmith_key(offline: Offline) -> None:
+    result = agent("eval", "run")
+
+    assert result.exit_code == 2
+    assert "LANGSMITH_API_KEY is not set" in result.stderr
+    assert offline.calls == [] and offline.clients == []
+
+
+def test_eval_run_needs_the_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch, offline: Offline
+) -> None:
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+
+    result = agent("eval", "run")
+
+    assert result.exit_code == 2
+    assert "OPENROUTER_API_KEY is not set" in result.stderr
+    assert offline.calls == [] and offline.clients == []
+
+
+@pytest.mark.usefixtures("keys")
+def test_an_unknown_scenario_or_suite_exits_2(offline: Offline) -> None:
+    unknown_scenario = agent("eval", "run", "--scenario", "nope")
+    unknown_suite = agent("eval", "run", "--suite", "nope")
 
     assert unknown_scenario.exit_code == 2
     assert "no scenario 'nope'" in unknown_scenario.stderr
     assert unknown_suite.exit_code == 2
     assert "no suite 'nope'" in unknown_suite.stderr
+    assert offline.calls == []
 
 
-@pytest.mark.unit
-def test_an_unknown_model_set_exits_2(env: Path) -> None:
-    result = agent("eval", "run", "--model-set", "cheap", "--out", str(env))
+@pytest.mark.usefixtures("keys")
+def test_a_bad_scenario_file_exits_2_and_names_the_file(
+    monkeypatch: pytest.MonkeyPatch, env: Path, offline: Offline
+) -> None:
+    folder = env / "evals" / "scenarios" / "core"
+    folder.mkdir(parents=True)
+    (folder / "broken.yaml").write_text("id: [unclosed\n", encoding="utf-8")
+    monkeypatch.setenv("EVALS_DIR", str(env / "evals"))
+
+    result = agent("eval", "run")
 
     assert result.exit_code == 2
-    assert "unknown model set 'cheap'" in result.stderr
-    assert "models.cheap.yaml does not exist" in result.stderr
+    assert "broken.yaml" in result.stderr
+    assert offline.calls == []
 
 
-@pytest.mark.unit
-def test_a_missing_sop_folder_exits_2(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+@pytest.mark.usefixtures("keys")
+def test_a_missing_sop_folder_exits_2(
+    monkeypatch: pytest.MonkeyPatch, env: Path, offline: Offline
+) -> None:
     monkeypatch.setenv("SOPS_DIR", str(env / "no_sops"))
 
-    result = agent("eval", "run", "--out", str(env))
+    result = agent("eval", "run")
 
     assert result.exit_code == 2
     assert "the SOP folder" in result.stderr
+    assert offline.calls == []
 
 
-@pytest.mark.unit
-def test_live_mode_without_the_key_exits_2_before_any_trial(env: Path) -> None:
-    result = agent("eval", "run", "--mode", "live", "--out", str(env / "results"))
+@pytest.mark.usefixtures("keys")
+def test_langsmith_unavailable_exits_2_and_says_nothing_ran(offline: Offline) -> None:
+    offline.run = LangSmithUnavailable("ConnectError: no route")
 
-    assert result.exit_code == 2
-    assert "OPENROUTER_API_KEY is not set" in result.stderr
-    assert not (env / "results").exists()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("mode", ["scripted", "replay"])
-def test_langsmith_experiments_are_live_only(env: Path, mode: str) -> None:
-    result = agent("eval", "run", "--mode", mode, "--langsmith", "--out", str(env / "results"))
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
 
     assert result.exit_code == 2
-    assert "--langsmith records live runs only" in result.stderr
-    assert not (env / "results").exists()
+    assert "LangSmith: ConnectError: no route; nothing was run" in result.stderr
 
 
-@pytest.mark.unit
-def test_langsmith_without_its_key_exits_2_before_any_trial(
-    monkeypatch: pytest.MonkeyPatch, env: Path
+# --- eval run: the experiment and its verdict ------------------------------------------
+
+
+@pytest.mark.usefixtures("keys")
+def test_eval_run_hands_the_experiment_the_suite_the_choice_and_the_limits(
+    offline: Offline,
 ) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    result = agent("eval", "run", "--mode", "live", "--langsmith", "--out", str(env / "results"))
-
-    assert result.exit_code == 2
-    assert "--langsmith needs LANGSMITH_API_KEY" in result.stderr
-    assert not (env / "results").exists()
-
-
-@pytest.mark.unit
-def test_replay_without_cassettes_exits_2_and_says_how_to_record(env: Path) -> None:
-    out = env / "results"
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True, True))
 
     result = agent(
         "eval",
         "run",
-        "--mode",
-        "replay",
         "--scenario",
-        "b_ack_with_nothing_open",
-        "--out",
-        str(out),
+        "c3_relative_eta,b_ack_with_nothing_open",
+        "--k",
+        "2",
+        "--cost-cap-usd",
+        "0.5",
+        "--concurrency",
+        "2",
     )
 
-    assert result.exit_code == 2, result.output
-    assert "ERROR      b_ack_with_nothing_open" in result.output
-    assert "CassetteMissing: no cassette for the gate call of model openai/gpt-4.1-nano" in (
-        result.output
-    )
-    assert "verdict: error (exit code 2)" in result.output
-    (folder,) = run_folders(out)
-    assert "record it" in (folder / REPORT_FILE).read_text(encoding="utf-8")
+    assert result.exit_code == 0, result.output
+    assert "core: 2 scenarios, k=2, live on OpenRouter, cost cap $0.50" in result.output
+    (call,) = offline.calls
+    assert call["suite"] == "core"
+    assert len(call["suite_scenarios"]) == len(CORE)
+    assert [s.id for s in call["chosen"]] == ["b_ack_with_nothing_open", "c3_relative_eta"]
+    assert (call["k"], call["concurrency"], call["agent"]) == (2, 2, "freight-agent")
+    target: ScenarioTarget = call["target"]
+    assert (target.meter.cap_usd, target.meter.spent_usd) == (0.5, 0.0)
+    metadata: RunMetadata = call["metadata"]
+    assert (metadata.suite, metadata.k, metadata.cost_cap_usd) == ("core", 2, 0.5)
+    assert metadata.git_sha is None  # the temporary folder is not a checkout
+    assert metadata.models
+    assert (metadata.prompts, metadata.prompt_refs) == (PROMPTS.versions(), PROMPTS.refs())
+    assert target._prompts is PROMPTS  # pyright: ignore[reportPrivateUsage]
+    (asked,) = offline.prompt_settings
+    assert asked.prompts_tag is None  # each role at its pin
+    prompts = ", ".join(p.describe() for p in PROMPTS.all())
+    assert f"prompts: {prompts}" in result.output
+    assert offline.clients == [{"api_key": "lsv2-test", "api_url": None}]
 
 
-class CostlyModel:
-    """A stand-in live model: every call costs $0.50; the gate never acts."""
+@pytest.mark.usefixtures("keys")
+def test_eval_run_on_the_llm_gate_records_it_and_builds_no_decision_model(
+    offline: Offline,
+) -> None:
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
 
-    async def generate(self, request: LlmRequest, schema: type[SchemaT]) -> LlmResponse[SchemaT]:
-        output = (
-            GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="ok")
-            if schema is GateDecision
-            else Plan()
-        )
-        usage = Usage(role=request.role.value, model="fake", cost_usd=0.5)
-        return LlmResponse(parsed=schema.model_validate(output.model_dump()), usage=usage)
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--gate-engine", "llm")
 
-
-@pytest.mark.unit
-def test_the_cost_cap_stops_the_run_and_exits_3(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
-    own_evals(monkeypatch, env, {f"s{i}": ack_scenario(f"s{i}") for i in range(1, 5)})
-
-    def factory(settings: Settings, mode: LlmMode) -> ModelFactory:
-        def build(clock: Clock) -> LanguageModel:
-            return CostlyModel()
-
-        return build
-
-    monkeypatch.setattr(cli, "eval_model_factory", factory)
-
-    result = agent("eval", "run", "--mode", "live", "--cost-cap-usd", "1", "--out", str(env / "r"))
-
-    assert result.exit_code == 3, result.output
-    assert "stopped by the cost cap: $1.5000 spent, over the cap of $1.00" in result.output
-    assert "not run: s4" in result.output
-    assert "verdict: aborted (exit code 3)" in result.output
+    assert result.exit_code == 0, result.output
+    assert "gate engine: llm" in result.output
+    (call,) = offline.calls
+    metadata: RunMetadata = call["metadata"]
+    assert (metadata.gate_engine, metadata.gate_act_threshold) == ("llm", None)
+    assert call["target"]._decisions is None  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.unit
-def test_a_run_compares_with_a_baseline(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
-    evals = own_evals(monkeypatch, env, {"one": ack_scenario("one")})
-    out = env / "results"
-    assert agent("eval", "run", "--out", str(out)).exit_code == 0
-    (baseline,) = run_folders(out)
-    (evals / "scenarios" / "core" / "one.yaml").write_text(ack_scenario("one", llm_calls=4))
+@pytest.mark.usefixtures("keys")
+def test_eval_run_on_the_default_jev_gate_records_it_and_hands_the_trials_its_model(
+    offline: Offline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GATE_ACT_THRESHOLD", "0.15")
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
 
-    result = agent("eval", "run", "--compare", str(baseline), "--out", str(out))
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")  # jev by default
 
-    assert result.exit_code == 1
-    assert "vs baseline: 1 new failure (one), 0 fixed, cost +$0.0000" in result.output
-    latest = run_folders(out)[-1]
-    assert "New failures: one" in (latest / REPORT_FILE).read_text(encoding="utf-8")
+    assert result.exit_code == 0, result.output
+    assert "gate engine: jev" in result.output
+    (call,) = offline.calls
+    metadata: RunMetadata = call["metadata"]
+    assert (metadata.gate_engine, metadata.gate_act_threshold) == ("jev", 0.15)
+    assert metadata.for_langsmith()["model_decision_gate"] == "typesafe/jev-1.14"
+    target: ScenarioTarget = call["target"]
+    config = target._config  # pyright: ignore[reportPrivateUsage]
+    assert config is not None and config.gate_engine is GateEngine.JEV
+    assert isinstance(target._decisions, OpenRouterDecisions)  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.unit
-def test_a_missing_baseline_exits_2_before_running(env: Path) -> None:
-    result = agent("eval", "run", "--compare", str(env / "nothing"), "--out", str(env / "r"))
+def test_eval_run_refuses_a_gate_engine_it_does_not_know(offline: Offline) -> None:
+    result = agent("eval", "run", "--gate-engine", "gpt")
 
     assert result.exit_code == 2
-    assert "cannot read the baseline" in result.stderr
-    assert not (env / "r").exists()
+    assert "--gate-engine is llm or jev, not 'gpt'" in result.stderr
+    assert offline.calls == []
 
 
-# --- eval list / report -----------------------------------------------------------------
+@pytest.mark.usefixtures("keys")
+def test_eval_run_on_a_prompt_tag_resolves_every_role_at_it(offline: Offline) -> None:
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
+
+    result = agent(
+        "eval", "run", "--scenario", "b_ack_with_nothing_open", "--prompt-tag", "candidate"
+    )
+
+    assert result.exit_code == 0, result.output
+    (asked,) = offline.prompt_settings
+    assert asked.prompts_tag == "candidate"
 
 
-@pytest.mark.unit
-def test_list_shows_every_scenario_with_its_tags() -> None:
+@pytest.mark.usefixtures("keys")
+def test_prompts_the_hub_cannot_serve_exit_2_before_anything_runs(
+    offline: Offline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(settings: Settings) -> Any:
+        raise bootstrap.BootstrapError("the agent prompt freight-agent-agent:prod is not there")
+
+    monkeypatch.setattr(bootstrap, "build_prompts", missing)
+
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
+
+    assert result.exit_code == cli.HARNESS_ERROR
+    assert "freight-agent-agent:prod is not there" in result.stderr
+    assert offline.calls == []
+
+
+@pytest.mark.usefixtures("keys")
+def test_a_passing_run_prints_the_table_and_exits_0(offline: Offline) -> None:
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True, cost_usd=0.0123))
+
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
+
+    assert result.exit_code == cli.PASSED, result.output
+    assert cli.render_table(offline.run, 1) in result.output
+    assert "  b_ack_with_nothing_open  pass     1/1  $0.0123" in result.output
+    assert "pass^1: 1/1 scenarios, $0.0123 spent" in result.output
+    assert result.output.rstrip().endswith("https://ls/x")
+
+
+@pytest.mark.usefixtures("keys")
+def test_a_regression_that_fails_pass_hat_k_exits_1(offline: Offline) -> None:
+    offline.run = experiment_run(
+        outcome("b_ack_with_nothing_open", True, False), outcome("c3_relative_eta", False, False)
+    )
+
+    result = agent("eval", "run", "--k", "2")
+
+    assert result.exit_code == cli.FAILED, result.output
+    line = next(x for x in result.output.splitlines() if "b_ack_with_nothing_open" in x)
+    assert "FAIL" in line and "1/2" in line
+    assert "step 0: expect.llm_calls: expected 1, got 2" in line
+
+
+@pytest.mark.usefixtures("keys")
+def test_a_failing_capability_scenario_alone_exits_0(offline: Offline) -> None:
+    offline.run = experiment_run(
+        outcome("b_ack_with_nothing_open", True), outcome("c3_relative_eta", False)
+    )
+
+    result = agent("eval", "run")
+
+    assert result.exit_code == cli.PASSED, result.output
+    assert "pass^1: 1/2 scenarios" in result.output
+
+
+@pytest.mark.usefixtures("keys")
+def test_examples_the_cost_cap_stopped_exit_3(offline: Offline) -> None:
+    offline.run = experiment_run(
+        outcome("b_ack_with_nothing_open", True),
+        outcome("c1_eta_from_driver", not_run=1),
+        not_run=("c1_eta_from_driver",),
+    )
+
+    result = agent("eval", "run")
+
+    assert result.exit_code == cli.COST_CAP, result.output
+    line = next(x for x in result.output.splitlines() if x.strip().startswith("c1_eta"))
+    assert "not run" in line and "0/1" in line
+    assert "not run (cost cap): c1_eta_from_driver" in result.output
+
+
+@pytest.mark.usefixtures("keys")
+def test_a_regression_failure_wins_over_the_cost_cap(offline: Offline) -> None:
+    offline.run = experiment_run(
+        outcome("b_ack_with_nothing_open", False),
+        outcome("c1_eta_from_driver", not_run=1),
+        not_run=("c1_eta_from_driver",),
+    )
+
+    result = agent("eval", "run")
+
+    assert result.exit_code == cli.FAILED
+
+
+def test_the_table_says_when_there_is_no_link() -> None:
+    table = cli.render_table(experiment_run(outcome("b_ack_with_nothing_open", True), url=None), 1)
+
+    assert table.splitlines()[0] == "experiment core-k1-abc"
+    assert table.splitlines()[-1] == "  (no experiment link)"
+
+
+def test_exit_codes_follow_the_outcomes() -> None:
+    def code(*outcomes: ScenarioOutcome, not_run: tuple[str, ...] = ()) -> int:
+        return cli.exit_code(experiment_run(*outcomes, not_run=not_run))
+
+    assert code(outcome("b_ack_with_nothing_open", True)) == cli.PASSED
+    assert code(outcome("b_ack_with_nothing_open", False)) == cli.FAILED
+    assert code(outcome("c3_relative_eta", False)) == cli.PASSED  # capability
+    assert code(outcome("c1_eta_from_driver", not_run=1), not_run=("c1",)) == cli.COST_CAP
+
+
+# --- eval list --------------------------------------------------------------------------
+
+
+def test_list_shows_every_suite_and_scenario_with_its_tags() -> None:
     result = agent("eval", "list")
 
     assert result.exit_code == 0
-    assert "core (22 scenarios)" in result.output
+    assert [x for x in result.output.splitlines() if not x.startswith(" ")] == [
+        "agent (1 scenarios)",
+        "core (22 scenarios)",
+        "docs (3 scenarios)",
+    ]
     line = next(x for x in result.output.splitlines() if "d4_lumper_no_sop" in x)
     assert "capability, sop:driver_questions" in line
 
 
-@pytest.mark.unit
-def test_report_renders_a_results_file_again(env: Path) -> None:
-    out = env / "results"
-    agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--out", str(out))
-    (folder,) = run_folders(out)
-    (folder / REPORT_FILE).unlink()
+def test_list_of_one_suite() -> None:
+    result = agent("eval", "list", "--suite", "docs")
 
-    result = agent("eval", "report", str(folder / RESULTS_FILE))
-
-    assert result.exit_code == 0, result.output
-    assert "PASS       b_ack_with_nothing_open" in result.output
-    assert "verdict: passed" in result.output
-    assert (folder / REPORT_FILE).is_file()
+    assert result.exit_code == 0
+    assert result.output.splitlines()[0] == "docs (3 scenarios)"
+    assert "p1_pod_clean_delivers" in result.output
+    assert "a_client_a_high_risk" not in result.output
 
 
-@pytest.mark.unit
-def test_report_of_something_else_exits_2(env: Path) -> None:
-    result = agent("eval", "report", str(env))
+def test_list_of_an_unknown_suite_exits_2() -> None:
+    result = agent("eval", "list", "--suite", "nope")
 
     assert result.exit_code == 2
-    assert "no results.json" in result.stderr
+    assert "no suite 'nope'" in result.stderr
+
+
+def test_list_without_suites_says_so(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
+    monkeypatch.setenv("EVALS_DIR", str(env / "empty"))
+
+    result = agent("eval", "list")
+
+    assert result.exit_code == 0
+    assert f"no suites in {env / 'empty' / 'scenarios'}" in result.output
 
 
 # --- sop lint ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_sop_lint_passes_on_the_shipped_sops() -> None:
     result = agent("sop", "lint")
 
@@ -400,7 +504,6 @@ def write_sop(root: Path, relative: str, header: str) -> None:
     path.write_text(f"---\n{header}\n---\nThe procedure.\n", encoding="utf-8")
 
 
-@pytest.mark.unit
 def test_sop_lint_warnings_alone_exit_0(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
     sops = env / "sops"
     write_sop(sops, "standard/uncovered.md", "id: uncovered\ntitle: Uncovered")
@@ -415,7 +518,6 @@ def test_sop_lint_warnings_alone_exit_0(monkeypatch: pytest.MonkeyPatch, env: Pa
     assert "0 errors, 1 warnings" in result.output
 
 
-@pytest.mark.unit
 def test_sop_lint_errors_exit_1(monkeypatch: pytest.MonkeyPatch, env: Path) -> None:
     sops = env / "sops"
     write_sop(sops, "standard/acknowledgements.md", "id: acknowledgements\nintents: [nope]")
@@ -428,3 +530,17 @@ def test_sop_lint_errors_exit_1(monkeypatch: pytest.MonkeyPatch, env: Path) -> N
         result.output
     )
     assert "1 errors, 0 warnings" in result.output
+
+
+def test_sop_lint_without_readable_scenarios_skips_the_coverage(
+    monkeypatch: pytest.MonkeyPatch, env: Path
+) -> None:
+    folder = env / "evals" / "scenarios" / "core"
+    folder.mkdir(parents=True)
+    (folder / "broken.yaml").write_text("id: [unclosed\n", encoding="utf-8")
+    monkeypatch.setenv("EVALS_DIR", str(env / "evals"))
+
+    result = agent("sop", "lint")
+
+    assert result.exit_code == 0, result.output
+    assert "warning: coverage not checked, the scenarios cannot be read" in result.output

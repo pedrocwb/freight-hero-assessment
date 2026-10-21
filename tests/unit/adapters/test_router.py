@@ -1,47 +1,68 @@
+"""The role router: each request, forced answer or agent round, goes to its role's model."""
+
 import pytest
 
 from freight_agent.adapters.llm.router import NoModelForRole, RoleRouter
-from freight_agent.adapters.llm.scripted import ScriptedModel
-from freight_agent.domain.actions import Plan
+from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
+from tests.fakes import FakeModel
 
-GATE = LlmRequest(role=ModelRole.GATE, system="s", user="u", max_tool_rounds=0)
-DECIDE = LlmRequest(role=ModelRole.AGENT, system="s", user="u")
+pytestmark = pytest.mark.unit
+
+GATE = LlmRequest(role=ModelRole.GATE, system="s", user="u")
+ROUND = ChatRequest(role=ModelRole.AGENT, system="s", user="u")
 ACK = GateDecision(intent=Intent.ACKNOWLEDGEMENT, act=False, reason="just ok")
-EMPTY_PLAN = Plan(rationale="nothing to do")
+DONE = AgentOutcome(rationale="nothing to do")
 
 
-@pytest.mark.unit
 async def test_each_request_goes_to_the_model_of_its_role() -> None:
-    gate, decide = ScriptedModel("gate-model"), ScriptedModel("decide-model")
+    gate, agent = FakeModel("gate-model"), FakeModel("agent-model")
     gate.push(ModelRole.GATE, ACK)
-    decide.push(ModelRole.AGENT, EMPTY_PLAN)
-    router = RoleRouter({ModelRole.GATE: gate, ModelRole.AGENT: decide})
+    agent.push(ModelRole.AGENT, DONE)
+    router = RoleRouter({ModelRole.GATE: gate, ModelRole.AGENT: agent})
 
     gated = await router.generate(GATE, GateDecision)
-    decided = await router.generate(DECIDE, Plan)
+    reply = await router.chat(ROUND, AgentOutcome)
 
     assert (gated.parsed, gated.usage.model) == (ACK, "gate-model")
-    assert (decided.parsed, decided.usage.model) == (EMPTY_PLAN, "decide-model")
+    assert (reply.answer, reply.usage.model) == (DONE, "agent-model")
     assert [c.role for c in gate.calls] == [ModelRole.GATE]
-    assert [c.role for c in decide.calls] == [ModelRole.AGENT]
+    assert [c.role for c in agent.calls] == [ModelRole.AGENT]
 
 
-@pytest.mark.unit
+async def test_a_forced_answer_for_the_agent_role_goes_to_the_agent_model() -> None:
+    """`generate` and `chat` route by the request's role alone."""
+    gate, agent = FakeModel("gate-model"), FakeModel("agent-model")
+    agent.push(ModelRole.AGENT, DONE)
+    router = RoleRouter({ModelRole.GATE: gate, ModelRole.AGENT: agent})
+
+    response = await router.generate(LlmRequest(ModelRole.AGENT, "s", "u"), AgentOutcome)
+
+    assert response.usage.model == "agent-model"
+    assert gate.calls == []
+
+
 async def test_a_role_with_no_model_is_an_llm_error_naming_the_role() -> None:
-    router = RoleRouter({ModelRole.GATE: ScriptedModel()})
+    router = RoleRouter({ModelRole.GATE: FakeModel()})
 
     with pytest.raises(LlmError, match="agent") as raised:
-        await router.generate(DECIDE, Plan)
+        await router.chat(ROUND, AgentOutcome)
 
     assert isinstance(raised.value, NoModelForRole)
     assert raised.value.role is ModelRole.AGENT
+    assert "configured: gate" in str(raised.value)
 
 
-@pytest.mark.unit
+async def test_a_forced_answer_for_a_role_with_no_model_is_an_llm_error_too() -> None:
+    router = RoleRouter({ModelRole.AGENT: FakeModel()})
+
+    with pytest.raises(NoModelForRole, match="gate"):
+        await router.generate(GATE, GateDecision)
+
+
 def test_the_router_says_which_model_serves_a_role() -> None:
-    gate = ScriptedModel()
+    gate = FakeModel()
     router = RoleRouter({ModelRole.GATE: gate})
 
     assert router.roles == frozenset({ModelRole.GATE})
@@ -50,17 +71,15 @@ def test_the_router_says_which_model_serves_a_role() -> None:
         router.model_for(ModelRole.JUDGE)
 
 
-@pytest.mark.unit
 def test_a_later_change_to_the_callers_mapping_does_not_reroute() -> None:
-    models: dict[ModelRole, LanguageModel] = {ModelRole.GATE: ScriptedModel()}
+    models: dict[ModelRole, LanguageModel] = {ModelRole.GATE: FakeModel()}
     router = RoleRouter(models)
 
-    models[ModelRole.AGENT] = ScriptedModel()
+    models[ModelRole.AGENT] = FakeModel()
 
     assert router.roles == frozenset({ModelRole.GATE})
 
 
-@pytest.mark.unit
 def test_a_router_needs_at_least_one_model() -> None:
     with pytest.raises(ValueError, match="at least one"):
         RoleRouter({})

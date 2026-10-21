@@ -3,8 +3,8 @@
 Paperwork for the load in `../load_481207.json`: PO 55821, carrier Prairie Haul LLC
 (MC 778120), shipper Riverbend Foods, pickup at the Riverbend plant in Stockton, CA
 (window 2026-10-13 06:00 to 14:00), delivery at Valley DC in Reno, NV (fixed appointment
-2026-10-14 09:30), canned tomato sauce, 38,000 lb. Used by the document pipeline (card
-DOC), the `docs` eval suite (card EVK) and the end-to-end demo (plan steps 7 and 8).
+2026-10-14 09:30), canned tomato sauce, 38,000 lb. Used by the document pipeline's tests,
+the `docs` eval suite and the platform (attach one to a load in the Load inspector).
 
 | File | Type | Pages | Text layer | Expected status | What it tests |
 |---|---|---|---|---|---|
@@ -24,7 +24,7 @@ uv run --with pypdfium2 python evals/fixtures/docs/make_fixtures.py
 
 - `pdfmini.py` is a small PDF writer with no dependency: standard Helvetica fonts
   (WinAnsi), plain uncompressed content streams, FlateDecode RGB images and a correct
-  xref table. `../sops/make_fixtures.py` uses it too.
+  xref table.
 - pypdfium2 is needed only to render the clean POD to pixels for `pod_scanned.pdf`. It
   comes from `uv run --with pypdfium2` and is **not** added to the project. Without it,
   the script writes the three text PDFs and the four JSON files, and says it skipped the

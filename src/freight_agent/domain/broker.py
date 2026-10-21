@@ -1,35 +1,31 @@
-"""Brokers as data: the catalog a broker's runs follow, versioned for canary rollouts.
+"""Brokers as data: the catalog a broker's runs follow.
 
 Owner: card W3-BRK.
 
 A broker is onboarded without code: its intents (what an event can mean), its
 obligation kinds (what it waits for, how often it follows up, who gets the case when
 the follow-ups are used up), its document types and the documents a stage requires,
-and the limits of its runs. Every broker starts as a copy of the standard catalog
-(`new_broker`), which carries today's 12 intents, the `eta_request` obligation and the
-four document types of `docs/answers.md` 1.2.
+and the limits of its runs. Every broker starts from the standard catalog
+(`standard_broker`), which carries today's 12 intents, the `eta_request` obligation and
+the four document types of `docs/answers.md` 1.2. A client that needs more writes only
+what changes (`CatalogOverrides`, read from `sops/clients/<id>/broker.yaml` next to its
+SOP sections); `client_broker` applies it.
 
 A catalog is checked whenever a `Broker` is validated (`catalog_problems`): ids are
 snake_case and unique, the intents code emits are there with the behaviour code relies
 on, requirements name types and kinds of the catalog, and the limits are sane. So a
-broker posted to the API, read back from the database or loaded from an export is
-usable by every run, or refused with every problem named. `model_copy` skips pydantic
-validation, so a change goes through `Broker.revised`.
-
-Each change of a broker's configuration is saved as a new `config_version`; the
-repository keeps every version, so a canary can send a share of the loads to the new
-version and the rest to the previous one (`choose_version`, sticky per load id).
+broker read from a client's file is usable by every run, or refused with every problem
+named. `model_copy` skips pydantic validation, so a change goes through `Broker.revised`.
 """
 
-import hashlib
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import cache
 from typing import Any, Final, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import model_validator
 
 from freight_agent.domain.base import DomainModel
 from freight_agent.domain.intents import Intent
@@ -149,10 +145,12 @@ class DocumentRequirement(DomainModel):
 
 
 class BrokerLimits(DomainModel):
-    """The validator's limits and the agent loop's budget for this broker's runs.
-
-    `max_steps` is the number of tool rounds; 0 means one plan in the answer and no
-    action tools (the pre-wave-3 behaviour, a per-broker safety switch).
+    """The validator's limits and the agent loop's budget for this broker's runs, which
+    the run graph checks after every round: `max_steps` rounds of tool calls (then one
+    last round must answer), `max_cost_usd` for the agent's rounds (once spent, the next
+    round must answer), `max_rejections` refused action calls (over it the run stops and
+    a Hero takes the event). The catalog checks bound each (`catalog_problems`); at
+    least one round, since the agent acts only through its tools.
     """
 
     validation: ValidationConfig = ValidationConfig()
@@ -161,18 +159,8 @@ class BrokerLimits(DomainModel):
     max_rejections: int = 3
 
 
-class Rollout(DomainModel):
-    """`percent` of the loads run on the current version, the rest on `previous_version`.
-
-    Publishing sets 100 with the version it replaces; rollback is `percent: 0`.
-    """
-
-    percent: int = Field(default=100, ge=0, le=100)
-    previous_version: int | None = None
-
-
 class Broker(DomainModel):
-    """A broker's whole configuration at one `config_version`.
+    """A broker's whole configuration.
 
     Validating one runs `catalog_problems` and refuses the broker with every problem
     found; `model_copy` does not validate, so change a broker with `revised`.
@@ -186,9 +174,6 @@ class Broker(DomainModel):
     document_types: tuple[DocumentTypeDef, ...] = ()
     documents: tuple[DocumentRequirement, ...] = ()
     limits: BrokerLimits = BrokerLimits()
-    sop_version: str | None = None  # the published SOP version this config runs with
-    config_version: int = 1
-    rollout: Rollout = Rollout()
 
     @model_validator(mode="after")
     def _check_catalog(self) -> Self:
@@ -245,34 +230,70 @@ class Broker(DomainModel):
 
 
 def new_broker(broker_id: str, name: str) -> Broker:
-    """A new broker: a copy of the standard catalog under its own id, version 1."""
+    """A new broker: a copy of the standard catalog under its own id."""
     return standard_broker().revised(broker_id=broker_id, name=name)
 
 
-def with_follow_up_intents(
-    intents: Sequence[IntentDef], obligations: Sequence[ObligationDef]
-) -> tuple[IntentDef, ...]:
-    """`intents`, plus a system intent for each obligation whose follow-up intent is
-    missing (its timer emits it). Intents already there are kept as they are."""
-    found = list(intents)
-    known = {i.intent_id for i in found}
-    for obligation in obligations:
-        intent_id = _follow_up_of(obligation)
-        if intent_id in known:
-            continue
-        known.add(intent_id)
-        found.append(
-            IntentDef(
-                intent_id=intent_id,
-                title=f"{obligation.title} follow-up due",
-                description=(
-                    f"The follow-up timer of an open {obligation.kind} obligation is due: its"
-                    " wait ended without an answer."
-                ),
-                system=True,
-            )
-        )
-    return tuple(found)
+class CatalogOverrides(DomainModel):
+    """How a client's catalog differs from the standard one: what its
+    `sops/clients/<id>/broker.yaml` holds, read by `client_broker`.
+
+    `intents`, `obligations` and `document_types` are whole definitions: one whose id is
+    in the standard catalog replaces that entry where it stands, a new one comes after
+    the standard entries, in the order given. `documents` are the client's document
+    requirements (the standard catalog has none). `name`, `triage` and `limits`, when
+    given, replace the standard ones. An obligation's follow-up intent is a system
+    intent the file lists too: its text reaches the agent's prompt.
+    """
+
+    name: str | None = None
+    triage: bool | None = None
+    intents: tuple[IntentDef, ...] = ()
+    obligations: tuple[ObligationDef, ...] = ()
+    document_types: tuple[DocumentTypeDef, ...] = ()
+    documents: tuple[DocumentRequirement, ...] = ()
+    limits: BrokerLimits | None = None
+
+    @model_validator(mode="after")
+    def _ids_once(self) -> Self:
+        """An id given twice would silently lose one definition when it replaces."""
+        problems = [
+            *_id_problems("intent id", (i.intent_id for i in self.intents)),
+            *_id_problems("obligation kind", (o.kind for o in self.obligations)),
+            *_id_problems("document type id", (d.type_id for d in self.document_types)),
+        ]
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+
+def client_broker(broker_id: str, overrides: CatalogOverrides) -> Broker:
+    """The client's catalog: a new broker under the client's id (and its `name`, or the
+    id), with `overrides`, validated as a whole (`catalog_problems`)."""
+    base = new_broker(broker_id, overrides.name or broker_id)
+    changes: dict[str, Any] = {
+        "intents": _replaced(base.intents, overrides.intents, lambda i: i.intent_id),
+        "obligations": _replaced(base.obligations, overrides.obligations, lambda o: o.kind),
+        "document_types": _replaced(
+            base.document_types, overrides.document_types, lambda d: d.type_id
+        ),
+        "documents": (*base.documents, *overrides.documents),
+    }
+    if overrides.triage is not None:
+        changes["triage"] = overrides.triage
+    if overrides.limits is not None:
+        changes["limits"] = overrides.limits
+    return base.revised(**changes)
+
+
+def _replaced[T](
+    base: Sequence[T], overrides: Sequence[T], key: Callable[[T], str]
+) -> tuple[T, ...]:
+    """`base` with each override in place of the entry of its id, then the new ids."""
+    known = {key(entry) for entry in base}
+    by_id = {key(entry): entry for entry in overrides if key(entry) in known}
+    added = tuple(entry for entry in overrides if key(entry) not in known)
+    return (*(by_id.get(key(entry), entry) for entry in base), *added)
 
 
 # --- catalog validation -------------------------------------------------------------------
@@ -320,8 +341,16 @@ def _between(name: str, value: float, low: float, high: float) -> list[str]:
     return [f"{name} must be between {low:g} and {high:g}"]
 
 
+def _positive(name: str, value: float, high: float) -> list[str]:
+    """Above 0: a budget of nothing would force the agent's first round to answer, so it
+    could never act."""
+    if math.isfinite(value) and 0 < value <= high:
+        return []
+    return [f"{name} must be above 0 and at most {high:g}"]
+
+
 def _identity_problems(broker: Broker) -> list[str]:
-    """The id, the name, and the versions a rollout splits the loads between."""
+    """The id and the name."""
     problems: list[str] = []
     broker_id = broker.broker_id
     if len(broker_id) > _MAX_ID_LENGTH or not _BROKER_ID.fullmatch(broker_id):
@@ -331,14 +360,6 @@ def _identity_problems(broker: Broker) -> list[str]:
         )
     if _blank(broker.name):
         problems.append(f"broker {broker_id} has no name")
-    if broker.config_version < 1:
-        problems.append(f"config_version must be at least 1, not {broker.config_version}")
-    previous = broker.rollout.previous_version
-    if previous is not None and not 1 <= previous < broker.config_version:
-        problems.append(
-            "rollout.previous_version must be an earlier version than"
-            f" {broker.config_version}, not {previous}"
-        )
     return problems
 
 
@@ -503,8 +524,8 @@ def _requirement_problems(broker: Broker) -> list[str]:
 
 def _limit_problems(limits: BrokerLimits) -> list[str]:
     problems = [
-        *_between("limits.max_steps", limits.max_steps, 0, MAX_STEPS),
-        *_between("limits.max_cost_usd", limits.max_cost_usd, 0, MAX_COST_USD),
+        *_between("limits.max_steps", limits.max_steps, 1, MAX_STEPS),
+        *_positive("limits.max_cost_usd", limits.max_cost_usd, MAX_COST_USD),
         *_between("limits.max_rejections", limits.max_rejections, 0, MAX_REJECTIONS),
     ]
     validation = limits.validation
@@ -525,21 +546,6 @@ def _limit_problems(limits: BrokerLimits) -> list[str]:
     for kind, cap in validation.max_attempts.items():
         problems += _between(f"limits.validation.max_attempts[{kind}]", cap, 1, MAX_ATTEMPTS)
     return problems
-
-
-def choose_version(current: Broker, previous: Broker | None, load_id: str) -> Broker:
-    """The version a load runs on during a rollout.
-
-    `current.rollout.percent` of the loads get `current`. A load always lands in the same
-    bucket (the sha256 of its id), so it keeps its version from one run to the next.
-    """
-    percent = current.rollout.percent
-    if previous is None or percent >= 100:
-        return current
-    if percent <= 0:
-        return previous
-    bucket = int.from_bytes(hashlib.sha256(load_id.encode()).digest()[:8], "big") % 100
-    return current if bucket < percent else previous
 
 
 # --- the standard catalog ---------------------------------------------------------------

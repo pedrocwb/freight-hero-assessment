@@ -1,35 +1,34 @@
-"""The agent: its request, its staging, and the fold of a transcript into the staged plan."""
+"""The agent's two steps: one model round (`Agent.round`, what it asks the model) and the
+tool calls of a round (`Agent.call_tools`, how each one is answered), the staging of one
+action call (`stage`), and the context the rules and the prompt read."""
 
-import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from freight_agent.adapters.llm.scripted import ScriptedModel, ScriptedReply
 from freight_agent.application.agent import (
-    READ_ONLY_ROUNDS,
+    ANSWER_NOW,
     Agent,
     Proposal,
-    Staged,
-    Staging,
     catalog_intent,
-    merge_plan,
     sections_in_progress,
-    stage_from_transcript,
+    stage,
     validation_context,
 )
 from freight_agent.application.agent_tools import ACTION_TOOLS, READ_TOOLS
 from freight_agent.application.context import RunContext
-from freight_agent.application.prompts import render_agent_system_prompt
+from freight_agent.application.prompts import render_agent_prompt, render_agent_system_prompt
 from freight_agent.domain.actions import (
+    FINISH,
     AgentOutcome,
-    CreateHeroTask,
-    Plan,
     Purpose,
     ScheduleTimer,
     SendSms,
+    UpdateStage,
     WriteTmsNote,
 )
 from freight_agent.domain.broker import Broker, BrokerLimits, ObligationDef, standard_broker
@@ -39,10 +38,20 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationKind, ObligationStatus
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.runs import TrajectoryStep
-from freight_agent.domain.sop import CatalogEntry, ResolvedSection, ResolvedSop
-from freight_agent.ports.llm import LlmError, ModelRole
+from freight_agent.domain.sop import CatalogEntry, ResolvedSection, ResolvedSop, SearchHit
+from freight_agent.ports.llm import (
+    AssistantTurn,
+    ChatRequest,
+    LlmError,
+    ModelRole,
+    ToolCall,
+    ToolResult,
+    UserTurn,
+)
+from freight_agent.ports.prompts import PromptError
+from tests.fakes import FakeModel, Round, call
+from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import FakeSop
-from tests.unit.application.transcripts import Transcript, calls
 
 pytestmark = pytest.mark.unit
 
@@ -53,6 +62,7 @@ QUESTION = GateDecision(intent=Intent.QUESTION, act=True, reason="asks for the P
 REPLY = SendSms(contact_id=DRIVER, text="The PO is 55821.", purpose=Purpose.REPLY)
 REPLY_ARGS: dict[str, Any] = {"contact_id": DRIVER, "text": "The PO is 55821.", "purpose": "reply"}
 NOTE = WriteTmsNote(text="Driver asked for the PO.")
+NOTE_ARGS: dict[str, Any] = {"text": NOTE.text}
 
 
 def at(hour: int, minute: int) -> datetime:
@@ -141,162 +151,159 @@ def with_limits(**limits: Any) -> Broker:
     return standard_broker().model_copy(update={"limits": BrokerLimits(**limits)})
 
 
-def staging(ctx: RunContext, max_rejections: int = 3) -> Staging:
-    return Staging(validation_context(ctx), default_rules(), max_rejections)
+def staged(
+    ctx: RunContext, tool: str, args: dict[str, Any], proposals: Sequence[Proposal] = ()
+) -> tuple[str, Proposal | None]:
+    """Stage one call with the default rules, after `proposals`."""
+    checks = validation_context(ctx)
+    return stage(tool, args, checks=checks, rules=default_rules(), proposals=proposals)
 
 
-def fold(ctx: RunContext, transcript: Any, offered: Any = ACTION_TOOLS + READ_TOOLS) -> Staged:
-    return stage_from_transcript(
-        transcript,
-        checks=validation_context(ctx),
-        rules=default_rules(),
-        max_rejections=3,
-        offered=offered,
+async def answer(
+    ctx: RunContext,
+    *calls: ToolCall,
+    proposals: Sequence[Proposal] = (),
+    knowledge: Any = None,
+    round_cost: float = 0.0,
+) -> Any:
+    """`Agent.call_tools` over `calls`, with the visible sections of these tests."""
+    agent = Agent(FakeModel(), knowledge or FakeSop(), PROMPTS.agent)
+    return await agent.call_tools(ctx, VISIBLE, calls, proposals=proposals, round_cost=round_cost)
+
+
+# --- the round: what the agent asks the model -------------------------------------------
+
+
+async def test_a_round_sends_one_agent_chat_with_the_prompts_the_tools_and_the_history(
+    load: Load,
+) -> None:
+    model = FakeModel("cheap-agent")
+    model.push(ModelRole.AGENT, AgentOutcome(rationale="driver_questions"))
+    broker = with_limits(max_steps=5)
+    ctx = context(load, broker=broker)
+    agent = Agent(model, FakeSop(), PROMPTS.agent, timeout_s=45.0)
+    earlier = (
+        AssistantTurn(tool_calls=(ToolCall(id="c1", name="get_load"),)),
+        ToolResult(call_id="c1", name="get_load", content="## Load"),
     )
 
+    reply = await agent.round(ctx, QUESTION, resolved(QUESTIONS), VISIBLE, earlier)
 
-# --- the request ------------------------------------------------------------------------
-
-
-async def test_the_agent_sends_one_agent_request_inside_the_brokers_budgets(load: Load) -> None:
-    model = ScriptedModel("cheap-agent")
-    model.push(ModelRole.AGENT, Plan(actions=(REPLY,), rationale="driver_questions"))
-    broker = with_limits(max_steps=5, max_cost_usd=0.02)
-    agent = Agent(model, FakeSop(), timeout_s=45.0)
-
-    result = await agent.run(context(load, broker=broker), QUESTION, resolved(QUESTIONS), VISIBLE)
-
-    assert result.plan == Plan(actions=(REPLY,), rationale="driver_questions")
-    assert [u.model for u in result.usage] == ["cheap-agent"]
-    (call,) = model.calls
-    assert (call.role, call.schema) == (ModelRole.AGENT, "AgentOutcome")
-    request = call.request
-    assert (request.max_tool_rounds, request.max_cost_usd, request.timeout_s) == (5, 0.02, 45.0)
-    assert request.system == render_agent_system_prompt(broker)
+    assert reply.answer == AgentOutcome(rationale="driver_questions")
+    assert reply.usage.model == "cheap-agent"
+    (sent,) = model.calls
+    assert (sent.role, sent.schema) == (ModelRole.AGENT, "AgentOutcome")
+    request = sent.request
+    assert isinstance(request, ChatRequest)
+    assert (request.history, request.force_answer, request.timeout_s) == (earlier, False, 45.0)
+    assert request.system == render_agent_system_prompt(PROMPTS.agent, broker)
+    assert "You have at most 5 rounds of tool calls" in request.system
+    assert request.user == render_agent_prompt(
+        PROMPTS.agent, ctx, QUESTION, resolved(QUESTIONS), ()
+    )
     assert "Answer from the load metadata." in request.user
+    assert (request.system, request.user) == agent.prompts(
+        ctx, QUESTION, resolved(QUESTIONS), VISIBLE
+    )
     names = [t.name for t in request.tools]
     assert names == [*READ_TOOLS[:5], *ACTION_TOOLS]  # no document in view, no requirement
+    assert request.tools == agent.tools(ctx, VISIBLE).specs
+    assert FINISH not in names  # the answer tool is the adapter's, from the schema
 
 
-async def test_with_max_steps_zero_the_agent_has_read_tools_for_two_rounds(load: Load) -> None:
-    model = ScriptedModel()
-    model.push(ModelRole.AGENT, Plan())
+async def test_a_forced_round_asks_the_model_to_answer_now(load: Load) -> None:
+    model = FakeModel()
+    model.push(ModelRole.AGENT, AgentOutcome())
+    history = (AssistantTurn(text="Thinking about it."), UserTurn(ANSWER_NOW))
 
-    await Agent(model, FakeSop()).run(
-        context(load, broker=with_limits(max_steps=0)), QUESTION, resolved(QUESTIONS), VISIBLE
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
+        context(load), QUESTION, resolved(QUESTIONS), VISIBLE, history, force_answer=True
     )
 
     request = model.calls[0].request
-    assert request.max_tool_rounds == READ_ONLY_ROUNDS == 2
-    assert not set(ACTION_TOOLS) & {t.name for t in request.tools}
-    assert "You return a plan" in request.system
+    assert isinstance(request, ChatRequest)
+    assert request.force_answer is True
+    assert request.history == history
+    assert ANSWER_NOW == "Now call finish with your final answer."
+
+
+async def test_a_round_that_calls_tools_returns_the_calls_and_no_answer(load: Load) -> None:
+    model = FakeModel()
+    lookup = call("get_load", part="stops")
+    model.push(ModelRole.AGENT, Round(calls=(lookup,), text="Let me check.", cost_usd=0.001))
+
+    reply = await Agent(model, FakeSop(), PROMPTS.agent).round(
+        context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
+    )
+
+    assert reply.answer is None
+    assert reply.turn == AssistantTurn(text="Let me check.", tool_calls=(lookup,))
+    assert reply.usage.cost_usd == 0.001
 
 
 async def test_read_document_is_offered_when_an_attachment_is_in_view(load: Load) -> None:
-    model = ScriptedModel()
-    model.push(ModelRole.AGENT, Plan())
+    model = FakeModel()
+    model.push(ModelRole.AGENT, AgentOutcome())
     bol = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image/jpeg", ref="r")
 
-    await Agent(model, FakeSop()).run(
-        context(load, attachments=(bol,)), QUESTION, resolved(QUESTIONS), VISIBLE
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
+        context(load, attachments=(bol,)), QUESTION, resolved(QUESTIONS), VISIBLE, ()
     )
 
-    assert "read_document" in [t.name for t in model.calls[0].request.tools]
+    request = model.calls[0].request
+    assert isinstance(request, ChatRequest)
+    assert "read_document" in [t.name for t in request.tools]
 
 
-async def test_the_procedure_of_an_open_obligation_is_in_the_prompt(load: Load) -> None:
-    model = ScriptedModel()
-    model.push(ModelRole.AGENT, Plan())
+def test_the_procedure_of_an_open_obligation_is_in_the_prompt(load: Load) -> None:
+    ctx = context(load, obligations=(eta_request(),))
 
-    await Agent(model, FakeSop()).run(
-        context(load, obligations=(eta_request(),)), QUESTION, resolved(QUESTIONS), VISIBLE
+    _, user = Agent(FakeModel(), FakeSop(), PROMPTS.agent).prompts(
+        ctx, QUESTION, resolved(QUESTIONS), VISIBLE
     )
 
-    assert HIGH_RISK_BODY in model.calls[0].request.user
+    assert HIGH_RISK_BODY in user
 
 
 async def test_model_failure_propagates(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.AGENT, LlmError("schema mismatch"))
 
     with pytest.raises(LlmError, match="schema mismatch"):
-        await Agent(model, FakeSop()).run(context(load), QUESTION, resolved(QUESTIONS), VISIBLE)
+        await Agent(model, FakeSop(), PROMPTS.agent).round(
+            context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
+        )
 
 
-async def test_the_live_tools_stage_and_answer_while_the_fold_decides(load: Load) -> None:
-    """A model that runs the offered action tool (as a live adapter does) gets the staging's
-    answer; the plan is still the fold over the transcript it returns."""
+def test_the_agent_stages_with_the_default_rules_unless_given_its_own() -> None:
+    names = [r.name for r in Agent(FakeModel(), FakeSop(), PROMPTS.agent).rules]
 
-    class LiveModel(ScriptedModel):
-        answers: list[str]
-
-        async def generate(self, request: Any, schema: Any) -> Any:
-            tool = next(t for t in request.tools if t.name == "send_sms")
-            self.answers = [await tool.run(REPLY_ARGS), await tool.run(REPLY_ARGS)]
-            self.push(
-                ModelRole.AGENT,
-                ScriptedReply(
-                    AgentOutcome(),
-                    Transcript()
-                    .round(("send_sms", REPLY_ARGS), results=(self.answers[0],))
-                    .round(("send_sms", REPLY_ARGS), results=(self.answers[1],))
-                    .build(),
-                ),
-            )
-            return await super().generate(request, schema)
-
-    model = LiveModel()
-
-    result = await Agent(model, FakeSop()).run(
-        context(load), QUESTION, resolved(QUESTIONS), VISIBLE
-    )
-
-    assert model.answers[0] == "accepted as action #1"
-    assert model.answers[1].startswith("rejected by no_duplicate_action")
-    assert [s.result for s in result.staged.trajectory] == model.answers
-    assert result.plan.actions == (REPLY, REPLY)
-    assert result.staged.accepted == (REPLY,)
-    assert result.staged.rejections == 1
+    assert names == [r.name for r in default_rules()]
+    assert Agent(FakeModel(), FakeSop(), PROMPTS.agent, rules=()).rules == ()
 
 
-async def test_the_answer_labels_the_event_and_says_when_no_procedure_applies(
-    load: Load,
-) -> None:
-    model = ScriptedModel()
-    model.push(ModelRole.AGENT, AgentOutcome(intent=" status_update ", no_procedure=True))
-
-    result = await Agent(model, FakeSop()).run(
-        context(load), QUESTION, resolved(QUESTIONS), VISIBLE
-    )
-
-    assert (result.intent, result.no_procedure) == (Intent.STATUS_UPDATE, True)
-
-
-# --- staging ------------------------------------------------------------------------------
+# --- stage: one action call ---------------------------------------------------------------
 
 
 def test_staging_accepts_an_action_and_numbers_it(load: Load) -> None:
-    stage = staging(context(load))
+    ctx = context(load)
 
-    assert stage.answer("send_sms", REPLY_ARGS) == ("accepted as action #1", True)
-    assert stage.answer("write_tms_note", {"text": NOTE.text}) == ("accepted as action #2", True)
-    assert stage.accepted == (REPLY, NOTE)
-    assert stage.rejections == 0
+    first, reply = staged(ctx, "send_sms", REPLY_ARGS)
+    second, note = staged(ctx, "write_tms_note", NOTE_ARGS, proposals=(Proposal(REPLY, True),))
+
+    assert (first, reply) == ("accepted as action #1", Proposal(REPLY, True))
+    assert (second, note) == ("accepted as action #2", Proposal(NOTE, True))
 
 
 def test_staging_refuses_by_rule_and_names_every_rule(load: Load) -> None:
-    stage = staging(context(load))
-
-    text, accepted = stage.answer(
-        "send_sms", {"contact_id": "x@y.com", "text": "Call me at 555-123-4567"}
+    text, proposal = staged(
+        context(load), "send_sms", {"contact_id": "x@y.com", "text": "Call me at 555-123-4567"}
     )
 
-    assert not accepted
     assert text.startswith("rejected by recipient_is_contact: not a contact of load 481207")
     assert "no_contact_details_in_text: outbound text contains a phone number" in text
-    assert stage.rejections == 1
-    assert stage.accepted == ()
-    (proposal,) = stage.proposals
+    assert proposal is not None and not proposal.accepted
+    assert proposal.action == SendSms(contact_id="x@y.com", text="Call me at 555-123-4567")
     assert [v.rule for v in proposal.violations] == [
         "recipient_is_contact",
         "no_contact_details_in_text",
@@ -304,50 +311,52 @@ def test_staging_refuses_by_rule_and_names_every_rule(load: Load) -> None:
 
 
 def test_staging_refuses_bad_arguments_without_proposing_an_action(load: Load) -> None:
-    stage = staging(context(load))
+    text, proposal = staged(context(load), "send_sms", {"text": "hi"})
 
-    text, accepted = stage.answer("send_sms", {"text": "hi"})
-
-    assert not accepted
+    assert proposal is None
     assert text == (
         "rejected: invalid arguments for send_sms: contact_id: Field required. "
         "Fix them and call it again."
     )
-    assert (stage.proposals, stage.rejections) == ([], 1)
 
 
 def test_staging_drops_unknown_fields_and_nulls_a_small_model_fills(load: Load) -> None:
-    stage = staging(context(load))
+    text, proposal = staged(
+        context(load), "send_sms", {**REPLY_ARGS, "subject": None, "kind": None, "x": 1}
+    )
 
-    text, _ = stage.answer("send_sms", {**REPLY_ARGS, "subject": None, "kind": None, "x": 1})
-
-    assert text == "accepted as action #1"
+    assert (text, proposal) == ("accepted as action #1", Proposal(REPLY, True))
 
 
 def test_staging_judges_each_action_against_the_ones_accepted_before(load: Load) -> None:
-    stage = staging(context(load))
+    ctx = context(load)
     ask = {"contact_id": DRIVER, "text": "ETA?", "purpose": "eta_request"}
     timer = {"kind": "eta_request", "due_in_minutes": 30}
 
-    assert stage.answer("schedule_timer", timer)[1] is False  # nothing open yet
-    assert stage.answer("send_sms", ask)[1] is True
-    assert stage.answer("schedule_timer", timer) == ("accepted as action #2", True)
+    _, early = staged(ctx, "schedule_timer", timer)  # nothing open yet
+    _, asked = staged(ctx, "send_sms", ask)
+    assert early is not None and asked is not None
+    text, late = staged(ctx, "schedule_timer", timer, proposals=(early, asked))
 
-
-def test_over_the_rejection_budget_the_answer_tells_the_model_to_finish(load: Load) -> None:
-    stage = staging(context(load), max_rejections=1)
-    refused = {"stage": "to_pickup"}
-
-    first, _ = stage.answer("update_stage", refused)
-    second, _ = stage.answer("update_stage", refused)
-    third, _ = stage.answer("send_sms", {"text": "no contact"})
-
-    assert "call finish" not in first
-    assert second.endswith(
-        ". More than 1 actions were rejected: call finish now; a person will take over the event."
+    assert not early.accepted and asked.accepted
+    assert (text, late) == (
+        "accepted as action #2",
+        Proposal(ScheduleTimer(kind=ETA, due_in_minutes=30), True),
     )
-    assert "Fix them and call it again. More than 1" in third
-    assert stage.rejections == 3
+
+
+def test_a_refused_action_takes_no_number_but_keeps_its_place_in_the_plan(load: Load) -> None:
+    """The answer counts the accepted actions; a violation names the action's position
+    among every proposed one, as `validate` of the whole plan does."""
+    ctx = context(load)
+    refused = Proposal(UpdateStage(stage=Stage.TO_PICKUP), False)
+
+    text, proposal = staged(ctx, "write_tms_note", NOTE_ARGS, proposals=(refused,))
+    _, again = staged(ctx, "update_stage", {"stage": "to_pickup"}, proposals=(refused,))
+
+    assert (text, proposal) == ("accepted as action #1", Proposal(NOTE, True))
+    assert again is not None
+    assert [(v.rule, v.action_index) for v in again.violations] == [("stage_moves_forward", 1)]
 
 
 def test_the_catalog_kinds_and_the_caps_are_the_brokers(load: Load) -> None:
@@ -355,19 +364,19 @@ def test_the_catalog_kinds_and_the_caps_are_the_brokers(load: Load) -> None:
     broker = standard_broker().model_copy(
         update={"obligations": (*standard_broker().obligations, pod)}
     )
-    checks = validation_context(context(load, broker=broker))
+    ctx = context(load, broker=broker)
+    checks = validation_context(ctx)
 
     assert checks.obligation_kinds == ("eta_request", "pod")
     assert checks.config.attempt_cap("pod") == 1
-    stage = Staging(checks, default_rules(), 3)
     ask_pod = {"contact_id": DRIVER, "text": "POD please", "requests": "pod"}
     email_pod = {"to_contact_ids": ["dsp_4410"], "body": "POD please", "requests": "pod"}
 
-    assert stage.answer("send_sms", ask_pod) == ("accepted as action #1", True)
-    assert stage.answer("send_email", email_pod) == (
+    first, sms = staged(ctx, "send_sms", ask_pod)
+    assert first == "accepted as action #1" and sms is not None
+    assert staged(ctx, "send_email", email_pod, proposals=(sms,))[0].startswith(
         "rejected by attempt_cap: pod was already requested 1 times (cap 1): its requests "
-        "are used up",
-        False,
+        "are used up. No further message may carry requests: pod."
     )
 
 
@@ -375,34 +384,38 @@ def test_a_kind_outside_the_catalog_is_refused_but_an_open_one_can_be_closed(loa
     stray = Obligation(
         obligation_id="obl_9", load_id="481207", kind="old_kind", attempts=1, opened_at=at(6, 0)
     )
-    stage = staging(context(load, obligations=(stray,)))
+    ctx = context(load, obligations=(stray,))
 
-    assert stage.answer("open_obligation", {"kind": "pod"})[0].startswith(
+    assert staged(ctx, "open_obligation", {"kind": "pod"})[0].startswith(
         "rejected by known_obligation_kind: pod is not an obligation kind of this broker"
     )
-    assert stage.answer("close_obligation", {"kind": "old_kind", "status": "cancelled"})[1]
+    _, closed = staged(ctx, "close_obligation", {"kind": "old_kind", "status": "cancelled"})
+    assert closed is not None and closed.accepted
 
 
-# --- the fold -----------------------------------------------------------------------------
+# --- call_tools: answering a round's calls ------------------------------------------------
 
 
-def test_the_fold_stages_the_action_calls_in_order_with_their_rounds_cost(load: Load) -> None:
-    transcript = (
-        Transcript()
-        .round(("read_sop_section", {"section_id": "escalation"}), results=("# escalation",))
-        .round(("send_sms", REPLY_ARGS), ("write_tms_note", {"text": NOTE.text}), cost=0.002)
-        .build()
+async def test_read_tools_answer_and_action_tools_stage_in_call_order(load: Load) -> None:
+    read = call("read_sop_section", section_id="driver_questions")
+    sms = call("send_sms", **REPLY_ARGS)
+    note = call("write_tms_note", **NOTE_ARGS)
+
+    done = await answer(context(load), read, sms, note, round_cost=0.002)
+
+    body = "# driver_questions: Driver questions\n\nAnswer from the load metadata."
+    assert done.results == (
+        ToolResult(call_id=read.id, name="read_sop_section", content=body),
+        ToolResult(call_id=sms.id, name="send_sms", content="accepted as action #1"),
+        ToolResult(call_id=note.id, name="write_tms_note", content="accepted as action #2"),
     )
-
-    staged = fold(context(load), transcript)
-
-    assert staged.accepted == staged.proposed == (REPLY, NOTE)
-    assert staged.trajectory == (
+    assert done.steps == (
         TrajectoryStep(
             tool="read_sop_section",
-            args={"section_id": "escalation"},
-            result="# escalation",
+            args={"section_id": "driver_questions"},
+            result=body,
             accepted=None,
+            cost_usd=0.002,
         ),
         TrajectoryStep(
             tool="send_sms",
@@ -413,105 +426,135 @@ def test_the_fold_stages_the_action_calls_in_order_with_their_rounds_cost(load: 
         ),
         TrajectoryStep(
             tool="write_tms_note",
-            args={"text": NOTE.text},
+            args=NOTE_ARGS,
             result="accepted as action #2",
             accepted=True,
             cost_usd=0.002,
         ),
     )
-    assert staged.sections_searched == ("escalation",)
+    assert done.proposals == (Proposal(REPLY, True), Proposal(NOTE, True))
+    assert (done.rejections, done.sections) == (0, ("driver_questions",))
 
 
-def test_the_fold_is_order_dependent(load: Load) -> None:
-    ask = ("send_sms", {"contact_id": DRIVER, "text": "ETA?", "purpose": "eta_request"})
-    timer = ("schedule_timer", {"kind": "eta_request", "due_in_minutes": 30})
+async def test_a_round_stages_after_the_actions_of_earlier_rounds(load: Load) -> None:
+    """Only the new proposals come back; the earlier ones are the run's already."""
+    earlier = (Proposal(REPLY, True),)
 
-    assert fold(context(load), calls(ask, timer)).accepted == (
-        SendSms(contact_id=DRIVER, text="ETA?", purpose=Purpose.ETA_REQUEST),
-        ScheduleTimer(kind=ETA, due_in_minutes=30),
-    )
-    reversed_order = fold(context(load), calls(timer, ask))
-    assert [s.accepted for s in reversed_order.trajectory] == [False, True]
-    assert reversed_order.rejections == 1
-
-
-def test_the_fold_skips_the_answer_and_tools_that_were_not_offered(load: Load) -> None:
-    transcript = calls(
-        ("send_sms", REPLY_ARGS), ("finish", {"rationale": "done"}), ("send_fax", {"to": "x"})
+    done = await answer(
+        context(load),
+        call("send_sms", **REPLY_ARGS),
+        call("write_tms_note", **NOTE_ARGS),
+        proposals=earlier,
     )
 
-    staged = fold(context(load), transcript, offered=READ_TOOLS)
+    repeat, note = done.steps
+    assert repeat.accepted is False
+    assert repeat.result.startswith("rejected by no_duplicate_action")
+    assert note.result == "accepted as action #2"
+    assert [p.accepted for p in done.proposals] == [False, True]
+    assert done.rejections == 1
 
-    assert staged.proposals == ()
-    assert [(s.tool, s.accepted) for s in staged.trajectory] == [
-        ("send_sms", None),
-        ("send_fax", None),
+
+async def test_bad_arguments_are_a_refused_call_with_no_proposal(load: Load) -> None:
+    done = await answer(context(load), call("send_sms", text="hi"))
+
+    (step,) = done.steps
+    assert step.accepted is False
+    assert step.result.startswith("rejected: invalid arguments for send_sms: contact_id")
+    assert (done.proposals, done.rejections) == ((), 1)
+
+
+async def test_arguments_that_are_not_json_are_answered_and_refuse_an_action_call(
+    load: Load,
+) -> None:
+    """The adapter hands over a call whose arguments did not parse: the model is told,
+    an action call counts as refused, a read tool or the answer is simply asked again."""
+    broken = [
+        ToolCall(id="c1", name="send_sms", error="Expecting value: line 1 column 1"),
+        ToolCall(id="c2", name="get_load", error="Unterminated string"),
+        ToolCall(id="c3", name=FINISH, error="Expecting ',' delimiter"),
     ]
 
+    done = await answer(context(load), *broken)
 
-def test_the_fold_reads_the_hits_of_a_search_and_the_sections_read(load: Load) -> None:
-    hits = (
-        'Sections that match "lumper", best first (read one with read_sop_section):\n'
-        "- escalation: Escalation. When to call a Hero.\n"
-        "- driver_questions: Driver questions. Answer from the load."
+    assert [r.content for r in done.results] == [
+        "The arguments for send_sms are not valid JSON (Expecting value: line 1 column 1). "
+        "Call it again with a JSON object.",
+        "The arguments for get_load are not valid JSON (Unterminated string). "
+        "Call it again with a JSON object.",
+        "The arguments for finish are not valid JSON (Expecting ',' delimiter). "
+        "Call it again with a JSON object.",
+    ]
+    assert [r.call_id for r in done.results] == ["c1", "c2", "c3"]
+    assert [s.accepted for s in done.steps] == [False, None, None]
+    assert (done.proposals, done.rejections) == ((), 1)
+
+
+async def test_an_unknown_tool_is_answered_with_the_tools_available(load: Load) -> None:
+    done = await answer(context(load), call("send_fax", to="x"))
+
+    (step,) = done.steps
+    assert step.result == (
+        "Unknown tool 'send_fax'. Available tools: search_sop, read_sop_section, get_history, "
+        "get_ledger, get_load, " + ", ".join(ACTION_TOOLS) + "."
     )
-    transcript = (
-        Transcript()
-        .round(("search_sop", {"query": "lumper"}), results=(hits,))
-        .round(("read_sop_section", {"section_id": "escalation"}), results=("# escalation",))
-        .round(("read_sop_section", {"section_id": " "}), ("search_sop", {"query": "x"}))
-        .build()
+    assert step.accepted is None
+    assert (done.proposals, done.rejections) == ((), 0)
+
+
+class FailingIndex(FakeSop):
+    async def search(
+        self, broker_id: str, load_types: Sequence[str], query: str, k: int = 5
+    ) -> tuple[SearchHit, ...]:
+        raise RuntimeError("index down")
+
+
+async def test_a_read_tool_that_raises_is_answered_and_the_round_goes_on(load: Load) -> None:
+    done = await answer(
+        context(load),
+        call("search_sop", query="lumper"),
+        call("write_tms_note", **NOTE_ARGS),
+        knowledge=FailingIndex(),
     )
 
-    staged = fold(context(load), transcript)
+    failed, note = done.results
+    assert failed.content == (
+        "The tool search_sop failed (RuntimeError: index down). Continue without it."
+    )
+    assert note.content == "accepted as action #1"
+    assert done.sections == ()
 
-    assert staged.sections_searched == ("escalation", "driver_questions")
+
+async def test_the_answer_call_is_left_to_the_graph(load: Load) -> None:
+    done = await answer(context(load), call(FINISH, rationale="done"))
+
+    assert (done.results, done.steps, done.proposals, done.rejections) == ((), (), (), 0)
 
 
-def test_the_fold_tolerates_malformed_entries(load: Load) -> None:
-    transcript: tuple[dict[str, Any], ...] = (
-        {"role": "assistant", "content": "", "tool_calls": "not a list"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": ["x", {"args": {}}, {"name": "send_sms"}],
-        },
-        {"role": "assistant", "content": "", "tool_calls": [{"name": "send_sms", "args": "{}"}]},
-        {"role": "assistant", "usage": {"cost_usd": True}, "tool_calls": []},
-        {"role": "tool", "tool_call_id": 3, "content": "x"},
+class HitsIndex(FakeSop):
+    async def search(
+        self, broker_id: str, load_types: Sequence[str], query: str, k: int = 5
+    ) -> tuple[SearchHit, ...]:
+        return (
+            SearchHit(section_id="escalation", title="Escalation", description="Heroes.", score=2),
+            SearchHit(section_id="driver_questions", title="Questions", description="Q.", score=1),
+        )
+
+
+async def test_the_sections_searched_are_the_hits_and_the_sections_read(load: Load) -> None:
+    done = await answer(
+        context(load),
+        call("search_sop", query="lumper"),
+        call("read_sop_section", section_id="delay_risk_high"),
+        call("read_sop_section", section_id=" "),
+        call("get_ledger"),
+        knowledge=HitsIndex(),
     )
 
-    staged = fold(context(load), transcript)
-
-    assert [s.tool for s in staged.trajectory] == ["send_sms", "send_sms"]
-    assert staged.rejections == 2  # no arguments: contact_id and text are missing
+    assert done.sections == ("escalation", "driver_questions", "delay_risk_high")
 
 
-def test_a_recorded_answer_that_the_rules_no_longer_give_is_logged(
-    load: Load, caplog: pytest.LogCaptureFixture
-) -> None:
-    transcript = Transcript().round(("send_sms", REPLY_ARGS), results=("accepted as #9",)).build()
-
-    with caplog.at_level(logging.INFO, logger="freight_agent.application.agent"):
-        staged = fold(context(load), transcript)
-
-    assert staged.trajectory[0].result == "accepted as action #1"
-    assert "the rules now answer 'accepted as action #1'" in caplog.text
-
-
-# --- merge, labels, procedures in progress ------------------------------------------------
-
-
-def test_the_plan_is_every_staged_call_then_the_answers_own_actions() -> None:
-    """Refused calls stay in the plan (the validator reports them again, at the same
-    index); an answer action that repeats a staged call is not added twice."""
-    staged = Staged(proposals=(Proposal(REPLY, True), Proposal(NOTE, False)))
-    task = CreateHeroTask(title="t", description="d")
-
-    merged = merge_plan(staged, AgentOutcome(rationale="r", actions=(REPLY, NOTE, task)))
-
-    assert merged == Plan(rationale="r", actions=(REPLY, NOTE, task))
-    assert type(merged) is Plan
+# --- labels, procedures in progress -------------------------------------------------------
 
 
 def test_a_label_counts_only_when_the_catalog_has_it() -> None:
@@ -519,6 +562,7 @@ def test_a_label_counts_only_when_the_catalog_has_it() -> None:
 
     assert catalog_intent(broker, None) is None
     assert catalog_intent(broker, "question") == "question"
+    assert catalog_intent(broker, " status_update ") == "status_update"
     assert catalog_intent(broker, "eta_follow_up_due") == "eta_follow_up_due"
     assert catalog_intent(broker, "detention_request") is None
 
@@ -545,3 +589,40 @@ def test_procedure_in_progress_respects_the_load_stage(load: Load) -> None:
     ctx = context(load.model_copy(update={"stage": Stage.AT_PICKUP}), obligations=(eta_request(),))
 
     assert sections_in_progress(ctx, resolved(QUESTIONS), VISIBLE) == ()
+
+
+# --- the template -------------------------------------------------------------------------
+
+
+async def test_a_round_describes_finish_with_the_templates_text(load: Load) -> None:
+    model = FakeModel()
+    model.push(ModelRole.AGENT, AgentOutcome())
+
+    await Agent(model, FakeSop(), PROMPTS.agent).round(
+        context(load), QUESTION, resolved(QUESTIONS), VISIBLE, ()
+    )
+
+    request = model.calls[0].request
+    assert request.answer_description == PROMPTS.agent.tools[FINISH]
+    assert PROMPTS.agent.tools[FINISH].startswith("Call it once, at the end")
+    assert request.prompt_version == PROMPTS.agent.version
+
+
+def test_an_agent_template_without_a_finish_description_is_refused() -> None:
+    template = replace(PROMPTS.agent, tools={})
+
+    with pytest.raises(
+        PromptError, match=r"does not describe the finish tool \(its tools.finish\)"
+    ):
+        Agent(FakeModel(), FakeSop(), template)
+
+
+def test_an_agent_template_naming_an_unknown_variable_is_refused() -> None:
+    class Message:
+        variables = frozenset({"ledger", "mood"})
+
+        def format(self, variables: Mapping[str, str]) -> str:
+            return ""
+
+    with pytest.raises(PromptError, match="the user message names mood"):
+        Agent(FakeModel(), FakeSop(), replace(PROMPTS.agent, user=Message()))

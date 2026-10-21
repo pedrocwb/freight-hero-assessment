@@ -27,12 +27,13 @@ export function ClockRail() {
   const [last, setLast] = useState<string | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [start, setStart] = useState(DEFAULT_START);
-  const [mode, setMode] = useState<"" | "replay" | "live">("");
 
   const stop = load ? currentStop(load) : undefined;
   const now = state?.now;
   const next = state?.next_timer_due_at ?? null;
   const untilNext = now && next ? minutesBetween(now, next) : null;
+  // A scenario moves the clock itself while it plays.
+  const held = !state || sim.busy || sim.playing;
 
   async function move(by: AdvanceBy | "tick", label: string) {
     const result = await sim.perform<AdvanceResult>(() => (by === "tick" ? api.tick() : api.advance(by)));
@@ -43,7 +44,7 @@ export function ClockRail() {
 
   async function reset() {
     setResetOpen(false);
-    const result = await sim.perform(() => api.resetSim({ start: start.trim(), llm_mode: mode || null }));
+    const result = await sim.perform(() => api.resetSim({ start: start.trim() }));
     if (result) {
       sim.setState(result);
       setLast(`Reset to ${formatTime(result.now, timezone)}`);
@@ -80,7 +81,7 @@ export function ClockRail() {
             key={minutes}
             type="button"
             className="btn"
-            disabled={!state || sim.busy}
+            disabled={held}
             onClick={() => void move({ minutes }, `+${minutes} min`)}
           >
             +{minutes} min
@@ -89,22 +90,26 @@ export function ClockRail() {
         <button
           type="button"
           className="btn btn--primary clock-next"
-          disabled={!next || sim.busy}
+          disabled={!next || held}
           onClick={() => next && void move({ to: next }, "To next timer")}
           title={next ? `Advance to ${formatTime(next, timezone)} and fire the timer` : "No timer pending"}
         >
           To next timer
         </button>
-        <button type="button" className="btn" disabled={!state || sim.busy} onClick={() => void move("tick", "Tick")}>
+        <button type="button" className="btn" disabled={held} onClick={() => void move("tick", "Tick")}>
           Tick
         </button>
-        <button type="button" className="btn btn--quiet" disabled={sim.busy} onClick={() => setResetOpen(true)}>
+        <button type="button" className="btn btn--quiet" disabled={sim.busy || sim.playing} onClick={() => setResetOpen(true)}>
           Reset
         </button>
       </div>
 
       <p className="clock-last" aria-live="polite">
-        {sim.busy ? "Working…" : last ?? `Queue: ${state?.queue_size ?? 0} event${state?.queue_size === 1 ? "" : "s"}`}
+        {sim.playing
+          ? "A scenario is playing: it moves the clock."
+          : sim.busy
+            ? "Working…"
+            : last ?? `Queue: ${state?.queue_size ?? 0} event${state?.queue_size === 1 ? "" : "s"}`}
       </p>
 
       <Modal
@@ -122,14 +127,6 @@ export function ClockRail() {
         <label className="field">
           <span className="field-label">Start time (ISO 8601 with offset)</span>
           <input className="input mono" value={start} onChange={(e) => setStart(e.target.value)} spellCheck={false} />
-        </label>
-        <label className="field">
-          <span className="field-label">Model mode</span>
-          <select className="input" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-            <option value="">Keep the server setting ({state?.llm_mode ?? "replay"})</option>
-            <option value="replay">Replay (recorded answers, offline)</option>
-            <option value="live">Live (needs OPENROUTER_API_KEY)</option>
-          </select>
         </label>
       </Modal>
     </div>

@@ -1,9 +1,8 @@
 """Contract suite for `DocumentRepository` (`ports/documents.py`).
 
-Owner: card W3-DOC. Runs once per entry of `uow_factories.UOW_FACTORIES` (memory always,
-Postgres when `DATABASE_URL` is set) through the shared `uow_factory` fixture, each test
-on a fresh, empty store. A document's load exists, so an implementation may enforce the
-foreign key.
+Owner: card W3-DOC. Runs on the memory store through the shared `uow_factory` fixture,
+each test on a fresh, empty store. A document's load exists, so an implementation may
+enforce the foreign key.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -14,13 +13,14 @@ import pytest
 from freight_agent.adapters.clock import SequentialIdGenerator, VirtualClock
 from freight_agent.adapters.documents.fake_pages import FakePageReader
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
-from freight_agent.adapters.llm.scripted import ScriptedModel
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.application.documents import DocumentPipeline
 from freight_agent.domain.broker import (
+    CatalogOverrides,
     DocumentRequirement,
+    IntentDef,
     ObligationDef,
-    new_broker,
-    with_follow_up_intents,
+    client_broker,
 )
 from freight_agent.domain.documents import (
     Document,
@@ -34,6 +34,8 @@ from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.llm import LlmError, ModelRole
 from freight_agent.ports.repositories import UnitOfWorkFactory
+from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.contract
 
@@ -267,13 +269,13 @@ CLEAN_POD = Extraction(
 async def test_the_pipeline_announces_a_document_once_on_this_store(
     uow_factory: UnitOfWorkFactory, loads: tuple[Load, Load]
 ) -> None:
-    """A broker never saved reads with the standard types; the document, its event and
-    the queue are written together, and a second pass finds nothing pending."""
+    """A broker without a catalog reads with the standard types; the document, its event
+    and the queue are written together, and a second pass finds nothing pending."""
     blobs = MemoryBlobStore()
     ref = await blobs.put(b"PROOF OF DELIVERY\nPO 55821\nValley DC", "text/plain")
     document = pending("doc_1").model_copy(update={"blob_ref": ref, "content_type": "text/plain"})
     await save(uow_factory, document, pending("doc_2", load_id=B, minute=1))
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.EXTRACT, CLEAN_POD, LlmError("down"))
     pipeline = DocumentPipeline(
         uow_factory=uow_factory,
@@ -282,6 +284,8 @@ async def test_the_pipeline_announces_a_document_once_on_this_store(
         llm=model,
         blobs=blobs,
         pages=FakePageReader(),
+        knowledge=MemorySopIndex([]),
+        prompt=PROMPTS.extract,
     )
 
     first, second = await pipeline.process_pending()
@@ -307,12 +311,15 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
     owes_pod = DocumentRequirement(
         type_id="pod", at_stage=Stage.AT_DELIVERY, opens_obligation="pod"
     )
-    broker = new_broker("northline", "Northline")
-    obligations = (*broker.obligations, pod)
-    broker = broker.revised(  # validated: the store re-validates the broker it reads
-        obligations=obligations,
-        intents=with_follow_up_intents(broker.intents, obligations),
-        documents=(owes_pod,),
+    pod_due = IntentDef(
+        intent_id="pod_follow_up_due",
+        title="POD follow-up due",
+        description="The POD wait is over.",
+        system=True,
+    )
+    broker = client_broker(
+        "northline",
+        CatalogOverrides(obligations=(pod,), intents=(pod_due,), documents=(owes_pod,)),
     )
     obligation = Obligation.open(
         obligation_id="obl_1", load_id=A, kind="pod", at=at(0), first_attempt=False
@@ -322,15 +329,11 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
     )
     document = pending("doc_1").model_copy(update={"blob_ref": ref, "content_type": "text/plain"})
     async with uow_factory() as uow:
-        try:
-            await uow.brokers.save(broker)
-        except NotImplementedError:  # the Postgres broker repository is card W3-BRK's
-            pytest.skip("this store cannot save a broker before card W3-BRK lands")
         await uow.obligations.save(obligation)
         await uow.timers.save(timer)
         await uow.documents.save(document)
         await uow.commit()
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(
         ModelRole.EXTRACT,
         Extraction(
@@ -352,6 +355,8 @@ async def test_the_pipeline_announces_a_clean_pod_and_satisfies_the_pod_obligati
         llm=model,
         blobs=blobs,
         pages=FakePageReader(),
+        knowledge=MemorySopIndex([], brokers=[broker]),
+        prompt=PROMPTS.extract,
     )
 
     (event,) = await pipeline.process_pending()

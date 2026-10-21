@@ -1,23 +1,22 @@
-"""The Hero console and the run inspector."""
+"""The escalation to the Hero team, and the run inspector: what each run saw and did.
+
+The Hero console's routes are gone (the web reads the load's snapshot): the Hero task
+and the dispatcher's email are outbox items of the load.
+"""
 
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
 
-from freight_agent.domain.actions import (
-    CloseObligation,
-    CloseStatus,
-    CreateHeroTask,
-    Purpose,
-    SendEmail,
-)
-from freight_agent.domain.obligations import ObligationKind
+from freight_agent.application.escalation import UNKNOWN_SENDER_TITLE
 from tests.integration.test_api_harness import (
     ASK_AGAIN,
     ASK_ETA,
+    CALL_DRIVER,
     DECIDE,
     DISPATCHER,
+    EMAIL_DISPATCHER,
+    EXHAUSTED,
     FOLLOW_UP_IN_30,
     LOAD_ID,
     Api,
@@ -25,25 +24,14 @@ from tests.integration.test_api_harness import (
     open_api,
     plan,
 )
+from tests.prompts import PROMPTS
 
 pytestmark = pytest.mark.unit
 
-CALL_DRIVER = CreateHeroTask(
-    title="Call the driver for the ETA",
-    description="Two ETA texts got no answer; the dispatcher was emailed.",
-    urgent=True,
-)
-EMAIL_DISPATCHER = SendEmail(
-    to_contact_ids=(DISPATCHER,),
-    subject="Load 481207: driver ETA needed",
-    body="Your driver does not answer. Please send the ETA.",
-    purpose=Purpose.ESCALATION,
-)
-
 
 @pytest.fixture
-async def api(tmp_path: Path) -> AsyncIterator[Api]:
-    async with open_api(tmp_path) as api:
+async def api() -> AsyncIterator[Api]:
+    async with open_api() as api:
         yield api
 
 
@@ -51,91 +39,42 @@ async def play_until_the_hero_task(api: Api) -> None:
     """A1, A3 and A4: the ETA SMS, the follow-up, then the email and the Hero task at 08:01."""
     await api.high_risk_at_seven()
     api.model.push(DECIDE, plan(ASK_AGAIN, FOLLOW_UP_IN_30))
-    exhausted = CloseObligation(kind=ObligationKind.ETA_REQUEST, status=CloseStatus.EXHAUSTED)
-    api.model.push(DECIDE, plan(EMAIL_DISPATCHER, CALL_DRIVER, exhausted))
+    api.model.push(DECIDE, plan(EMAIL_DISPATCHER, CALL_DRIVER, EXHAUSTED))
     await api.advance(to=local(8, 1))
 
 
-# --- Hero tasks -----------------------------------------------------------------------------
+# --- the escalation -------------------------------------------------------------------------
 
 
-async def test_hero_tasks_list_the_agent_tasks_across_loads(api: Api) -> None:
+async def test_the_escalation_emails_the_dispatcher_and_creates_a_hero_task(api: Api) -> None:
     await play_until_the_hero_task(api)
 
-    tasks = await api.get("/api/hero/tasks")
+    [task] = await api.outbox("hero_task")
+    [email] = await api.outbox("email")
 
-    assert len(tasks) == 1
-    task = tasks[0]
-    assert task == {
-        "task_id": task["task_id"],
-        "load_id": LOAD_ID,
+    assert (task["created_at"], task["status"]) == (local(8, 1), "sent")
+    assert task["payload"] == {
         "title": CALL_DRIVER.title,
         "description": CALL_DRIVER.description,
         "urgent": True,
-        "created_at": local(8, 1),
-        "status": "open",
     }
-    assert task["task_id"].startswith("out_")
-    email = await api.get(f"/api/loads/{LOAD_ID}/conversation", channel="email")
-    assert [(e["direction"], e["subject"], e["to"]) for e in email] == [
-        ("out", EMAIL_DISPATCHER.subject, [DISPATCHER])
-    ]
+    assert email["payload"]["to_contact_ids"] == [DISPATCHER]
+    assert email["payload"]["subject"] == EMAIL_DISPATCHER.subject
+    snapshot = await api.get(f"/api/loads/{LOAD_ID}")
+    [obligation] = snapshot["obligations"]
+    assert (obligation["status"], obligation["attempts"]) == ("exhausted", 2)
 
 
-async def test_completing_a_task_records_the_time_and_the_note(api: Api) -> None:
-    await play_until_the_hero_task(api)
-    [task] = await api.get("/api/hero/tasks", status="open")
-    await api.advance(minutes=9)
-
-    response = await api.client.post(
-        f"/api/hero/tasks/{task['task_id']}/complete", json={"note": "called the driver, ETA 9:40"}
-    )
-
-    assert response.status_code == 200
-    done = response.json()
-    assert (done["status"], done["done_at"], done["note"]) == (
-        "done",
-        local(8, 10),
-        "called the driver, ETA 9:40",
-    )
-    assert await api.get("/api/hero/tasks", status="open") == []
-    assert await api.get("/api/hero/tasks", status="done") == [done]
-    assert await api.get("/api/hero/tasks", status="all") == [done]
-
-
-async def test_completing_twice_keeps_the_first_completion(api: Api) -> None:
-    await play_until_the_hero_task(api)
-    [task] = await api.get("/api/hero/tasks")
-    path = f"/api/hero/tasks/{task['task_id']}/complete"
-
-    first = (await api.client.post(path, json={"note": "done"})).json()
-    await api.advance(minutes=5)
-    second = (await api.client.post(path, json={})).json()
-
-    assert second == first
-
-
-async def test_an_unknown_sender_becomes_an_urgent_task_without_a_model_call(api: Api) -> None:
+async def test_an_unknown_sender_becomes_a_hero_task_without_a_model_call(api: Api) -> None:
     await api.create_load()
 
     await api.message("send me the rate", local(7, 0), sender="stranger")
 
-    [task] = await api.get("/api/hero/tasks")
-    assert task["load_id"] == LOAD_ID
+    [task] = await api.outbox("hero_task")
+    assert (task["load_id"], task["payload"]["title"]) == (LOAD_ID, UNKNOWN_SENDER_TITLE)
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+    assert (run["status"], run["nodes"]) == ("escalated", ["prefilter"])
     assert api.model.calls == []
-
-
-async def test_completing_an_unknown_task_is_a_404(api: Api) -> None:
-    response = await api.client.post("/api/hero/tasks/out_nope/complete", json={"note": "x"})
-
-    assert response.status_code == 404
-    assert response.json() == {"detail": "unknown Hero task 'out_nope'"}
-
-
-async def test_an_unknown_status_filter_is_a_422(api: Api) -> None:
-    response = await api.client.get("/api/hero/tasks", params={"status": "later"})
-
-    assert response.status_code == 422
 
 
 # --- run inspector --------------------------------------------------------------------------
@@ -153,9 +92,49 @@ async def test_the_inspector_shows_what_each_run_saw_decided_and_cost(api: Api) 
     assert [a["type"] for a in run["plan"]["actions"]] == ["send_sms", "schedule_timer"]
     assert run["plan"]["actions"][0]["text"] == ASK_ETA.text
     assert run["violations"] == []
-    assert [(u["role"], u["model"]) for u in run["usage"]] == [("agent", "scripted")]
+    # One usage per model round: the round that staged the actions, then the finish.
+    assert [(u["role"], u["model"]) for u in run["usage"]] == [("agent", "fake")] * 2
     assert run["cost_usd"] == 0.0
-    assert (run["skip_reason"], run["error"]) == (None, None)
+    assert (run["skip_reason"], run["error"], run["trace_url"]) == (None, None, None)
+
+
+async def test_a_run_lists_the_graph_nodes_it_went_through(api: Api) -> None:
+    """A risk change needs no gate call, but the run still passes the gate node; the agent
+    stages in one round, the tools node runs the calls, the agent finishes."""
+    await api.high_risk_at_seven()
+
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+
+    assert run["nodes"] == ["prefilter", "gate", "knowledge", "agent", "tools", "agent", "validate"]
+    assert set(run["nodes"]) <= set((await api.get("/api/graph"))["nodes"])
+
+
+async def test_a_run_shows_the_version_of_each_prompt_it_sent(api: Api) -> None:
+    """The repository copy here (no LangSmith key): `local:<sha256 prefix>`; with the Hub,
+    its commit. A risk change sends no gate prompt."""
+    await api.high_risk_at_seven()
+
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+
+    assert run["prompts"] == {"agent": PROMPTS.agent.version}
+    assert run["prompts"]["agent"].startswith("local:")
+
+
+async def test_the_trajectory_shows_each_tool_call_and_whether_it_was_accepted(
+    api: Api,
+) -> None:
+    await api.high_risk_at_seven()
+
+    [run] = await api.get(f"/api/loads/{LOAD_ID}/runs")
+
+    assert [(s["tool"], s["accepted"]) for s in run["trajectory"]] == [
+        ("send_sms", True),
+        ("schedule_timer", True),
+    ]
+    sms = run["trajectory"][0]
+    assert sms["args"]["contact_id"] == ASK_ETA.contact_id
+    assert "accepted as action #1" in sms["result"]
+    assert set(sms) == {"tool", "args", "result", "accepted", "cost_usd"}
 
 
 async def test_runs_are_listed_in_order(api: Api) -> None:

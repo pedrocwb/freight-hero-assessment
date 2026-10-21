@@ -1,8 +1,7 @@
 """Contract suite for `UnitOfWork` and its repositories (`ports/repositories.py`).
 
-Every implementation must pass it, so that the memory store (unit tests, evals, the
-simulation) and Postgres (production) are interchangeable. The suite runs once per
-entry of `uow_factories.UOW_FACTORIES`, each test on a fresh, empty store.
+The memory store (unit tests, evals, the simulation) must pass it, each test on a fresh,
+empty store.
 
 It pins down what the port docstrings leave implicit: the order of every list and its
 tie-break, a rejected duplicate that leaves the unit of work usable, queue state that
@@ -27,7 +26,7 @@ from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.ports.repositories import UnitOfWork, UnitOfWorkFactory
-from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, UowFactory, open_memory
+from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS
 
 pytestmark = pytest.mark.contract
 
@@ -1054,38 +1053,3 @@ async def test_concurrent_units_of_work_are_serialized(uow_factory: UnitOfWorkFa
     async with uow_factory() as uow:
         obligation = await uow.obligations.get("obl_1")
     assert obligation is not None and obligation.attempts == 1 + workers
-
-
-# --- The registry --------------------------------------------------------------------
-
-
-def test_an_implementation_is_skipped_while_its_environment_is_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    factory = UowFactory(open_memory, requires_env=("DATABASE_URL",))
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    assert factory.skip_reason() == "set DATABASE_URL to run this implementation"
-    monkeypatch.setenv("DATABASE_URL", "")
-    assert factory.skip_reason() is not None
-    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/freight")
-    assert factory.skip_reason() is None
-
-
-async def _oldest(uow_factory: UnitOfWorkFactory) -> str | None:
-    async with uow_factory() as uow:
-        event = await uow.queue.oldest_queued()
-    return None if event is None else event.event_id
-
-
-@pytest.mark.usefixtures("loads")
-async def test_oldest_queued_is_the_longest_waiting_unclaimed_event(
-    uow_factory: UnitOfWorkFactory,
-) -> None:
-    assert await _oldest(uow_factory) is None
-    await _ingest(uow_factory, _message("a1"), _message("b1", minute=1, load_id=B))
-    assert await _oldest(uow_factory) == "a1"
-
-    assert await _claim(uow_factory) == "a1"
-    assert await _oldest(uow_factory) == "b1"  # in flight is not waiting
-    await _release(uow_factory, "a1")
-    assert await _oldest(uow_factory) == "a1"

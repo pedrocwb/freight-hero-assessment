@@ -1,3 +1,6 @@
+"""The gate: system events get their intent from code, messages one forced gate answer."""
+
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -5,17 +8,19 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from freight_agent.adapters.llm.scripted import ScriptedModel
 from freight_agent.application.context import RunContext
 from freight_agent.application.gate import Gate, GateResult, follow_up_intent
-from freight_agent.application.prompts import GATE_SYSTEM_PROMPT, render_gate_system_prompt
+from freight_agent.application.prompts import render_gate_system_prompt
 from freight_agent.domain.broker import Broker, IntentDef, ObligationDef, standard_broker
 from freight_agent.domain.events import Attachment, Direction, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, Load
 from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.llm import LlmError, ModelRole
+from freight_agent.ports.llm import ChatRequest, LlmError, ModelRole
+from freight_agent.ports.prompts import PromptError
+from tests.fakes import FakeModel
+from tests.prompts import PROMPTS
 
 LA = ZoneInfo("America/Los_Angeles")
 DRIVER = "drv_20931"
@@ -93,9 +98,9 @@ def context(
     )
 
 
-async def classify(load: Load, trigger: Event, **kwargs: Any) -> tuple[GateResult, ScriptedModel]:
-    model = ScriptedModel()
-    result = await Gate(model).classify(context(load, trigger, **kwargs))
+async def classify(load: Load, trigger: Event, **kwargs: Any) -> tuple[GateResult, FakeModel]:
+    model = FakeModel()
+    result = await Gate(model, PROMPTS.gate).classify(context(load, trigger, **kwargs))
     return result, model
 
 
@@ -209,10 +214,10 @@ async def test_message_with_text_and_an_attachment_still_asks_the_model(load: Lo
         body="delivered, here is the POD",
         attachments=(pod,),
     )
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.GATE, GateDecision(intent=Intent.DOCUMENT, act=True, reason="pod"))
 
-    await Gate(model).classify(context(load, trigger))
+    await Gate(model, PROMPTS.gate).classify(context(load, trigger))
 
     assert len(model.calls) == 1
 
@@ -229,11 +234,11 @@ async def test_hero_updates_and_own_actions_do_not_act(load: Load, event_type: E
 
 @pytest.mark.unit
 async def test_inbound_message_makes_exactly_one_gate_call(load: Load) -> None:
-    model = ScriptedModel("cheap-model")
+    model = FakeModel(name="cheap-model")
     question = GateDecision(intent=Intent.QUESTION, act=True, reason="asks for the PO")
     model.push(ModelRole.GATE, question)
 
-    result = await Gate(model, timeout_s=12.5).classify(
+    result = await Gate(model, PROMPTS.gate, timeout_s=12.5).classify(
         context(load, sms("What's the PO number?"), obligations=(ETA_REQUEST,))
     )
 
@@ -244,7 +249,7 @@ async def test_inbound_message_makes_exactly_one_gate_call(load: Load) -> None:
     call = model.calls[0]
     assert (call.role, call.schema) == (ModelRole.GATE, "GateDecision")
     assert call.request.timeout_s == 12.5
-    assert call.request.tools == ()
+    assert not isinstance(call.request, ChatRequest)  # a forced answer: no tools, no loop
     assert "What's the PO number?" in call.request.user
     assert "drv_20931 (driver)" in call.request.user
     assert "channel: sms" in call.request.user
@@ -254,21 +259,21 @@ async def test_inbound_message_makes_exactly_one_gate_call(load: Load) -> None:
 
 @pytest.mark.unit
 async def test_model_failure_propagates(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.GATE, LlmError("timeout"))
 
     with pytest.raises(LlmError, match="timeout"):
-        await Gate(model).classify(context(load, sms("ok")))
+        await Gate(model, PROMPTS.gate).classify(context(load, sms("ok")))
 
 
 @pytest.mark.unit
 async def test_system_only_intent_from_the_model_becomes_other(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(
         ModelRole.GATE, GateDecision(intent=Intent.DELAY_RISK_HIGH, act=False, reason="late")
     )
 
-    result = await Gate(model).classify(context(load, sms("gonna be late")))
+    result = await Gate(model, PROMPTS.gate).classify(context(load, sms("gonna be late")))
 
     assert result.decision.intent == Intent.OTHER
     assert result.decision.act is True
@@ -332,28 +337,30 @@ async def test_a_processed_document_acts_without_a_model_call(load: Load) -> Non
 
 @pytest.mark.unit
 async def test_a_message_may_have_an_intent_of_the_broker_s_catalog(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.GATE, GateDecision(intent="detention_request", act=False, reason="r"))
     ctx = replace(context(load, sms("we waited 3 hours, detention?")), broker=_with_detention())
 
-    result = await Gate(model).classify(ctx)
+    result = await Gate(model, PROMPTS.gate).classify(ctx)
 
     assert result.decision.intent == "detention_request"
     assert not result.should_act  # the catalog says this intent need not act
     assert result.broker == ctx.broker
     system = model.calls[0].request.system
-    assert system == render_gate_system_prompt(ctx.broker)
+    assert system == render_gate_system_prompt(PROMPTS.gate, ctx.broker)
     assert "- detention_request: the carrier asks to be paid for waiting at a stop." in system
 
 
 @pytest.mark.unit
 async def test_the_standard_catalog_gets_the_tuned_gate_prompt(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.GATE, GateDecision(intent="question", act=True, reason="r"))
 
-    await Gate(model).classify(context(load, sms("PO?")))
+    await Gate(model, PROMPTS.gate).classify(context(load, sms("PO?")))
 
-    assert model.calls[0].request.system == GATE_SYSTEM_PROMPT
+    assert model.calls[0].request.system == render_gate_system_prompt(
+        PROMPTS.gate, standard_broker()
+    )
 
 
 @pytest.mark.unit
@@ -361,9 +368,11 @@ async def test_a_broker_without_triage_sends_every_message_to_the_agent_unread(
     load: Load,
 ) -> None:
     untriaged = standard_broker().model_copy(update={"triage": False})
-    model = ScriptedModel()
+    model = FakeModel()
 
-    result = await Gate(model).classify(replace(context(load, sms("ok")), broker=untriaged))
+    result = await Gate(model, PROMPTS.gate).classify(
+        replace(context(load, sms("ok")), broker=untriaged)
+    )
 
     assert model.calls == []
     assert (result.decision.intent, result.decision.act) == (Intent.OTHER, True)
@@ -379,7 +388,9 @@ async def test_without_triage_system_events_still_get_their_intent_from_code(
         EventType.INBOUND_MESSAGE, channel=Channel.SMS, sender=DRIVER, attachments=(_BOL,)
     )
 
-    result = await Gate(ScriptedModel()).classify(replace(context(load, photo), broker=untriaged))
+    result = await Gate(FakeModel(), PROMPTS.gate).classify(
+        replace(context(load, photo), broker=untriaged)
+    )
 
     assert result.decision.intent == Intent.DOCUMENT
 
@@ -389,10 +400,12 @@ _BOL = Attachment(attachment_id="att_1", filename="bol.jpg", content_type="image
 
 @pytest.mark.unit
 async def test_an_intent_the_catalog_lacks_is_corrected_to_other(load: Load) -> None:
-    model = ScriptedModel()
+    model = FakeModel()
     model.push(ModelRole.GATE, GateDecision(intent="detention_request", act=False, reason="r"))
 
-    result = await Gate(model).classify(context(load, sms("we waited 3 hours, detention?")))
+    result = await Gate(model, PROMPTS.gate).classify(
+        context(load, sms("we waited 3 hours, detention?"))
+    )
 
     assert (result.decision.intent, result.decision.act) == (Intent.OTHER, True)
     assert "model said detention_request" in result.decision.reason
@@ -405,3 +418,54 @@ def test_follow_up_intent_reads_the_given_catalog() -> None:
 
     assert follow_up_intent("pod", broker) == "pod_follow_up_due"
     assert follow_up_intent("pod") is None
+
+
+# --- the template -------------------------------------------------------------------------
+
+
+async def test_the_gate_request_names_its_prompt_version(load: Load) -> None:
+    model = FakeModel()
+    model.push(ModelRole.GATE, GateDecision(intent=Intent.QUESTION, act=True, reason="PO"))
+
+    await Gate(model, PROMPTS.gate).classify(context(load, sms("PO?")))
+
+    assert model.calls[0].request.prompt_version == PROMPTS.gate.version
+    assert model.calls[0].request.answer_description is None  # the schema's docstring
+
+
+def test_a_gate_template_naming_a_variable_the_gate_does_not_compute_is_refused() -> None:
+    template = replace(PROMPTS.gate, user=_Message(frozenset({"text", "weather"})))
+
+    with pytest.raises(PromptError, match=r"the user message names weather\."):
+        Gate(FakeModel(), template)
+
+
+def test_a_system_message_may_not_name_a_variable_of_the_run() -> None:
+    """The system prompt is the broker's alone, one cached prefix for all its runs."""
+    template = replace(PROMPTS.gate, system=_Message(frozenset({"intents", "text"})))
+
+    with pytest.raises(PromptError, match="the system message names text"):
+        Gate(FakeModel(), template)
+
+
+def test_a_template_may_leave_a_block_out() -> None:
+    template = replace(PROMPTS.gate, user=_Message(frozenset({"text"})))
+
+    assert Gate(FakeModel(), template).prompt is template
+
+
+class _Message:
+    """A message template naming `variables`."""
+
+    def __init__(self, variables: frozenset[str]) -> None:
+        self.variables = variables
+
+    def format(self, variables: Mapping[str, str]) -> str:
+        return " ".join(variables[name] for name in sorted(self.variables))
+
+
+def test_only_a_message_whose_meaning_code_does_not_know_goes_to_the_model(load: Load) -> None:
+    untriaged = standard_broker().model_copy(update={"triage": False})
+
+    assert Gate.calls_model(context(load, sms("PO?")))
+    assert not Gate.calls_model(replace(context(load, sms("PO?")), broker=untriaged))

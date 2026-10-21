@@ -1,24 +1,11 @@
 import clsx from "clsx";
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError, api, STAGES, STANDARD_BROKER_ID, type BrokerView, type Intent, type ResolvedSection, type Stage } from "../api";
+import { api, STAGES, type Intent, type ResolvedSection, type Stage } from "../api";
 import { Empty, InlineError, Panel, ScreenHead, Tag } from "../components/ui";
-import { useBrokerList } from "../hooks/useBrokers";
 import { useResource } from "../hooks/useResource";
 import { humanize, stageLabel } from "../lib/load";
 import { useSim } from "../state/sim";
-
-/** The broker's catalog; a client the API does not know as a broker reads the standard one. */
-async function catalogOf(clientId: string): Promise<BrokerView> {
-  try {
-    return await api.getBroker(clientId);
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404 && clientId !== STANDARD_BROKER_ID) {
-      return api.getBroker(STANDARD_BROKER_ID);
-    }
-    throw error;
-  }
-}
 
 /** The text after the person stops typing for a moment. */
 function useSettled(value: string, ms = 300): string {
@@ -37,26 +24,26 @@ function parseTypes(text: string): string[] {
     .filter(Boolean);
 }
 
-/**
- * Which layer a source comes from: a file under sops/standard/, a load type's file, or
- * the broker's own (its client files, or a document its published SOP was compiled from).
- */
-function layerOf(source: string): "standard" | "broker" | "load type" {
+/** The intents the sections name, in a stable order. */
+function sectionIntents(sections: readonly ResolvedSection[]): Intent[] {
+  return [...new Set(sections.flatMap((s) => s.intents))].sort();
+}
+
+/** Which layer a source comes from: a file under sops/standard/, a load type's file, or the client's own. */
+function layerOf(source: string): "standard" | "client" | "load type" {
   if (source.includes("/types/")) return "load type";
   if (source.includes("standard/")) return "standard";
-  return "broker";
+  return "client";
 }
 
 export function SopViewer() {
   const { load, loads } = useSim();
-  const brokers = useBrokerList();
-  // Every broker the API knows, plus the clients of loads that are not brokers (yet).
+  // The clients of the loads in this simulation; any other client id can be typed.
   const clients = useMemo(() => {
     const names = new Map<string, string>();
-    for (const b of brokers.data ?? []) names.set(b.broker_id, b.name);
-    for (const l of loads) if (!names.has(l.broker_id)) names.set(l.broker_id, l.broker_name);
+    for (const l of loads) names.set(l.broker_id, l.broker_name);
     return [...names.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.id.localeCompare(b.id));
-  }, [brokers.data, loads]);
+  }, [loads]);
   const [client, setClient] = useState(load?.broker_id ?? "northline");
   const [typesText, setTypesText] = useState(load?.load_types.join(", ") ?? "");
   const [intent, setIntent] = useState<Intent>("delay_risk_high");
@@ -76,25 +63,26 @@ export function SopViewer() {
 
   const types = parseTypes(typesText);
   const typesKey = types.join(",");
-  const broker = useResource(`broker:${client}`, () => catalogOf(client), ["brokers"]);
-  const intents = useMemo(() => [...(broker.data?.intents ?? [])].sort((a, b) => a.priority - b.priority), [broker.data]);
-  const intentKey = intents.map((i) => i.intent_id).join(",");
+  const effective = useResource(`sops:${client}:${typesKey}`, () => api.sops(client, types), []);
+  // The client's catalog is not served on its own: its intents are the ones its sections name.
+  const intents = useMemo(() => sectionIntents(effective.data?.sections ?? []), [effective.data]);
+  const intentKey = intents.join(",");
 
-  // Another broker may not have the chosen intent: fall back to its first high-risk or message intent.
+  // Another client may not have the chosen intent: fall back to its high-risk one, else the first.
   useEffect(() => {
     const ids = intentKey ? intentKey.split(",") : [];
     if (!ids.length || ids.includes(intent)) return;
     setIntent(ids.includes("delay_risk_high") ? "delay_risk_high" : ids[0]!);
   }, [intentKey, intent]);
 
-  const effective = useResource(`sops:${client}:${typesKey}`, () => api.sops(client, types), ["knowledge"]);
   const hits = useResource(
     settledQuery ? `search:${client}:${typesKey}:${settledQuery}` : null,
     () => api.searchSops({ brokerId: client, loadTypes: types, q: settledQuery, k: 5 }),
-    ["knowledge"],
+    [],
   );
+  // Asked only for an intent of this client's sections, so a client switch never asks for a foreign one.
   const preview = useResource(
-    `preview:${client}:${typesKey}:${intent}:${stage}`,
+    intents.includes(intent) ? `preview:${client}:${typesKey}:${intent}:${stage}` : null,
     () => api.sopPreview({ clientId: client, loadTypes: types, intent, stage }),
     [],
   );
@@ -112,29 +100,34 @@ export function SopViewer() {
   return (
     <>
       <ScreenHead
-        title="SOP viewer"
-        lede="The procedure the agent reads for a broker, load type, event intent and stage. Standard sections apply until a broker's published SOP replaces or extends them."
+        title="SOPs"
+        lede="The procedure the agent reads for a client, load type, event intent and stage. Standard sections apply until a client's own section replaces or extends them."
         actions={
           effective.data ? (
-            <span className="version" title="The version of the broker's published SOP the agent reads">
+            <span className="version" title="The version of the SOP files the agent reads">
               SOP version <span className="mono">{effective.data.version.slice(0, 12)}</span>
             </span>
           ) : null
         }
       />
       <Panel title="Situation">
-        {brokers.error ? <InlineError message={brokers.error} onRetry={() => void brokers.reload()} /> : null}
         <form className="filters" onSubmit={(e) => e.preventDefault()}>
           <label className="field">
-            <span className="field-label">Broker</span>
-            <select className="input" value={client} onChange={(e) => change(setClient)(e.target.value)}>
-              {clients.some((c) => c.id === client) ? null : <option value={client}>{client}</option>}
+            <span className="field-label">Client</span>
+            <input
+              className="input"
+              list="client-options"
+              value={client}
+              spellCheck={false}
+              onChange={(e) => change(setClient)(e.target.value.trim())}
+            />
+            <datalist id="client-options">
               {clients.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.id === c.name ? c.id : `${c.name} (${c.id})`}
+                  {c.name}
                 </option>
               ))}
-            </select>
+            </datalist>
           </label>
           <label className="field">
             <span className="field-label">Load types, comma separated</span>
@@ -157,25 +150,12 @@ export function SopViewer() {
               onChange={(e) => change(setIntent)(e.target.value as Intent)}
               disabled={!intents.length}
             >
-              {!intents.length ? <option value={intent}>{broker.loading ? "Loading the catalog…" : humanize(intent)}</option> : null}
-              <optgroup label="Messages">
-                {intents
-                  .filter((i) => !i.system)
-                  .map((i) => (
-                    <option key={i.intent_id} value={i.intent_id}>
-                      {i.title || humanize(i.intent_id)}
-                    </option>
-                  ))}
-              </optgroup>
-              <optgroup label="Set by code">
-                {intents
-                  .filter((i) => i.system)
-                  .map((i) => (
-                    <option key={i.intent_id} value={i.intent_id}>
-                      {i.title || humanize(i.intent_id)}
-                    </option>
-                  ))}
-              </optgroup>
+              {!intents.length ? <option value={intent}>{effective.loading ? "Loading the sections…" : humanize(intent)}</option> : null}
+              {intents.map((id) => (
+                <option key={id} value={id}>
+                  {humanize(id)}
+                </option>
+              ))}
             </select>
           </label>
           <label className="field">
@@ -189,7 +169,7 @@ export function SopViewer() {
             </select>
           </label>
         </form>
-        {broker.error ? <InlineError message={broker.error} onRetry={() => void broker.reload()} /> : null}
+        {effective.error ? <InlineError message={effective.error} onRetry={() => void effective.reload()} /> : null}
         {preview.data && explicit.length === 0 ? (
           <p className="banner banner--warn" role="status">
             No section names this intent at this stage. The agent starts from the general sections
@@ -256,12 +236,11 @@ export function SopViewer() {
             {!settledQuery ? (
               <p className="hint panel-pad search-hint">
                 The same search the agent's <span className="mono">search_sop</span> tool runs, over
-                every section this broker's loads of these types see.
+                every section this client's loads of these types see.
               </p>
             ) : null}
           </Panel>
           <Panel title={`Catalog, ${catalog.length} sections`} flush>
-            {effective.error ? <InlineError message={effective.error} onRetry={() => void effective.reload()} /> : null}
             {catalog.length === 0 && preview.data ? <Empty title="This client has no section" /> : null}
             <ul className="catalog">
               {catalog.map((entry) => (

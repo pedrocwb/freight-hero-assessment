@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import cast
 
-from freight_agent.domain.broker import Broker, choose_version, standard_broker
+from freight_agent.domain.broker import Broker, standard_broker
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import RUN_TRIGGERS, Event, EventType
@@ -21,6 +21,7 @@ from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import OutboundRecord
+from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.repositories import EventLog, UnitOfWork
 
 
@@ -38,8 +39,8 @@ class RunContext:
     event_timer: Timer | None = None  # for TIMER_DUE events: the timer named in `event.data`
     tracker: RiskTracker | None = None
     already_processed: bool = False  # a run record already exists for this event
-    # The catalog and limits this run follows: the load's broker at the version its
-    # rollout gives this load, or the standard catalog for a broker never saved.
+    # The catalog and limits this run follows: the load's broker, from its client folder
+    # (`SopIndex.broker`); the standard catalog when the folder has no catalog.
     broker: Broker = field(default_factory=standard_broker)
     # A longer window of the same history, for the agent's `get_history` tool; empty
     # when the run was loaded without one (then the tool reads `recent_events`).
@@ -77,13 +78,14 @@ async def load_run_context(
     uow: UnitOfWork,
     event: Event,
     *,
+    knowledge: SopIndex,
     now: datetime,
     recent_limit: int,
     outbound_window_minutes: int | None = None,
     history_limit: int = 0,
 ) -> RunContext:
-    """Read the load, its broker, ledger, timers, recent events, recent outbound messages
-    and documents.
+    """Read the load, its broker (from `knowledge`: the catalog of the load's client),
+    ledger, timers, recent events, recent outbound messages and documents.
 
     `outbound_window_minutes` defaults to the broker's SMS rate window. `history_limit`
     (when larger than `recent_limit`) reads a longer window of the same history for the
@@ -93,7 +95,7 @@ async def load_run_context(
     load = await uow.loads.get(event.load_id)
     if load is None:
         raise DomainError(f"unknown load {event.load_id!r} for event {event.event_id!r}")
-    broker = await broker_for(uow, load)
+    broker = await knowledge.broker(load.broker_id)
     if outbound_window_minutes is None:
         outbound_window_minutes = broker.limits.validation.sms_window_minutes
 
@@ -142,22 +144,6 @@ async def _documents(uow: UnitOfWork, load: Load, seen: Sequence[Event]) -> tupl
     if not any(e.attachments or e.type is EventType.DOCUMENT_PROCESSED for e in seen):
         return ()
     return tuple(await uow.documents.list_for_load(load.load_id))
-
-
-async def broker_for(uow: UnitOfWork, load: Load) -> Broker:
-    """The load's broker, at the version its rollout gives this load (`choose_version`).
-
-    A broker never saved runs on the standard catalog, so loads of brokers onboarded
-    before brokers were data behave as they always did.
-    """
-    current = await uow.brokers.get(load.broker_id)
-    if current is None:
-        return standard_broker()
-    rollout = current.rollout
-    previous = None
-    if rollout.percent < 100 and rollout.previous_version is not None:
-        previous = await uow.brokers.get_version(current.broker_id, rollout.previous_version)
-    return choose_version(current, previous, load.load_id)
 
 
 async def _event_timer(uow: UnitOfWork, event: Event) -> Timer | None:

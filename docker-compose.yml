@@ -1,92 +1,32 @@
 # The whole platform, local. Needs Docker with Compose v2.24 or later.
 #
 #   docker compose up --build        # http://localhost:8000: the web UI and the API
-#   docker compose up -d postgres    # only the database, for `uv run` on the host
-#   docker compose down              # add -v to drop the database volume
+#   docker compose down
 #
-#   postgres  the database. The image matches CI's integration job and ships pgvector,
-#             which the SOP index's embeddings need.
-#   migrate   one shot: `agent db migrate` against postgres once it is healthy, then exits.
 #   app       the Dockerfile's image: the API on :8000, serving the built UI. Uploaded
-#             attachments and SOP files go to the `blobs` volume (BLOBS_DIR).
+#             attachments go to the `blobs` volume (BLOBS_DIR).
 #
-# Seed the database with the brokers and published SOP versions of sops/ (what a runtime
-# with PERSISTENCE=postgres reads), once the migrations ran:
-#   docker compose run --rm -e PERSISTENCE=postgres app sop import sops/
-#
-# Both ports are published on 127.0.0.1 only: postgres has fixed agent/agent credentials
-# and the platform has no login. Opening either to the network (dropping the 127.0.0.1) is
-# a deliberate change, not a default.
+# The port is published on 127.0.0.1 only: the platform has no login. Opening it to the
+# network (dropping the 127.0.0.1) is a deliberate change, not a default.
 name: freight-agent
 
-# One image for migrate and app.
-x-agent-image: &agent-image
-  build: .
-  image: freight-agent:local
-
 services:
-  postgres:
-    image: pgvector/pgvector:pg17
-    environment:
-      POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent
-      POSTGRES_DB: agent
-    ports:
-      # The host's `uv run` reaches it at localhost:5432 (the .env.example DATABASE_URL).
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-
-  migrate:
-    <<: *agent-image
-    command: ["db", "migrate"]
-    environment:
-      # Inside the compose network the database is `postgres`, not localhost.
-      DATABASE_URL_DIRECT: postgresql://agent:agent@postgres:5432/agent
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      disable: true  # a job, not a server
-    restart: "no"
-
   app:
-    <<: *agent-image
+    build: .
+    image: freight-agent:local
     # Optional: the app starts with the defaults when there is no .env. A key in .env
-    # (OPENROUTER_API_KEY for LLM_MODE=live) reaches the container here, never the image.
+    # (OPENROUTER_API_KEY, the live model) reaches the container here, never the image.
     env_file:
       - path: .env
         required: false
     environment:
-      # replay unless the shell or .env says otherwise: `LLM_MODE=live docker compose up`.
-      LLM_MODE: ${LLM_MODE:-replay}
-      # The platform's simulation runs in memory by design (one in-process simulation,
-      # whatever PERSISTENCE says), so the app does not need Postgres today. These URLs
-      # point at the postgres service for the parts that do: `agent db migrate` (direct
-      # URL, as the migrate service runs it) and a runtime built with PERSISTENCE=postgres
-      # (pooled URL). They win over a localhost or Neon URL in .env.
-      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent
-      DATABASE_URL_DIRECT: postgresql://agent:agent@postgres:5432/agent
-      # Bytes of uploaded attachments and SOP files, kept across restarts. The database
-      # keeps only their references (sha256), so the two volumes go together.
+      # Bytes of uploaded attachments, kept across restarts.
       BLOBS_DIR: /app/blobs
     volumes:
       - blobs:/app/blobs
     ports:
       - "127.0.0.1:8000:8000"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-        # The UI comes up even when the database part fails (port 5432 taken, say).
-        required: false
     restart: unless-stopped
 
 volumes:
-  postgres-data:
   blobs:

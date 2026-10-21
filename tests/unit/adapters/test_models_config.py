@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from freight_agent.adapters.llm.models_config import (
-    EmbeddingConfig,
+    FallbackConfig,
     ModelPricing,
     ModelsConfig,
     ProviderRouting,
@@ -27,7 +27,6 @@ def _config(**overrides: Any) -> dict[str, Any]:
             "acme/tiny": {"input": 0.05, "output": 0.2},
             "acme/mid": {"input": 0.2, "output": 0.8},
         },
-        "bakeoff_candidates": ["acme/small", "acme/tiny", "acme/mid"],
     }
     raw.update(overrides)
     return raw
@@ -40,14 +39,13 @@ def _write(tmp_path: Path, raw: dict[str, Any]) -> Path:
 
 
 @pytest.mark.unit
-def test_the_shipped_config_has_every_role_priced_and_three_to_five_candidates() -> None:
+def test_the_shipped_config_has_every_role_priced() -> None:
     config = load_models_config(SHIPPED)
 
     assert set(config.roles) == set(ModelRole)
     for role in ModelRole:
         for entry in config.role(role).chain():
             assert config.pricing_for(entry.model).output > 0
-    assert 3 <= len(config.bakeoff_candidates) <= 5
 
 
 @pytest.mark.unit
@@ -65,10 +63,10 @@ def test_loads_a_valid_file(tmp_path: Path) -> None:
 
     gate = config.role(ModelRole.GATE)
     assert gate.model == "acme/small"
-    assert gate.fallbacks == ("acme/tiny",)
+    assert gate.fallbacks == (FallbackConfig(model="acme/tiny"),)
+    assert gate.models == ("acme/small", "acme/tiny")
     assert gate.temperature == 0
     assert gate.max_tokens == 256
-    assert config.bakeoff_candidates == ("acme/small", "acme/tiny", "acme/mid")
 
 
 @pytest.mark.unit
@@ -86,25 +84,6 @@ def test_a_model_without_pricing_is_an_error(tmp_path: Path) -> None:
     raw["roles"]["agent"]["fallbacks"] = ["acme/unpriced"]
 
     with pytest.raises(ValueError, match="acme/unpriced"):
-        load_models_config(_write(tmp_path, raw))
-
-
-@pytest.mark.unit
-def test_a_bakeoff_candidate_without_pricing_is_an_error(tmp_path: Path) -> None:
-    raw = _config(bakeoff_candidates=["acme/small", "acme/tiny", "acme/ghost"])
-
-    with pytest.raises(ValueError, match="acme/ghost"):
-        load_models_config(_write(tmp_path, raw))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("count", [2, 6])
-def test_the_bakeoff_has_three_to_five_candidates(tmp_path: Path, count: int) -> None:
-    pricing = {f"acme/m{i}": {"input": 0.1, "output": 0.1} for i in range(count)}
-    raw = _config(bakeoff_candidates=list(pricing))
-    raw["pricing"].update(pricing)
-
-    with pytest.raises(ValueError, match="bakeoff_candidates"):
         load_models_config(_write(tmp_path, raw))
 
 
@@ -159,7 +138,7 @@ def test_the_chain_pins_the_provider_for_the_primary_model_only() -> None:
     pinned = ProviderRouting(order=("google-ai-studio",), allow_fallbacks=False)
     role = RoleConfig(
         model="acme/small",
-        fallbacks=("acme/tiny", "acme/mid"),
+        fallbacks=(FallbackConfig(model="acme/tiny"), FallbackConfig(model="acme/mid")),
         temperature=0,
         max_tokens=300,
         provider=pinned,
@@ -172,6 +151,82 @@ def test_the_chain_pins_the_provider_for_the_primary_model_only() -> None:
     assert all(c.provider == ProviderRouting() for c in chain[1:])
     assert all(c.fallbacks == () for c in chain)
     assert all((c.temperature, c.max_tokens) == (0, 300) for c in chain)
+
+
+@pytest.mark.unit
+def test_a_fallback_mapping_overrides_only_the_settings_it_names(tmp_path: Path) -> None:
+    """A model that takes no temperature and should not reason, with a smaller cap; the
+    next fallback, a bare id, keeps every setting of the primary."""
+    raw = _config()
+    raw["roles"]["agent"] = {
+        "model": "acme/small",
+        "fallbacks": [
+            {
+                "model": "acme/mid",
+                "temperature": None,
+                "reasoning_effort": None,
+                "max_tokens": 128,
+                "provider": {"order": ["acme-cloud"]},
+            },
+            "acme/tiny",
+        ],
+        "temperature": 0,
+        "max_tokens": 256,
+        "reasoning_effort": "low",
+        "provider": {"order": ["acme-cloud"], "allow_fallbacks": True},
+    }
+
+    agent = load_models_config(_write(tmp_path, raw)).role(ModelRole.AGENT)
+    primary, mid, tiny = agent.chain()
+
+    assert agent.models == ("acme/small", "acme/mid", "acme/tiny")
+    assert (primary.temperature, primary.max_tokens, primary.reasoning_effort) == (0, 256, "low")
+    assert (mid.model, mid.temperature, mid.max_tokens, mid.reasoning_effort) == (
+        "acme/mid",
+        None,
+        128,
+        None,
+    )
+    assert mid.provider == ProviderRouting(order=("acme-cloud",))
+    assert (tiny.temperature, tiny.max_tokens, tiny.reasoning_effort) == (0, 256, "low")
+    assert tiny.provider == ProviderRouting()
+
+
+@pytest.mark.unit
+def test_a_fallback_mapping_keeps_unnamed_settings_of_the_primary() -> None:
+    role = RoleConfig.model_validate(
+        {
+            "model": "acme/small",
+            "fallbacks": [{"model": "acme/tiny", "max_tokens": 64}],
+            "temperature": 0.5,
+            "max_tokens": 256,
+            "reasoning_effort": "medium",
+        }
+    )
+
+    _, tiny = role.chain()
+
+    assert (tiny.temperature, tiny.max_tokens, tiny.reasoning_effort) == (0.5, 64, "medium")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("fallback", "named"),
+    [
+        ({"model": "acme/tiny", "max_tokens": None}, "max_tokens"),  # no cap is not a cap
+        ({"model": "acme/tiny", "temprature": 0}, "temprature"),
+        ({"model": "acme/small"}, "acme/small"),  # the primary again
+        ({"model": "acme/tiny", "reasoning_effort": "max"}, "reasoning_effort"),
+    ],
+)
+def test_a_broken_fallback_mapping_is_an_error_naming_it(
+    tmp_path: Path, fallback: dict[str, Any], named: str
+) -> None:
+    raw = _config()
+    raw["roles"]["agent"]["fallbacks"] = [fallback]
+
+    with pytest.raises(ValueError, match=named):
+        load_models_config(_write(tmp_path, raw))
 
 
 @pytest.mark.unit
@@ -194,27 +249,19 @@ def test_pricing_lookup_names_the_missing_model() -> None:
 
 
 @pytest.mark.unit
-def test_every_shipped_set_has_every_role_and_the_embedding_model() -> None:
-    for path in sorted(SHIPPED.parent.glob("models*.yaml")):
-        config = load_models_config(path)
+def test_the_shipped_gate_can_run_on_a_pinned_decision_model() -> None:
+    config = load_models_config(SHIPPED)
 
-        assert set(config.roles) == set(ModelRole), path.name
-        assert config.embedding is not None, path.name
-        assert (config.embedding.model, config.embedding.dim) == (
-            "openai/text-embedding-3-small",
-            1536,
-        )
-        assert config.pricing_for(config.embedding.model).input > 0
+    gate = config.decisions[ModelRole.GATE]
+    assert gate.model == "typesafe/jev-1.14"  # a pinned version, not the moving alias
+    assert (gate.max_attempts, gate.attempt_timeout_s, gate.backoff_s) == (3, 10, 0.5)
+    assert config.pricing_for(gate.model).input == 0.042
 
 
 @pytest.mark.unit
-def test_the_embedding_is_optional_but_must_be_priced(tmp_path: Path) -> None:
-    assert load_models_config(_write(tmp_path, _config())).embedding is None
+def test_decisions_are_optional_and_their_model_must_be_priced(tmp_path: Path) -> None:
+    assert load_models_config(_write(tmp_path, _config())).decisions == {}
 
-    raw = _config(embedding={"model": "acme/embed", "dim": 64})
-    with pytest.raises(ValueError, match="acme/embed"):
+    raw = _config(decisions={"gate": {"model": "acme/decider"}})
+    with pytest.raises(ValueError, match="decision models with no pricing entry: acme/decider"):
         load_models_config(_write(tmp_path, raw))
-
-    raw["pricing"]["acme/embed"] = {"input": 0.02, "output": 0}
-    config = load_models_config(_write(tmp_path, raw))
-    assert config.embedding == EmbeddingConfig(model="acme/embed", dim=64)

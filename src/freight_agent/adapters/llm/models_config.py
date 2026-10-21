@@ -1,23 +1,28 @@
 """Which model serves each role and what it costs.
 
 `config/models.yaml` is the only place a model is chosen: switching a model is a change
-to that file. Each role names a primary model and an ordered fallback list. This adapter
-serves one model per instance; walking the fallback list is the resilient wrapper's job
-(`adapters/llm/resilient.py`), so `RoleConfig.chain()` hands it one config per model.
+to that file. Each role names a primary model and an ordered fallback list; a fallback
+is a model id, which runs with the primary's settings, or a mapping that overrides some of
+them (`FallbackConfig`). This adapter serves one model per instance; walking the fallback
+list is the resilient wrapper's job (`adapters/llm/resilient.py`), so `RoleConfig.chain()`
+hands it one config per model.
 
 Prices are USD per 1M tokens, copied from the public OpenRouter catalog. They are
 estimates for budgets and reports: the billed price depends on the endpoint OpenRouter
-routes to, which is why the evals can pin a provider.
+routes to, which is why a role names its preferred provider first.
+
+The `decisions` block names the decision model a role can run on instead of its chat
+model (the gate, with `GATE_ENGINE=jev`), served by `adapters/decisions/openrouter.py`.
 
 The OpenRouter key is not here: it is a secret of the app `Settings`
 (`freight_agent.settings`), which the composition root passes to the live models.
 """
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from freight_agent.ports.llm import ModelRole
 
@@ -51,32 +56,66 @@ class ProviderRouting(_Config):
         return self.model_dump(mode="json", exclude_none=True)
 
 
+class FallbackConfig(_Config):
+    """One fallback of a role. Each setting written for it replaces the primary's; the
+    ones left out are the primary's, except `provider`, which is OpenRouter's default
+    routing unless set (a provider pinned for one model rarely serves another).
+
+    In the yaml a fallback is a model id (every setting from the primary) or a mapping
+    with `model` and the settings to change: a model that takes no temperature sets
+    `temperature: null`, one that should not reason sets `reasoning_effort: null`.
+    """
+
+    model: str = Field(min_length=1)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1)
+    reasoning_effort: ReasoningEffort | None = None
+    provider: ProviderRouting = ProviderRouting()
+
+
 class RoleConfig(_Config):
     model: str = Field(min_length=1)  # OpenRouter model id, e.g. google/gemini-2.5-flash-lite
-    fallbacks: tuple[str, ...] = ()
+    fallbacks: tuple[FallbackConfig, ...] = ()
     temperature: float | None = Field(default=None, ge=0, le=2)  # None: not sent
     max_tokens: int = Field(ge=1)
     reasoning_effort: ReasoningEffort | None = None  # None: the model's default
     provider: ProviderRouting = ProviderRouting()
 
+    @field_validator("fallbacks", mode="before")
+    @classmethod
+    def _model_ids(cls, value: Any) -> Any:
+        """A bare model id is a fallback with the primary's settings."""
+        if isinstance(value, list | tuple):
+            items = cast("list[Any] | tuple[Any, ...]", value)
+            return tuple({"model": v} if isinstance(v, str) else v for v in items)
+        return value
+
     @model_validator(mode="after")
     def _distinct_models(self) -> "RoleConfig":
-        chain = (self.model, *self.fallbacks)
+        chain = self.models
         repeated = sorted({m for m in chain if chain.count(m) > 1})
         if repeated:
             raise ValueError(f"a model appears twice in the chain: {', '.join(repeated)}")
+        self.chain()  # a fallback whose settings do not make a valid config fails the load
         return self
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        """The model ids of the chain, primary first."""
+        return (self.model, *(f.model for f in self.fallbacks))
 
     def chain(self) -> tuple["RoleConfig", ...]:
         """The primary, then each fallback, as single-model configs in order.
 
-        Provider pinning applies to the primary only. It exists for reproducible evals,
-        which run on the primary; a fallback is the availability path, so it keeps
-        OpenRouter's default routing (a pinned provider rarely serves another model).
+        The primary's provider routing (its preferred provider first) applies to the
+        primary only; a fallback routes as its own entry says (`FallbackConfig`).
         """
+        inherited = self.model_dump(include={"temperature", "max_tokens", "reasoning_effort"})
         fallbacks = tuple(
-            self.model_copy(update={"model": m, "fallbacks": (), "provider": ProviderRouting()})
-            for m in self.fallbacks
+            RoleConfig.model_validate(
+                {**inherited, **entry.model_dump(include=entry.model_fields_set)}
+            )
+            for entry in self.fallbacks
         )
         return (self.model_copy(update={"fallbacks": ()}), *fallbacks)
 
@@ -100,29 +139,38 @@ class ModelPricing(_Config):
         ) / _PER_MILLION
 
 
-class EmbeddingConfig(_Config):
-    """The embedding model of the SOP index (live and record only; offline runs use a
-    deterministic fake). `dim` must match the index's vector column."""
+class DecisionRoleConfig(_Config):
+    """A role served by a decision model (OpenRouter's Decisions API, not chat), the
+    `decisions` block. One model and no fallback: another model's probabilities would
+    not be comparable with the threshold the policy was measured on, so an outage
+    escalates the run instead."""
 
-    model: str = Field(min_length=1)  # OpenRouter model id, e.g. openai/text-embedding-3-small
-    dim: int = Field(ge=1)
+    model: str = Field(min_length=1)  # e.g. typesafe/jev-1.14, pinned (not an alias)
+    attempt_timeout_s: float = Field(default=10.0, gt=0)  # one HTTP attempt
+    max_attempts: int = Field(default=3, ge=1, le=5)  # sends, on a transient failure
+    backoff_s: float = Field(default=0.5, ge=0)  # before the 2nd send, doubled after
 
 
 class ModelsConfig(_Config):
     roles: dict[ModelRole, RoleConfig]
     pricing: dict[str, ModelPricing]
-    bakeoff_candidates: tuple[str, ...] = Field(min_length=3, max_length=5)
-    embedding: EmbeddingConfig | None = None
+    # Roles that can also run on a decision model, chosen by a setting (GATE_ENGINE).
+    decisions: dict[ModelRole, DecisionRoleConfig] = {}
+
+    @model_validator(mode="after")
+    def _decisions_priced(self) -> "ModelsConfig":
+        unpriced = sorted({d.model for d in self.decisions.values()} - self.pricing.keys())
+        if unpriced:
+            raise ValueError(f"decision models with no pricing entry: {', '.join(unpriced)}")
+        return self
 
     @model_validator(mode="after")
     def _complete(self) -> "ModelsConfig":
         missing = [r.value for r in ModelRole if r not in self.roles]
         if missing:
             raise ValueError(f"roles missing from the config: {', '.join(missing)}")
-        used = [m for role in self.roles.values() for m in (role.model, *role.fallbacks)]
-        if self.embedding is not None:
-            used.append(self.embedding.model)
-        unpriced = sorted({m for m in (*used, *self.bakeoff_candidates) if m not in self.pricing})
+        used = [m for role in self.roles.values() for m in role.models]
+        unpriced = sorted({m for m in used if m not in self.pricing})
         if unpriced:
             raise ValueError(f"models with no pricing entry: {', '.join(unpriced)}")
         return self
@@ -142,9 +190,7 @@ def load_models_config(path: Path | str) -> ModelsConfig:
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(
-            f"{path}: expected a mapping with roles, pricing, bakeoff_candidates and embedding"
-        )
+        raise ValueError(f"{path}: expected a mapping with roles and pricing")
     try:
         return ModelsConfig.model_validate(raw)
     except ValidationError as exc:

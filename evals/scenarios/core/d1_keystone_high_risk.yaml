@@ -4,11 +4,11 @@
 # Expected timeline (Client B, load 481207 with broker keystone, 2026-10-13,
 # America/Los_Angeles):
 #   step 0  07:00  ping, risk low -> high.
-#           07:01  run: intent delay_risk_high from code, decide only. The keystone
+#           07:01  run: intent delay_risk_high from code, agent only. The keystone
 #                  delay_risk_high section replaces the standard one: one SMS to
 #                  drv_20931 for the ETA (eta_request opens, attempts 1) and a follow-up
 #                  timer T1 due 07:31.
-#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, decide only.
+#   step 1  07:31  T1 fires (zero latency): intent eta_follow_up_due, agent only.
 #                  Keystone: no second SMS; post an alert in the broker's Slack channel
 #                  that starts with the load number; close eta_request as exhausted.
 #                  No email to the dispatcher.
@@ -32,15 +32,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; one SMS to the driver at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Keystone Freight. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Keystone), no ETA request is open, so send the driver one SMS for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -54,13 +45,6 @@ steps:
 
   - at: "07:31"
     note: No ETA after 30 minutes; alert the broker's Slack channel and close the request.
-    script:
-      decide:
-        - actions:
-            - type: post_broker_slack
-              text: "Load 481207: no ETA from the driver 30 minutes after our SMS at 07:01, and the delay risk for the Riverbend plant pickup is high."
-            - {type: close_obligation, kind: eta_request, status: exhausted}
-          rationale: delay_risk_high (Keystone), no ETA 30 minutes after the one SMS, so no second SMS; alert the broker's Slack channel and close the request as exhausted.
     expect:
       actions:
         - {kind: broker_slack, contains: ["481207"], count: 1}

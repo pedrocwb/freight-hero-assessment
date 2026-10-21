@@ -5,9 +5,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from freight_agent.adapters.knowledge.memory import MemorySopIndex
 from freight_agent.adapters.persistence.memory.store import MemoryStore
 from freight_agent.application.context import RunContext, load_run_context
-from freight_agent.domain.broker import Broker, BrokerLimits, Rollout, new_broker, standard_broker
+from freight_agent.domain.broker import BrokerLimits, new_broker, standard_broker
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Attachment, Direction, Event, EventType
@@ -23,6 +24,7 @@ T0 = datetime(2026, 10, 13, 7, 0, tzinfo=LA)
 NOW = T0 + timedelta(minutes=90)
 WINDOW = 60
 OTHER = "999999"
+NO_SOP = MemorySopIndex([])  # no section and no catalog: every load on the standard catalog
 
 
 def _at(minutes: float) -> datetime:
@@ -144,10 +146,16 @@ async def _context(
     now: datetime = NOW,
     recent_limit: int = 30,
     window: int = WINDOW,
+    knowledge: MemorySopIndex = NO_SOP,
 ) -> RunContext:
     async with store.unit_of_work() as uow:
         return await load_run_context(
-            uow, event, now=now, recent_limit=recent_limit, outbound_window_minutes=window
+            uow,
+            event,
+            knowledge=knowledge,
+            now=now,
+            recent_limit=recent_limit,
+            outbound_window_minutes=window,
         )
 
 
@@ -648,24 +656,8 @@ async def test_already_processed_when_a_run_exists_for_the_event(
 # --- the broker (wave 3) ---------------------------------------------------------------------
 
 
-async def _save_brokers(store: MemoryStore, *brokers: Broker) -> None:
-    async with store.unit_of_work() as uow:
-        for broker in brokers:
-            await uow.brokers.save(broker)
-        await uow.commit()
-
-
-def _northline(version: int, percent: int = 100, previous: int | None = None) -> Broker:
-    return new_broker("northline", "Northline Logistics").model_copy(
-        update={
-            "config_version": version,
-            "rollout": Rollout(percent=percent, previous_version=previous),
-        }
-    )
-
-
 @pytest.mark.unit
-async def test_a_broker_never_saved_runs_on_the_standard_catalog(
+async def test_a_broker_without_a_catalog_runs_on_the_standard_catalog(
     store: MemoryStore, load: Load
 ) -> None:
     await _seed(store, loads=[load], events=[_message("m1")])
@@ -676,42 +668,33 @@ async def test_a_broker_never_saved_runs_on_the_standard_catalog(
 
 
 @pytest.mark.unit
-async def test_the_load_s_broker_is_read_at_its_current_version(
-    store: MemoryStore, load: Load
-) -> None:
+async def test_the_load_s_broker_is_its_client_s_catalog(store: MemoryStore, load: Load) -> None:
+    northline = new_broker("northline", "Northline Logistics")
     await _seed(store, loads=[load], events=[_message("m1")])
-    await _save_brokers(store, _northline(1), _northline(2, previous=1))
 
-    ctx = await _context(store, _message("m1"))
+    ctx = await _context(store, _message("m1"), knowledge=MemorySopIndex([], brokers=[northline]))
 
-    assert (ctx.broker.broker_id, ctx.broker.config_version) == ("northline", 2)
-
-
-@pytest.mark.unit
-async def test_a_rollback_runs_the_load_on_the_previous_version(
-    store: MemoryStore, load: Load
-) -> None:
-    await _seed(store, loads=[load], events=[_message("m1")])
-    await _save_brokers(store, _northline(1), _northline(2, percent=0, previous=1))
-
-    ctx = await _context(store, _message("m1"))
-
-    assert ctx.broker.config_version == 1
+    assert ctx.broker == northline
 
 
 @pytest.mark.unit
 async def test_the_outbound_window_defaults_to_the_broker_s_rate_window(
     store: MemoryStore, load: Load
 ) -> None:
-    narrow = _northline(1).model_copy(
-        update={"limits": BrokerLimits(validation=ValidationConfig(sms_window_minutes=10))}
+    narrow = new_broker("northline", "Northline Logistics").revised(
+        limits=BrokerLimits(validation=ValidationConfig(sms_window_minutes=10))
     )
     sms = _action("e:0", "sms", {"contact_id": "drv_20931", "text": "ETA?"}, at=_at(70))
     await _seed(store, loads=[load], events=[_message("m1"), sms])
-    await _save_brokers(store, narrow)
 
     async with store.unit_of_work() as uow:
-        ctx = await load_run_context(uow, _message("m1"), now=NOW, recent_limit=30)
+        ctx = await load_run_context(
+            uow,
+            _message("m1"),
+            knowledge=MemorySopIndex([], brokers=[narrow]),
+            now=NOW,
+            recent_limit=30,
+        )
     wide = await _context(store, _message("m1"), window=60)
 
     assert ctx.recent_outbound == ()  # 20 minutes ago: outside the broker's 10-minute window
@@ -730,7 +713,9 @@ async def test_a_longer_history_window_is_read_for_get_history(
     await _seed(store, loads=[load], events=[*history, later])
 
     async with store.unit_of_work() as uow:
-        ctx = await load_run_context(uow, history[-1], now=NOW, recent_limit=5, history_limit=40)
+        ctx = await load_run_context(
+            uow, history[-1], knowledge=NO_SOP, now=NOW, recent_limit=5, history_limit=40
+        )
 
     assert [e.event_id for e in ctx.recent_events] == [f"m{i}" for i in range(45, 50)]
     assert [e.event_id for e in ctx.history] == [f"m{i}" for i in range(10, 50)]
@@ -817,7 +802,7 @@ async def test_a_processed_document_event_reads_the_documents(
 
 
 class _NoDocuments:
-    """A document repository that must not be read (the Postgres stub before W3-DOC)."""
+    """A document repository that must not be read."""
 
     async def list_for_load(self, load_id: str) -> list[Document]:
         raise AssertionError("no attachment is in view: the documents must not be read")
@@ -831,6 +816,8 @@ async def test_a_history_with_no_attachment_reads_no_document(
 
     async with store.unit_of_work() as uow:
         uow.documents = _NoDocuments()  # type: ignore[assignment]
-        ctx = await load_run_context(uow, _message("m1"), now=NOW, recent_limit=30)
+        ctx = await load_run_context(
+            uow, _message("m1"), knowledge=NO_SOP, now=NOW, recent_limit=30
+        )
 
     assert ctx.documents == ()

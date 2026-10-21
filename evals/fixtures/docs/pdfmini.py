@@ -5,10 +5,9 @@ Helvetica-Oblique, WinAnsi encoding), plain uncompressed content streams, option
 images (FlateDecode) and a correct cross-reference table. The output is deterministic:
 the same input gives the same bytes.
 
-Used by `make_fixtures.py` in this folder (the document fixtures) and by
-`../sops/make_fixtures.py` (the broker SOP). Coordinates given to `Canvas` are measured
-from the top-left corner of a US Letter page, in points; the writer flips them to PDF
-coordinates.
+Used by `make_fixtures.py` in this folder (the document fixtures). Coordinates given to
+`Canvas` are measured from the top-left corner of a US Letter page, in points; the writer
+flips them to PDF coordinates.
 """
 
 from __future__ import annotations

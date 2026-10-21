@@ -33,3 +33,16 @@ class GateDecision(DomainModel):
     intent: str
     act: bool
     reason: str
+
+
+class GateScores(DomainModel):
+    """What a decision model weighed when it triaged a message (the `jev` gate engine):
+    the probability of each message intent of the catalog, in the catalog's order, and
+    the probability that the message needs the agent to act now. `threshold` is the act
+    probability under which the policy let a quiet intent end the run."""
+
+    model: str
+    intents: dict[str, float]
+    act: float
+    threshold: float
+    intent_confidence: float | None = None

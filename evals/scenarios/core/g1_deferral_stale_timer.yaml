@@ -11,7 +11,7 @@
 #                  order, so on the 07:31 tick:
 #                  1. T1 fires: it is marked fired (no longer pending) and its timer_due
 #                     event is queued behind the message, which was queued at 07:30.
-#                  2. Message run: gate -> eta_deferred, decide. eta_deferred: one wait of
+#                  2. Message run: gate -> eta_deferred -> agent. eta_deferred: one wait of
 #                     5 minutes (at most 15), send nothing, set no timer. The deferral
 #                     counts from the message time: until 07:35. T1 is still the
 #                     obligation's active timer, so the executor replaces it with T2 due
@@ -20,7 +20,7 @@
 #                  3. T1's run: the prefilter finds T1 stale (the obligation now waits on
 #                     T2): status skipped, stale_timer, no model call. No SMS at 07:31.
 #                  Runs of the step, in order: [acted, skipped]. Model calls: 2 (gate and
-#                  decide of the message run; the stale timer costs none).
+#                  agent of the message run; the stale timer costs none).
 #   step 2  07:36  nothing fires before 07:37: no run, and the next pending timer is T2.
 id: g1_deferral_stale_timer
 title: A deferral at 07:30 makes the 07:31 follow-up stale; the next follow-up is 07:37
@@ -37,15 +37,6 @@ steps:
   - at: "07:00"
     note: Risk goes high; the agent asks the driver for the ETA at 07:01.
     ping: {delay_risk: high}
-    script:
-      decide:
-        - actions:
-            - type: send_sms
-              contact_id: drv_20931
-              purpose: eta_request
-              text: Hi, this is Northline Logistics. What time will you arrive at the Riverbend plant pickup in Stockton?
-            - {type: schedule_timer, kind: eta_request, due_in_minutes: 30}
-          rationale: delay_risk_high (Northline), first step, no ETA request is open, so SMS the driver for the ETA and follow up in 30 minutes.
     expect:
       actions:
         - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
@@ -58,13 +49,6 @@ steps:
   - at: "07:30"
     note: The driver defers. The message run and the old timer's run both happen on the 07:31 tick.
     message: {channel: sms, sender: drv_20931, body: "I'll tell you in 5 minutes"}
-    script:
-      gate:
-        - {intent: eta_deferred, act: true, reason: The driver promises the ETA in 5 minutes.}
-      decide:
-        - actions:
-            - {type: defer_obligation, kind: eta_request, minutes: 5}
-          rationale: eta_deferred, first wait for this request, so defer it by the 5 minutes promised and send nothing; code moves the follow-up.
     expect:
       no_actions: true
       obligations:

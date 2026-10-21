@@ -1,4 +1,4 @@
-"""Persistence ports. The memory and Postgres adapters implement the same contracts."""
+"""Persistence ports, implemented by the memory store (`adapters/persistence/memory/`)."""
 
 from collections.abc import Callable
 from datetime import datetime
@@ -12,9 +12,7 @@ from freight_agent.domain.outbox import OutboxItem
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.brokers import BrokerRepository
 from freight_agent.ports.documents import DocumentRepository
-from freight_agent.ports.knowledge import SopStore
 
 
 class LoadRepository(Protocol):
@@ -111,10 +109,6 @@ class EventQueue(Protocol):
 
     async def size(self) -> int: ...
 
-    async def oldest_queued(self) -> Event | None:
-        """The longest-waiting event not yet claimed, for the queue-age SLA."""
-        ...
-
     async def dead_letters(self) -> list[Event]: ...
 
 
@@ -128,8 +122,6 @@ class UnitOfWork(Protocol):
     outbox: OutboxRepository
     runs: RunRepository
     queue: EventQueue
-    brokers: BrokerRepository
-    sops: SopStore
     documents: DocumentRepository
 
     async def __aenter__(self) -> Self: ...
