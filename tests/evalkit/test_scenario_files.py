@@ -43,9 +43,10 @@ def test_no_scenario_file_carries_a_model_script(path: Path) -> None:
     assert "script" not in keys(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
-def test_the_scenario_files_are_the_four_suites() -> None:
-    assert {p.parent.name for p in FILES} == {"agent", "core", "docs", "memory"}
-    assert len(FILES) == 29
+def test_the_four_suites_have_scenarios() -> None:
+    """No exact count: the platform saves new scenarios into a suite, and each one is
+    checked by the tests above like the others."""
+    assert {"agent", "core", "docs", "memory"} <= {p.parent.name for p in FILES}
 
 
 def test_scenario_ids_are_unique() -> None:
