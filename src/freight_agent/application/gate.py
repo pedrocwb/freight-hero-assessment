@@ -9,10 +9,17 @@ which intents a message can have and which must act (`IntentDef.must_act`): thos
 go on to the agent, whatever the model said, so a weak model cannot drop a required
 action; it can only fail to skip noise. A broker with `triage` off skips the model: every
 message goes to the agent as `other`, and the agent labels it.
+
+This module's `Gate` is the `llm` engine: the gate model writes its decision. The `jev`
+engine (`gate_decision.DecisionGate`) asks a decision model for probabilities instead,
+and code decides. Both are a `Triage`, which the run graph's triage step calls, and both
+leave system events and untriaged brokers to code, the same way.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Protocol
 
 from freight_agent.application.context import RunContext
 from freight_agent.application.prompts import (
@@ -24,7 +31,7 @@ from freight_agent.application.prompts import (
 )
 from freight_agent.domain.broker import Broker, standard_broker
 from freight_agent.domain.events import EventType
-from freight_agent.domain.intents import GateDecision, Intent
+from freight_agent.domain.intents import GateDecision, GateScores, Intent
 from freight_agent.domain.load import DelayRisk
 from freight_agent.domain.runs import Usage
 from freight_agent.ports.llm import LanguageModel, LlmRequest, ModelRole
@@ -37,8 +44,15 @@ def follow_up_intent(kind: str, broker: Broker | None = None) -> str | None:
     return (broker or standard_broker()).follow_up_intent(kind)
 
 
+class GateEngine(StrEnum):
+    """What reads an inbound message at the gate (the `GATE_ENGINE` setting)."""
+
+    LLM = "llm"  # a chat model writes the decision (`Gate`)
+    JEV = "jev"  # a decision model's probabilities, and a policy in code (`DecisionGate`)
+
+
 # A message of a broker that skips triage: the agent reads it and labels it.
-_UNTRIAGED = GateDecision(
+UNTRIAGED = GateDecision(
     intent=Intent.OTHER, act=True, reason="triage is off for this broker: the agent reads it"
 )
 
@@ -48,10 +62,34 @@ class GateResult:
     decision: GateDecision
     usage: Usage | None = None  # None when no model was called
     broker: Broker = field(default_factory=standard_broker)  # whose catalog says must_act
+    engine: GateEngine | None = None  # what read the message; None when code decided
+    scores: GateScores | None = None  # what a decision model weighed (the jev engine)
 
     @property
     def should_act(self) -> bool:
         return self.decision.act or self.broker.must_act(self.decision.intent)
+
+
+class Triage(Protocol):
+    """A gate engine, as the run graph's triage step calls it."""
+
+    @property
+    def engine(self) -> GateEngine: ...
+
+    @property
+    def prompt(self) -> ChatPrompt:
+        """The template its model calls render; its role names it in a run record."""
+        ...
+
+    def calls_model(self, ctx: RunContext) -> bool: ...
+
+    async def classify(self, ctx: RunContext) -> GateResult: ...
+
+
+def calls_gate_model(ctx: RunContext) -> bool:
+    """Whether the event goes to the gate's model: a message whose meaning code does not
+    know, for a broker that triages."""
+    return system_decision(ctx) is None and ctx.broker.triage
 
 
 def check_gate_prompt(prompt: ChatPrompt) -> ChatPrompt:
@@ -60,6 +98,10 @@ def check_gate_prompt(prompt: ChatPrompt) -> ChatPrompt:
 
 
 class Gate:
+    """The `llm` engine: the gate model writes its decision (intent, act, reason)."""
+
+    engine = GateEngine.LLM
+
     def __init__(self, llm: LanguageModel, prompt: ChatPrompt, *, timeout_s: float = 60.0) -> None:
         """`PromptError` when the template does not fit the gate (`check_gate_prompt`)."""
         self._llm = llm
@@ -68,9 +110,7 @@ class Gate:
 
     @staticmethod
     def calls_model(ctx: RunContext) -> bool:
-        """Whether the event goes to the gate model: a message whose meaning code does not
-        know, for a broker that triages."""
-        return system_decision(ctx) is None and ctx.broker.triage
+        return calls_gate_model(ctx)
 
     async def classify(self, ctx: RunContext) -> GateResult:
         """`LlmError` propagates: the runtime escalates a model failure to a Hero."""
@@ -78,7 +118,7 @@ class Gate:
         if decision is not None:
             return GateResult(decision=decision, broker=ctx.broker)
         if not ctx.broker.triage:
-            return GateResult(decision=_UNTRIAGED, broker=ctx.broker)
+            return GateResult(decision=UNTRIAGED, broker=ctx.broker)
         request = LlmRequest(
             role=ModelRole.GATE,
             system=render_gate_system_prompt(self.prompt, ctx.broker),
@@ -88,7 +128,9 @@ class Gate:
         )
         response = await self._llm.generate(request, GateDecision)
         decision = _message_decision(response.parsed, ctx.broker)
-        return GateResult(decision=decision, usage=response.usage, broker=ctx.broker)
+        return GateResult(
+            decision=decision, usage=response.usage, broker=ctx.broker, engine=self.engine
+        )
 
 
 def system_decision(ctx: RunContext) -> GateDecision | None:

@@ -223,7 +223,8 @@ def test_a_tag_runs_every_role_at_it(tmp_path: Path) -> None:
     path = tmp_path / "prompts.yaml"
     path.write_text(
         "gate: freight-agent-gate:3f2a9c41d0be\nagent: freight-agent-agent:prod\n"
-        "extract: freight-agent-extract\njudge: freight-agent-judge:prod\n",
+        "extract: freight-agent-extract\njudge: freight-agent-judge:prod\n"
+        "gate_decision: freight-agent-gate_decision:prod\n",
         encoding="utf-8",
     )
 
@@ -239,12 +240,18 @@ def test_a_tag_runs_every_role_at_it(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "error"),
     [
-        ("gate: a:prod\n", "must pin exactly the roles .*; missing: agent, extract, judge"),
         (
-            "gate: a\nagent: b\nextract: c\njudge: d\ndriver: e\n",
+            "gate: a:prod\n",
+            "must pin exactly the roles .*; missing: agent, extract, gate_decision, judge",
+        ),
+        (
+            "gate: a\nagent: b\nextract: c\njudge: d\ngate_decision: f\ndriver: e\n",
             "must pin exactly the roles .*; unknown: driver",
         ),
-        ("gate: a\nagent: 3\nextract: c\njudge: d\n", "agent must be a reference"),
+        (
+            "gate: a\nagent: 3\nextract: c\njudge: d\ngate_decision: f\n",
+            "agent must be a reference",
+        ),
         ("- gate\n", "must map each role to a Hub reference"),
         ("gate: [a\n", "cannot be read"),
     ],

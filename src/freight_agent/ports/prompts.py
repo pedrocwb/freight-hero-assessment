@@ -6,7 +6,9 @@ repository (`prompts/<role>.yaml`). Code computes the parts that depend on the b
 on the run (the catalog's intents, the SOP sections, the ledger, a document's pages) and
 passes them as variables; the template holds everything else, so a prompt is edited,
 reviewed and versioned without a code change. SOP files are not prompts: they are the
-clients' data, edited by their own people, in `sops/`.
+clients' data, edited by their own people, in `sops/`. A decision model reads no chat,
+but its texts are versioned the same way: the two messages are the parts of the state it
+reads, and the template's `tools` hold its questions (`gate_decision`).
 
 A template's version is its Hub commit, or `local:<sha256 prefix>` for the repository
 copy. The composition root resolves every role once, at startup (`Prompts.resolve`), so
@@ -35,6 +37,9 @@ class PromptRole(StrEnum):
     AGENT = "agent"  # the agent loop's rounds
     EXTRACT = "extract"  # a document's type and values
     JUDGE = "judge"  # grades the wording of a step in the evals
+    # Triage on a decision model (`GATE_ENGINE=jev`): the state's preamble and context,
+    # and in `tools` each question's instructions and criteria, by key.
+    GATE_DECISION = "gate_decision"
 
 
 class PromptError(Exception):
@@ -67,7 +72,8 @@ class ChatPrompt:
     system: MessageTemplate
     user: MessageTemplate
     # What the model reads about a tool, by tool name, when the template sets it: the
-    # agent's `finish` (the answer tool) is described here, not in code.
+    # agent's `finish` (the answer tool) is described here, not in code. A decision
+    # model's template keeps its questions' texts here, by key (`gate_decision`).
     tools: Mapping[str, str] = field(default_factory=dict[str, str])
 
     def describe(self) -> str:
@@ -93,6 +99,7 @@ class Prompts:
     agent: ChatPrompt
     extract: ChatPrompt
     judge: ChatPrompt
+    gate_decision: ChatPrompt
 
     @classmethod
     def resolve(cls, registry: PromptRegistry) -> "Prompts":
@@ -101,10 +108,11 @@ class Prompts:
             agent=registry.get(PromptRole.AGENT),
             extract=registry.get(PromptRole.EXTRACT),
             judge=registry.get(PromptRole.JUDGE),
+            gate_decision=registry.get(PromptRole.GATE_DECISION),
         )
 
     def all(self) -> tuple[ChatPrompt, ...]:
-        return (self.gate, self.agent, self.extract, self.judge)
+        return (self.gate, self.agent, self.extract, self.judge, self.gate_decision)
 
     def versions(self) -> dict[str, str]:
         """Role -> version, as a run record and an experiment record them."""

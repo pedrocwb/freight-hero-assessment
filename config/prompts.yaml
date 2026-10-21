@@ -15,3 +15,4 @@ gate: freight-agent-gate:prod
 agent: freight-agent-agent:prod
 extract: freight-agent-extract:prod
 judge: freight-agent-judge:prod
+gate_decision: freight-agent-gate_decision:prod

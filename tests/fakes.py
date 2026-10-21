@@ -18,6 +18,7 @@ model's side written down:
 
 import itertools
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,14 @@ from pydantic import BaseModel
 
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome, Plan
 from freight_agent.domain.runs import Usage
+from freight_agent.ports.decisions import (
+    Answer,
+    ChoiceAnswer,
+    DecisionError,
+    DecisionRequest,
+    DecisionResponse,
+    YesNoAnswer,
+)
 from freight_agent.ports.llm import (
     AssistantTurn,
     ChatReply,
@@ -145,3 +154,50 @@ class FakeModel:
             answer=answer,
             usage=self._usage(request, turn.cost_usd),
         )
+
+
+# --- a fake decision model ------------------------------------------------------------
+
+DecisionOutput = Mapping[str, Answer] | Exception
+
+
+@dataclass
+class FakeDecisions:
+    """A fake decision model (`ports.decisions`): it answers, call by call, the answers a
+    test queues (`push`), by question name; an exception in the queue is raised at that
+    call. Every request is recorded, and a call with nothing queued raises a
+    `DecisionError` (an `LlmError`, so a run escalates as on a real failure)."""
+
+    name: str = "fake-jev"
+    cost_usd: float = 0.0
+    requests: list[DecisionRequest] = field(default_factory=list[DecisionRequest])
+    _queue: deque[DecisionOutput] = field(default_factory=deque[DecisionOutput])
+
+    def push(self, *outputs: DecisionOutput) -> None:
+        self._queue.extend(outputs)
+
+    def remaining(self) -> int:
+        return len(self._queue)
+
+    async def decide(self, request: DecisionRequest) -> DecisionResponse:
+        self.requests.append(request)
+        if not self._queue:
+            raise DecisionError(f"no {request.role.value} decision queued")
+        output = self._queue.popleft()
+        if isinstance(output, Exception):
+            raise output
+        usage = Usage(role=request.role.value, model=self.name, cost_usd=self.cost_usd)
+        return DecisionResponse(answers=dict(output), usage=usage)
+
+
+def gate_answers(
+    intent: str, act: float, probabilities: Mapping[str, float] | None = None
+) -> dict[str, Answer]:
+    """The jev gate's two answers: the intent (all its probability on it unless given)
+    and P(act now)."""
+    return {
+        "intent": ChoiceAnswer(
+            choice=intent, probabilities=dict(probabilities or {intent: 1.0}), confidence=0.9
+        ),
+        "act": YesNoAnswer(yes=act),
+    }

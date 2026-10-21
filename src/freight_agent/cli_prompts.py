@@ -56,6 +56,7 @@ def _checks() -> "dict[PromptRole, Callable[[ChatPrompt], ChatPrompt]]":
     """What each role's code needs of its template (the services check it the same way)."""
     from freight_agent.application.agent import check_agent_prompt
     from freight_agent.application.gate import check_gate_prompt
+    from freight_agent.application.gate_decision import check_gate_decision_prompt
     from freight_agent.application.prompts_documents import check_extract_prompt
     from freight_agent.evalkit.judge import check_judge_prompt
     from freight_agent.ports.prompts import PromptRole
@@ -65,6 +66,7 @@ def _checks() -> "dict[PromptRole, Callable[[ChatPrompt], ChatPrompt]]":
         PromptRole.AGENT: check_agent_prompt,
         PromptRole.EXTRACT: check_extract_prompt,
         PromptRole.JUDGE: check_judge_prompt,
+        PromptRole.GATE_DECISION: check_gate_decision_prompt,
     }
 
 
