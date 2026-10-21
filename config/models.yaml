@@ -31,9 +31,10 @@
 #                     one fails or rate limits, before the chain moves to another model.
 #                     The trade-off is reproducibility: such a call ran on another
 #                     endpoint, maybe at another price, and the run records which
-#                     (`Usage.provider`, as OpenRouter reports it). require_parameters
-#                     defaults to true: only endpoints that honour every parameter we send
-#                     (notably tool_choice).
+#                     (`Usage.provider`, from OpenRouter's routing metadata).
+#                     require_parameters defaults to true: only endpoints that honour every
+#                     parameter we send (notably a forced tool_choice), which can leave a
+#                     single endpoint to route to.
 #
 # A call the provider rate limits or reports overloaded (HTTP 429, 502, 503, 529) is
 # retried on the same model first: at most twice, after about 1 s then 2 s with jitter, or
@@ -44,7 +45,7 @@ roles:
   gate:
     # Classification into a small enum, the cheapest reliable structured output.
     # GPT-4.1 Nano: no reasoning, fast first token, forced tool calls are solid.
-    # OpenAI first, then the same model on another provider (Azure).
+    # OpenAI first, then the same model on Azure (both force tool calls).
     model: openai/gpt-4.1-nano
     fallbacks: [google/gemini-2.5-flash-lite]
     temperature: 0
@@ -60,12 +61,15 @@ roles:
     # (evals/RESULTS.md, "How the agent model was chosen"), at about $0.0007 per run;
     # Claude Haiku 5.5 passed too, at about 3.6 times the cost, and is the first upgrade.
     # gpt-oss always reasons; low effort keeps an agent call near 7 s (p95 about 15 s).
-    # DeepInfra at bf16 first, the endpoint the evals measured; when it fails or rate
-    # limits, OpenRouter serves the same model from another bf16 endpoint that takes
-    # every parameter (on 2026-10-20: DekaLLM, AkashML and Crusoe, at $0.03 to $0.05
-    # input and $0.18 to $0.25 output per 1M tokens, against DeepInfra's $0.037 and
-    # $0.17). fp4/int4 endpoints were not measured, so the quantization filter keeps
-    # them out.
+    # DeepInfra at bf16 first, the endpoint the evals measured, and fallbacks allowed to
+    # any other bf16 endpoint that takes every parameter sent. On 2026-10-20 there is
+    # none: DekaLLM, AkashML and Crusoe serve gpt-oss at bf16 but take only
+    # `tool_choice: auto`, and every agent round forces a tool call (`required`, or the
+    # answer tool by name), so OpenRouter's routing reports "available=1" and a DeepInfra
+    # rate limit comes back as a 429 (evals/RESULTS.md): the same-model retries absorb
+    # most, the next fallback the rest. The other endpoints that force tool calls are fp16
+    # (Cerebras, $0.35 / $0.75 per 1M), fp4/int4 or of unlisted precision, none measured,
+    # so the filter stays at bf16 until one is.
     # Then Claude Haiku 5.5, with the settings it passed the core suite with as the agent
     # model (22/22 at k = 3): no temperature (no Anthropic endpoint takes one with
     # require_parameters), its own reasoning default, a 2048-token cap. Gemini 2.5 Flash
