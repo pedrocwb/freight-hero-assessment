@@ -101,13 +101,6 @@ roles:
       order: [openai]
       allow_fallbacks: false
 
-  driver_sim:
-    # Plays a driver persona in multi-turn evals; some variety is wanted.
-    model: google/gemini-2.5-flash-lite
-    fallbacks: [openai/gpt-4.1-nano]
-    temperature: 0.7
-    max_tokens: 400
-
   extract:
     # Classifies a document and extracts its values in one call, page images included
     # (scans, phone photos), so a vision model. About $0.0008 per one-page POD.
