@@ -21,17 +21,17 @@ figure on your own keys, run the command next to it (see `README.md`).
 |---|---|---|---|---|---|
 | `core` | 22 | 21/22 | 65/66 | $0.098 | 7.7 / 12.5 s |
 | `agent` | 1 | 1/1 | 3/3 | $0.003 | 5.6 / 6.2 s |
-| `docs` | 3 | 2/3 | 6/9 | $0.025 | 8.9 / 13.5 s |
+| `docs` | 3 | 3/3 | 9/9 | $0.026 | 8.6 / 11.4 s |
 
 Measured 2026-10-21 (UTC), `agent eval run --suite S --k 3`, git `ab483a4` (core) and
-`e9b7593` (docs; the same agent, plus the provider read from OpenRouter's routing
-metadata). The `agent` row is from an earlier k = 3 round (`agent-k3-bf9234d2`, git
+`35e5f09` (docs: the same agent, the provider read from OpenRouter's routing metadata, and
+the SOP wording for a failed document check described under "What failed, and why"). The `agent` row is from an earlier k = 3 round (`agent-k3-bf9234d2`, git
 `45e38fc`, the same prompts), which no rate limit touched.
 
 DeepInfra rate limited `gpt-oss-120b` again during this round (138 HTTP 429 answers). The
 retries absorbed them: no run escalated, 91 of the 99 rate-limited agent rounds were
 answered by `gpt-oss-120b` itself, and Claude Haiku 5.5 answered the other 8. Gemini 2.5
-Flash Lite served no round. The two failing scenarios failed on rounds the primary model
+Flash Lite served no round. The one failing scenario failed on rounds the primary model
 served alone (below). That earlier round, with no retry and Gemini as the only fallback,
 passed core 20/22 and docs 0/3, all failures but one on rate-limited rows
 (`core-k3-fa90f50e`, `docs-k3-08a4b06e`).
@@ -45,26 +45,26 @@ one**, against the $1 target ("Cost per load").
 |---|---|
 | `core-k3-0feb7477` | [compare view](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/1323a82c-f83a-4404-8872-65a907007dd8/compare?selectedSessions=ba66f58a-895e-4c13-bb49-da05113903ca) |
 | `agent-k3-bf9234d2` (the earlier round) | [compare view](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/cd482a91-71d0-44aa-ac65-7d1c717406a2/compare?selectedSessions=4ffc8d76-608a-42f9-83e9-7ac194892393) |
-| `docs-k3-b2bf27d1` | [compare view](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/26ccb0ec-f35e-48be-90b3-21945808ed9e/compare?selectedSessions=580c6eeb-156e-416b-82e0-cdbfdb767621) |
+| `docs-k3-539fb656` | [compare view](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/26ccb0ec-f35e-48be-90b3-21945808ed9e/compare?selectedSessions=68da8c88-6b6c-42f1-859a-95ae3c04d316) |
 
 | Measure | core | agent | docs |
 |---|---|---|---|
 | Runs (acted / noop / skipped / escalated) | 129 / 15 / 15 / 0 | 3 / 0 / 0 / 0 | 21 / 6 / 0 / 0 |
-| Gate calls, mean cost, p50 / p95 | 66, $0.000099, 0.91 / 1.24 s | 3, $0.000098, 0.99 / 1.07 s | 9, $0.000100, 0.97 / 1.44 s |
+| Gate calls, mean cost, p50 / p95 | 66, $0.000099, 0.91 / 1.24 s | 3, $0.000098, 0.99 / 1.07 s | 9, $0.000100, 1.04 / 1.99 s |
 | Agent runs | 135 | 3 | 27 |
-| Agent input tokens per run, mean / median (all rounds) | 16,169 / 17,411 | 11,102 / 11,093 | 16,518 / 19,371 |
-| Agent output tokens per run, mean | 223 | 205 | 222 |
+| Agent input tokens per run, mean / median (all rounds) | 16,169 / 17,411 | 11,102 / 11,093 | 16,762 / 19,298 |
+| Agent output tokens per run, mean | 223 | 205 | 232 |
 | Rounds per agent run, mean / max | 2.68 / 4 | 2.00 / 2 | 2.44 / 3 |
 | Refused action calls per agent run, mean | 0.00 | 0.00 | 0.00 |
-| Cost per model-calling run, mean | $0.00068 | $0.00054 | $0.00068 |
-| Agent rounds served by a fallback model | 8 of 362 (Haiku) | 0 of 6 | 0 of 66 |
+| Cost per model-calling run, mean | $0.00068 | $0.00054 | $0.00072 |
+| Agent rounds served by a fallback model | 8 of 362 (Haiku) | 0 of 6 | 1 of 66 (Haiku) |
 | Extract calls | | | 6: 1,812 input and 113 output tokens, $0.0008, 1.3 s each |
 
 The skipped runs are the stale timers and duplicates the prefilter stops without a model
 call; the noops are the acknowledgements and the "do nothing" cases. A latency is the
 answered call's: a round that was rate limited also waited its backoff, about 1 to 3 s.
 The billed cost (OpenRouter's `usage.cost` in each trace) equals the harness's figure:
-$0.0981 for core, $0.0251 for docs.
+$0.0981 for core, $0.0262 for docs.
 
 ### Rate limits, retries and providers
 
@@ -77,7 +77,7 @@ run in the trace.
 | Suite | 429 answers | Rate-limited rounds | Answered at the 1st retry | At the 2nd retry | Served by Claude Haiku 5.5 |
 |---|---|---|---|---|---|
 | core | 122 | 86 | 58 | 20 | 8 |
-| docs | 16 | 13 | 10 | 3 | 0 |
+| docs (`docs-k3-b2bf27d1`, before the SOP wording change) | 16 | 13 | 10 | 3 | 0 |
 
 OpenRouter's provider fallback (`allow_fallbacks: true`) absorbed none of them, and could
 not: its routing metadata reports `available=1, selected=DeepInfra` for every agent round.
@@ -92,9 +92,9 @@ read the provider, so its calls record none; at bf16 they could only be DeepInfr
 | Scenario (trials) | What happened |
 |---|---|
 | `d2_keystone_reefer_departure` (1 of 3) | The departure run, served by `gpt-oss-120b` in all four rounds, tagged the SMS asking for the trailer temperature and the seal number with `requests: eta_request`, which opened an ETA request the scenario forbids. The `requests` description says to leave it out for such a question; the other two trials did. The row's one Haiku round was the last round of the next step, which passed. |
-| `p2_pod_exceptions_needs_review` (3 of 3) | The Hero task for the POD that needs review did not quote the PO found on the POD (55812), which the scenario requires. Every round was `gpt-oss-120b` on DeepInfra. The agent's prompt shows `po_numbers: MISMATCH; expected "55821", found "55812"` and the Acme `proof_of_delivery` section asks for "the values found and what does not match", yet the task says only that the PO did not match. It failed 1 of 3 before; a prompt rule to copy each failed check into the task is the next thing to try. |
+| `p2_pod_exceptions_needs_review` (fixed) | In the round before (`docs-k3-b2bf27d1`) it failed 3 of 3: the Hero task for the POD that needs review said only that the PO did not match, without the PO on the POD (55812), which the scenario requires. The agent's prompt showed `po_numbers: MISMATCH; expected "55821", found "55812"`, and the Acme `proof_of_delivery` section asked for "the values found and what does not match". Both SOP sections now ask for the value on the document and the value on the load of each failed check, with an example on other numbers (`sops/standard/documents.md`, `sops/clients/acme/proof_of_delivery.md`); it then passed 3 of 3 (`docs-k3-539fb656`). |
 
-Neither failure involves a rate limit or a fallback model. The assignment's scenario
+The remaining failure involves no rate limit and no fallback model. The assignment's scenario
 (`a_client_a_high_risk`) passed 3 of 3; in the earlier round, its failing trial was the
 fallback model tagging the 08:01 dispatcher email with `requests: eta_request` after both
 requests were used. The `attempt_cap` refusal now tells the model that no further message
@@ -173,7 +173,7 @@ of the tool loop; none passed group A.
 
 ## Spend
 
-This round cost $0.123 (core $0.098, docs $0.025, two single-call checks of the routing
-metadata $0.00002). The earlier round cost $0.146 (core $0.111, agent $0.003, docs $0.032)
+This round cost $0.124 (core $0.098, docs $0.026, two single-call checks of the routing
+metadata $0.00002); the docs round it replaced cost $0.025. The earlier round cost $0.146 (core $0.111, agent $0.003, docs $0.032)
 and its single-scenario rerun $0.011. The cost cap of each run (`--cost-cap-usd`) bounds
 what one experiment can spend.
