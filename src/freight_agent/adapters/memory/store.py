@@ -10,15 +10,16 @@ Namespaces:
   not indexed.
 
 The client label is the first level under each root, so every read and write is scoped to
-one client by its namespace, not by a filter a caller could forget. `InMemoryStore` (with
-an embeddings index) is the store today; a `PostgresStore` with pgvector takes the same
-namespaces.
+one client by its namespace, not by a filter a caller could forget. The store is an
+`InMemoryStore` with an embeddings index (the tests, the evals, Studio and
+`PERSISTENCE=memory`) or LangGraph's `AsyncPostgresStore` with a pgvector index
+(`adapters/memory/postgres.py`, `PERSISTENCE=postgres`), on the same namespaces.
 """
 
 from collections.abc import Sequence
 from typing import Any
 
-from langgraph.store.base import BaseStore
+from langgraph.store.base import BaseStore, PutOp
 
 from freight_agent.domain.memory import (
     MAX_FACTS_PER_FACILITY,
@@ -97,6 +98,12 @@ class StoreFacilityMemory:
             await self.store.adelete(
                 facts_namespace(client_id, delete.facility_key), delete.fact_id
             )
+
+    async def clear(self) -> None:
+        """Forget every fact and every job, of every client: a fresh simulation."""
+        for root in (FACTS_ROOT, JOBS_ROOT):
+            while items := await self.store.asearch((root,), limit=_LISTING_LIMIT):
+                await self.store.abatch([PutOp(i.namespace, i.key, None) for i in items])
 
     # --- the extraction queue -----------------------------------------------------------
 

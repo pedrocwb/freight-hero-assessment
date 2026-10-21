@@ -1,8 +1,9 @@
-"""The facility memory on a LangGraph store: one namespace per client and facility, semantic
-search on an embeddings index, the extraction queue, and the embedders."""
+"""The facility memory on an `InMemoryStore` (what the contract suite cannot see: the jobs
+are not embedded), and the embedders. The behaviour through the interfaces, on both
+stores, is `tests/contract/test_facility_memory.py`."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import httpx
 import pytest
@@ -16,155 +17,14 @@ from freight_agent.adapters.memory.embeddings import (
     HashEmbeddings,
     OpenRouterEmbeddings,
     embeddings_dims,
-    memory_store,
 )
-from freight_agent.adapters.memory.store import (
-    StoreFacilityMemory,
-    facts_namespace,
-    jobs_namespace,
-)
-from freight_agent.domain.memory import (
-    ExtractionJob,
-    ExtractionStatus,
-    FacilityFact,
-    FactDelete,
-    FactKind,
-)
+from freight_agent.adapters.memory.store import StoreFacilityMemory
+from freight_agent.domain.memory import ExtractionJob
 from tests.conftest import LA
 
 pytestmark = pytest.mark.unit
 
 T0 = datetime(2026, 10, 2, 9, 0, tzinfo=LA)
-PICKUP = "riverbend-plant~stockton-ca"
-DELIVERY = "valley-dc~reno-nv"
-
-
-def fact(
-    fact_id: str,
-    text: str,
-    *,
-    client: str = "northline",
-    key: str = PICKUP,
-    minutes: int = 0,
-    kind: FactKind = FactKind.OTHER,
-) -> FacilityFact:
-    at = T0 + timedelta(minutes=minutes)
-    return FacilityFact(
-        fact_id=fact_id,
-        client_id=client,
-        facility_key=key,
-        facility_name="Riverbend plant",
-        text=text,
-        kind=kind,
-        source_load_id="470001",
-        source_event_id="m1",
-        source_at=at,
-        created_at=at,
-        updated_at=at,
-    )
-
-
-@pytest.fixture
-def memory() -> StoreFacilityMemory:
-    return StoreFacilityMemory(memory_store(HashEmbeddings(), 256))
-
-
-async def test_a_client_never_reads_another_clients_facts(memory: StoreFacilityMemory) -> None:
-    await memory.apply("northline", upserts=[fact("f1", "Check in at gate 4")])
-    await memory.apply("acme", upserts=[fact("f2", "Check in at gate 9", client="acme")])
-
-    assert [f.fact_id for f in await memory.recall("northline", PICKUP)] == ["f1"]
-    assert [f.fact_id for f in await memory.recall("acme", PICKUP)] == ["f2"]
-    assert [f.fact_id for f in await memory.search("acme", "check in gate")] == ["f2"]
-    assert [f.fact_id for f in await memory.facts("northline")] == ["f1"]
-    assert await memory.recall("keystone", PICKUP) == []
-
-
-async def test_a_write_naming_another_client_writes_nothing(memory: StoreFacilityMemory) -> None:
-    with pytest.raises(ValueError, match="names another client"):
-        await memory.apply(
-            "northline",
-            upserts=[fact("f1", "gate 4"), fact("f2", "gate 9", client="acme")],
-        )
-    with pytest.raises(ValueError, match="names another client"):
-        await memory.apply(
-            "northline", deletes=[FactDelete(client_id="acme", facility_key=PICKUP, fact_id="x")]
-        )
-
-    assert await memory.facts("northline") == []
-
-
-async def test_a_value_of_another_client_is_dropped_on_read() -> None:
-    """Two client ids with the same namespace label still never see each other."""
-    store = memory_store(HashEmbeddings(), 256)
-    memory = StoreFacilityMemory(store)
-    await memory.apply("acme.freight", upserts=[fact("f1", "gate 4", client="acme.freight")])
-
-    assert await memory.recall("acme-freight", PICKUP) == []
-    assert facts_namespace("acme.freight", PICKUP) == ("facility_memory", "acme-freight", PICKUP)
-
-
-async def test_recall_is_the_most_recent_first_and_delete_removes(
-    memory: StoreFacilityMemory,
-) -> None:
-    await memory.apply(
-        "northline",
-        upserts=[
-            fact("f1", "Check in at gate 4"),
-            fact("f2", "Dock closes at 15:00", minutes=10),
-            fact("f3", "PO required at the gate", minutes=5),
-            fact("f4", "Unload at door 12", key=DELIVERY),
-        ],
-    )
-
-    assert [f.fact_id for f in await memory.recall("northline", PICKUP)] == ["f2", "f3", "f1"]
-    assert [f.fact_id for f in await memory.recall("northline", PICKUP, limit=1)] == ["f2"]
-    assert [f.fact_id for f in await memory.facts("northline")] == ["f2", "f3", "f1", "f4"]
-
-    await memory.apply(
-        "northline", deletes=[FactDelete(client_id="northline", facility_key=PICKUP, fact_id="f2")]
-    )
-
-    assert [f.fact_id for f in await memory.recall("northline", PICKUP)] == ["f3", "f1"]
-
-
-async def test_search_ranks_by_meaning_within_the_client_and_the_facility(
-    memory: StoreFacilityMemory,
-) -> None:
-    await memory.apply(
-        "northline",
-        upserts=[
-            fact("f1", "Dock closes at 15:00"),
-            fact("f2", "Check in at gate 4"),
-            fact("f3", "Check in at the guard shack", key=DELIVERY),
-        ],
-    )
-
-    best = await memory.search("northline", "where do I check in", limit=3)
-    assert best[0].fact_id in ("f2", "f3")
-    only_pickup = await memory.search("northline", "check in", facility_key=PICKUP, limit=3)
-    assert {f.fact_id for f in only_pickup} == {"f1", "f2"}
-    assert only_pickup[0].fact_id == "f2"
-
-
-async def test_the_queue_takes_a_load_once_and_lists_the_pending_oldest_first(
-    memory: StoreFacilityMemory,
-) -> None:
-    late = ExtractionJob(load_id="2", client_id="acme", queued_at=T0 + timedelta(hours=1))
-    early = ExtractionJob(load_id="1", client_id="northline", queued_at=T0)
-
-    assert await memory.enqueue(late)
-    assert await memory.enqueue(early)
-    assert not await memory.enqueue(early)
-    assert [j.load_id for j in await memory.pending()] == ["1", "2"]
-
-    await memory.save(early.model_copy(update={"status": ExtractionStatus.DONE}))
-
-    assert [j.load_id for j in await memory.pending()] == ["2"]
-    found = await memory.get("northline", "1")
-    assert found is not None and found.status is ExtractionStatus.DONE
-    assert await memory.get("acme", "1") is None
-    assert jobs_namespace("acme") == ("facility_memory_jobs", "acme")
 
 
 async def test_jobs_are_not_embedded() -> None:
