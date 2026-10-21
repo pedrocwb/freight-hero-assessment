@@ -1,4 +1,4 @@
-"""Contract suite for `SopIndex` (`ports/knowledge.py`) on the index the runs read: the
+"""Contract suite for `SopIndex` (`interfaces/knowledge.py`) on the index the runs read: the
 `sops/` tree (`MemorySopIndex.from_files`).
 
 The selection equals `domain.sop.resolve` on the merged layers of the whole tree, search
@@ -16,7 +16,7 @@ from freight_agent.domain.broker import standard_broker
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Stage
 from freight_agent.domain.sop import effective_sections, resolve
-from freight_agent.ports.knowledge import SopIndex
+from freight_agent.interfaces.knowledge import SopIndex
 
 pytestmark = pytest.mark.contract
 

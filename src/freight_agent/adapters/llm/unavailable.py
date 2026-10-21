@@ -5,7 +5,7 @@ a run that needs the model then fails like any model failure, and the runtime es
 the event to a Hero with this reason, so no event is lost and the cause is plain.
 """
 
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LlmError,

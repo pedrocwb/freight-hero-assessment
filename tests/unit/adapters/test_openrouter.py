@@ -49,7 +49,7 @@ from freight_agent.adapters.llm.openrouter import (
 )
 from freight_agent.domain.actions import FINISH, AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatRequest,
     ImageInput,

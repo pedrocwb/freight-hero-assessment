@@ -24,7 +24,7 @@ from typing import Any, Literal, cast
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 
 _PER_MILLION = 1_000_000
 

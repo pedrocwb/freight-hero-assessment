@@ -32,7 +32,7 @@ from freight_agent.domain.actions import (
 )
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.obligations import ObligationKind
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from freight_agent.settings import Settings
 from tests.fakes import FakeModel
 

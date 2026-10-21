@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from freight_agent.ports.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, open_memory
 
 

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.llm import LlmError, ModelRole
+from freight_agent.interfaces.llm import LlmError, ModelRole
 
 
 @dataclass(frozen=True)

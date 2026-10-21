@@ -35,11 +35,11 @@ from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import MergeMode, SopLayer, SopSection
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.decisions import DecisionModel
-from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, ModelRole
-from freight_agent.ports.tracing import Tracer
+from freight_agent.interfaces.decisions import DecisionModel
+from freight_agent.interfaces.gateways import Gateways
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel, ModelRole
+from freight_agent.interfaces.tracing import Tracer
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

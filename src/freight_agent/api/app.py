@@ -27,7 +27,7 @@ from freight_agent.api.errors import install_error_handlers
 from freight_agent.api.routes import ROUTERS
 from freight_agent.api.scenarios import ScenarioRunner
 from freight_agent.api.simulation import DEFAULT_HEARTBEAT_S, SimulationService
-from freight_agent.ports.llm import LanguageModel
+from freight_agent.interfaces.llm import LanguageModel
 from freight_agent.settings import Settings
 
 logger = logging.getLogger(__name__)

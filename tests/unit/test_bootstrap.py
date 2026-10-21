@@ -60,10 +60,10 @@ from freight_agent.bootstrap import (
 from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Load
-from freight_agent.ports.decisions import DecisionError, DecisionRequest
-from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
-from freight_agent.ports.prompts import PromptRole
+from freight_agent.interfaces.decisions import DecisionError, DecisionRequest
+from freight_agent.interfaces.gateways import Gateways
+from freight_agent.interfaces.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.prompts import PromptRole
 from freight_agent.settings import MissingSetting, Settings
 from tests.fakes import FakeDecisions, FakeModel
 from tests.prompts import PROMPTS

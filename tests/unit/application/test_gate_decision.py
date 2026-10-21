@@ -21,9 +21,9 @@ from freight_agent.domain.broker import IntentDef, standard_broker
 from freight_agent.domain.events import EventType
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Load
-from freight_agent.ports.decisions import Choice, DecisionError, YesNo
-from freight_agent.ports.llm import LlmError, ModelRole
-from freight_agent.ports.prompts import PromptError
+from freight_agent.interfaces.decisions import Choice, DecisionError, YesNo
+from freight_agent.interfaces.llm import LlmError, ModelRole
+from freight_agent.interfaces.prompts import PromptError
 from tests.fakes import FakeDecisions, gate_answers
 from tests.prompts import PROMPTS
 from tests.unit.application.test_gate import ETA_REQUEST, context, event, sms

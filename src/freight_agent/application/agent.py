@@ -56,8 +56,8 @@ from freight_agent.domain.rules import default_rules
 from freight_agent.domain.runs import TrajectoryStep
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import Rule, ValidationContext, Violation, check_action
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LanguageModel,
@@ -66,7 +66,7 @@ from freight_agent.ports.llm import (
     ToolResult,
     Turn,
 )
-from freight_agent.ports.prompts import ChatPrompt, PromptError
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError
 
 logger = logging.getLogger(__name__)
 

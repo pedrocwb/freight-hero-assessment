@@ -1,4 +1,4 @@
-"""Contract suite for `DocumentRepository` (`ports/documents.py`).
+"""Contract suite for `DocumentRepository` (`interfaces/documents.py`).
 
 Owner: card W3-DOC. Runs on the memory store through the shared `uow_factory` fixture,
 each test on a fresh, empty store. A document's load exists, so an implementation may
@@ -32,8 +32,8 @@ from freight_agent.domain.documents import (
 from freight_agent.domain.load import Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.llm import LlmError, ModelRole
-from freight_agent.ports.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.llm import LlmError, ModelRole
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

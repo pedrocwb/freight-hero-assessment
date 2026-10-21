@@ -57,7 +57,7 @@ from pydantic import BaseModel, SecretStr, ValidationError
 
 from freight_agent.adapters.llm.models_config import ModelPricing, ModelsConfig, RoleConfig
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatReply,
     ChatRequest,

@@ -6,7 +6,7 @@ import pytest
 from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision
-from freight_agent.ports.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.llm import ChatRequest, LanguageModel, LlmError, LlmRequest, ModelRole
 
 pytestmark = pytest.mark.unit
 

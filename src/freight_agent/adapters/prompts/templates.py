@@ -37,7 +37,7 @@ from langchain_core.prompts import (
 from langchain_core.utils import mustache
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from freight_agent.ports.prompts import ChatPrompt, PromptError, PromptRole
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError, PromptRole
 
 HASH_LENGTH = 12
 TOOLS_KEY = "tools"  # the template metadata key of its tool descriptions

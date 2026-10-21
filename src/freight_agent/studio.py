@@ -108,8 +108,8 @@ from freight_agent.evalkit.runner import (
 )
 from freight_agent.evalkit.spec import Scenario
 from freight_agent.evalkit.suite import discover, suites
-from freight_agent.ports.llm import LanguageModel
-from freight_agent.ports.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from freight_agent.settings import Settings
 
 SETUP, ADVANCE, RUN, DELIVER, CHECK = "setup", "advance", "run", "deliver", "check"

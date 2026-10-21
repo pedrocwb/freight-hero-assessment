@@ -34,8 +34,8 @@ from freight_agent.domain.events import EventType
 from freight_agent.domain.intents import GateDecision, GateScores, Intent
 from freight_agent.domain.load import DelayRisk
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.llm import LanguageModel, LlmRequest, ModelRole
-from freight_agent.ports.prompts import ChatPrompt
+from freight_agent.interfaces.llm import LanguageModel, LlmRequest, ModelRole
+from freight_agent.interfaces.prompts import ChatPrompt
 
 
 def follow_up_intent(kind: str, broker: Broker | None = None) -> str | None:

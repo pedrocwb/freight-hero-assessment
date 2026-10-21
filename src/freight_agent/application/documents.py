@@ -72,12 +72,12 @@ from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load
 from freight_agent.domain.obligations import ObligationStatus
 from freight_agent.domain.timers import TimerStatus
-from freight_agent.ports.clock import Clock, IdGenerator
-from freight_agent.ports.documents import BlobStore, PageReader
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import ImageInput, LanguageModel, LlmError, LlmRequest, ModelRole
-from freight_agent.ports.prompts import ChatPrompt
-from freight_agent.ports.repositories import UnitOfWork, UnitOfWorkFactory
+from freight_agent.interfaces.clock import Clock, IdGenerator
+from freight_agent.interfaces.documents import BlobStore, PageReader
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import ImageInput, LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.prompts import ChatPrompt
+from freight_agent.interfaces.repositories import UnitOfWork, UnitOfWorkFactory
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,7 @@ from freight_agent.adapters.observability.langsmith import (
     langsmith_client_factory,
 )
 from freight_agent.adapters.observability.null import NullTracer
-from freight_agent.ports.tracing import Tracer
+from freight_agent.interfaces.tracing import Tracer
 
 pytestmark = pytest.mark.unit
 

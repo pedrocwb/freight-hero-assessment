@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from freight_agent.adapters.persistence.memory.store import MemoryStore
-from freight_agent.ports.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
 
 # How many failed attempts make a queued event a dead letter, in every contract store:
 # the queue tests count them.

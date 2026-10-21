@@ -39,8 +39,8 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import DeferralPolicy, Obligation, ObligationStatus
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.timers import Timer, TimerStatus, follow_up_due_at, later
-from freight_agent.ports.clock import Clock, IdGenerator
-from freight_agent.ports.repositories import UnitOfWork
+from freight_agent.interfaces.clock import Clock, IdGenerator
+from freight_agent.interfaces.repositories import UnitOfWork
 
 
 @dataclass(frozen=True)

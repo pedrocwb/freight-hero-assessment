@@ -51,11 +51,11 @@ from freight_agent.evalkit.counting import CountingModel
 from freight_agent.evalkit.judge import Judge, JudgeResult
 from freight_agent.evalkit.results import StepObservation
 from freight_agent.evalkit.spec import Scenario, Step
-from freight_agent.ports.decisions import DecisionModel
-from freight_agent.ports.documents import BlobStore
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel
-from freight_agent.ports.prompts import Prompts
+from freight_agent.interfaces.decisions import DecisionModel
+from freight_agent.interfaces.documents import BlobStore
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.prompts import Prompts
 
 # Each tick fires every due timer, so a timer still due after this many ticks at
 # one instant means the runtime never fires it; stop instead of looping forever.

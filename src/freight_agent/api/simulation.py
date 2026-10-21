@@ -65,11 +65,11 @@ from freight_agent.domain.timers import later
 from freight_agent.evalkit.counting import CountingModel
 from freight_agent.evalkit.results import StepObservation
 from freight_agent.evalkit.runner import ScenarioPlayer
-from freight_agent.ports.documents import BlobStore
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel
-from freight_agent.ports.repositories import UnitOfWorkFactory
-from freight_agent.ports.tracing import Tracer
+from freight_agent.interfaces.documents import BlobStore
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.tracing import Tracer
 from freight_agent.settings import MissingSetting, Settings
 
 DEFAULT_TIMEZONE = "America/Los_Angeles"

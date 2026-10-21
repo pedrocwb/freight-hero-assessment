@@ -16,7 +16,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from freight_agent.adapters.clock import VirtualClock
-from freight_agent.ports.llm import LanguageModel, ModelRole
+from freight_agent.interfaces.llm import LanguageModel, ModelRole
 from freight_agent.settings import Settings
 from freight_agent.studio import (
     ADVANCE,

@@ -46,7 +46,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.rules import RecipientIsContact, default_rules
 from freight_agent.domain.runs import RunStatus, TrajectoryStep
 from freight_agent.domain.validation import Rule
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatRequest,
     LlmError,

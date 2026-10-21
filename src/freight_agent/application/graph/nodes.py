@@ -25,8 +25,8 @@ from freight_agent.application.prefilter import PrefilterResult, prefilter
 from freight_agent.domain.actions import Plan
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.validation import Rule, ValidationOutcome, validate
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import AssistantTurn, Turn, UserTurn
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import AssistantTurn, Turn, UserTurn
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Load, Stage
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunStatus
-from freight_agent.ports.gateways import Gateways, SmsGateway
+from freight_agent.interfaces.gateways import Gateways, SmsGateway
 from tests.unit.application.test_runtime_harness import (
     BROKER,
     DECIDE,

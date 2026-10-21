@@ -110,7 +110,7 @@ run in CI; `.github/workflows/evals-live.yml` runs them by hand.
 src/freight_agent/
   domain/        entities and rules, no I/O: load, events, obligations, timers, ping filter,
                  actions, validation rules, SOP merge, client catalog, documents, run records
-  ports/         interfaces: repositories, SOP index, language model, decision model,
+  interfaces/         interfaces: repositories, SOP index, language model, decision model,
                  prompts, gateways, blobs, page reader, clock, tracer
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
                  (graph/), executor, escalations, runtime, document pipeline, prompt variables
@@ -120,7 +120,7 @@ src/freight_agent/
                  links, recording gateways
   evalkit/       scenario spec, player, graders, judge, LangSmith experiments, metadata
   api/           FastAPI platform: simulation, ingress, scenarios, SOPs, documents, stream
-  bootstrap.py   the composition root: the only place that wires adapters to ports
+  bootstrap.py   the composition root: the only place that wires adapters to interfaces
   cli.py         the `agent` command (cli_sop.py, cli_prompts.py)
   studio.py      LangGraph Studio's scenario graph (langgraph.json)
 sops/            the SOPs: standard, client and load-type sections, client catalogs
@@ -137,7 +137,7 @@ tests/           unit, contract, property, integration, eval harness
 
 - **Integrations are recording gateways.** SMS, email, Slack, the TMS and the Hero task
   tool record what they would send; nothing leaves the process.
-- **Storage is in memory**, behind repository ports with contract tests; a restart starts
+- **Storage is in memory**, behind repository interfaces with contract tests; a restart starts
   over. Attachment bytes are files under `BLOBS_DIR` (in memory on the platform).
 - **No always-on worker or scheduler.** `tick()` fires timers, reads documents, runs the
   queue and delivers the outbox; the platform, the evals and Studio call it on a virtual

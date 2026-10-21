@@ -31,7 +31,7 @@ from freight_agent.adapters.prompts.templates import (
     from_langchain,
     to_langchain,
 )
-from freight_agent.ports.prompts import ChatPrompt, PromptError, PromptRole
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError, PromptRole
 
 COMMIT_LENGTH = 12
 _COMMIT_KEY = "lc_hub_commit_hash"  # what `pull_prompt` adds to the template's metadata

@@ -48,7 +48,7 @@ from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.spec import Scenario, load_scenario
 from freight_agent.evalkit.suite import discover
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LlmRequest,

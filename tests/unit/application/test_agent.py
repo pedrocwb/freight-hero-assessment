@@ -39,7 +39,7 @@ from freight_agent.domain.obligations import Obligation, ObligationKind, Obligat
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.runs import TrajectoryStep
 from freight_agent.domain.sop import CatalogEntry, ResolvedSection, ResolvedSop, SearchHit
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatRequest,
     LlmError,
@@ -48,7 +48,7 @@ from freight_agent.ports.llm import (
     ToolResult,
     UserTurn,
 )
-from freight_agent.ports.prompts import PromptError
+from freight_agent.interfaces.prompts import PromptError
 from tests.fakes import FakeModel, Round, call
 from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import FakeSop

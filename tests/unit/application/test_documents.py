@@ -44,7 +44,7 @@ from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.llm import ChatRequest, ImageInput, LlmError, ModelRole
+from freight_agent.interfaces.llm import ChatRequest, ImageInput, LlmError, ModelRole
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

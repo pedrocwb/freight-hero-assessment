@@ -73,7 +73,7 @@ pythonVersion = "3.12"
 typeCheckingMode = "standard"
 strict = [
     "src/freight_agent/domain",
-    "src/freight_agent/ports",
+    "src/freight_agent/interfaces",
     "src/freight_agent/application",
 ]
 
@@ -98,7 +98,7 @@ name = "domain is pure"
 type = "forbidden"
 source_modules = ["freight_agent.domain"]
 forbidden_modules = [
-    "freight_agent.ports",
+    "freight_agent.interfaces",
     "freight_agent.application",
     "freight_agent.adapters",
     "freight_agent.api",
@@ -111,9 +111,9 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "ports depend only on the domain"
+name = "interfaces depend only on the domain"
 type = "forbidden"
-source_modules = ["freight_agent.ports"]
+source_modules = ["freight_agent.interfaces"]
 forbidden_modules = [
     "freight_agent.application",
     "freight_agent.adapters",

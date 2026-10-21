@@ -24,8 +24,8 @@ from freight_agent.domain.outbox import OutboxItem, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.documents import DocumentRepository
-from freight_agent.ports.repositories import (
+from freight_agent.interfaces.documents import DocumentRepository
+from freight_agent.interfaces.repositories import (
     EventLog,
     EventQueue,
     LoadRepository,

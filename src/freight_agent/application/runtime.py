@@ -85,15 +85,15 @@ from freight_agent.domain.ping_filter import (
 )
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.clock import Clock, IdGenerator
-from freight_agent.ports.decisions import DecisionModel
-from freight_agent.ports.documents import BlobStore, DocumentProcessor
-from freight_agent.ports.gateways import DeliveryError, Gateways
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, LlmError
-from freight_agent.ports.prompts import PromptRole, Prompts
-from freight_agent.ports.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
-from freight_agent.ports.tracing import Tracer
+from freight_agent.interfaces.clock import Clock, IdGenerator
+from freight_agent.interfaces.decisions import DecisionModel
+from freight_agent.interfaces.documents import BlobStore, DocumentProcessor
+from freight_agent.interfaces.gateways import DeliveryError, Gateways
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel, LlmError
+from freight_agent.interfaces.prompts import PromptRole, Prompts
+from freight_agent.interfaces.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
+from freight_agent.interfaces.tracing import Tracer
 
 logger = logging.getLogger(__name__)
 

@@ -24,8 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from freight_agent.application.prompts import check_variables
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.llm import LanguageModel, LlmError, LlmRequest, ModelRole
-from freight_agent.ports.prompts import ChatPrompt
+from freight_agent.interfaces.llm import LanguageModel, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.prompts import ChatPrompt
 
 DEFAULT_MIN_SCORE = 0.7
 JUDGE_SYSTEM_VARIABLES: frozenset[str] = frozenset()

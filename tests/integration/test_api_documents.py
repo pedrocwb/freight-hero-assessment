@@ -16,7 +16,7 @@ from freight_agent.domain.actions import UpdateStage, WriteTmsNote
 from freight_agent.domain.documents import ExtractedValue, Extraction
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Stage
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from tests.integration.test_api_harness import (
     DECIDE,
     DRIVER,

@@ -1,4 +1,4 @@
-"""Contract suite for `UnitOfWork` and its repositories (`ports/repositories.py`).
+"""Contract suite for `UnitOfWork` and its repositories (`interfaces/repositories.py`).
 
 The memory store (unit tests, evals, the simulation) must pass it, each test on a fresh,
 empty store.
@@ -25,7 +25,7 @@ from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
-from freight_agent.ports.repositories import UnitOfWork, UnitOfWorkFactory
+from freight_agent.interfaces.repositories import UnitOfWork, UnitOfWorkFactory
 from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS
 
 pytestmark = pytest.mark.contract

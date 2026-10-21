@@ -10,7 +10,7 @@ with the Hub's commit.
 from pathlib import Path
 
 from freight_agent.adapters.prompts.templates import PromptFile, chat_prompt, read_prompt_file
-from freight_agent.ports.prompts import ChatPrompt, PromptRole
+from freight_agent.interfaces.prompts import ChatPrompt, PromptRole
 
 LOCAL_PREFIX = "local:"
 

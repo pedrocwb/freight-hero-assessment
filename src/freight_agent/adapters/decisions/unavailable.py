@@ -5,7 +5,7 @@ starts, and a run whose gate needs the decision model fails like any model failu
 the runtime escalates the event to a Hero with this reason.
 """
 
-from freight_agent.ports.decisions import DecisionError, DecisionRequest, DecisionResponse
+from freight_agent.interfaces.decisions import DecisionError, DecisionRequest, DecisionResponse
 
 
 class UnavailableDecisions:

@@ -17,8 +17,8 @@ from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.load import Channel, Load
 from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.llm import ChatRequest, LlmError, ModelRole
-from freight_agent.ports.prompts import PromptError
+from freight_agent.interfaces.llm import ChatRequest, LlmError, ModelRole
+from freight_agent.interfaces.prompts import PromptError
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

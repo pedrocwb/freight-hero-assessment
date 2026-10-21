@@ -12,7 +12,7 @@ from freight_agent.adapters.llm.models_config import (
     RoleConfig,
     load_models_config,
 )
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 
 ROOT = Path(__file__).resolve().parents[3]
 SHIPPED = ROOT / "config" / "models.yaml"

@@ -42,7 +42,7 @@ from freight_agent.application.prompts import (
 )
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.intents import GateDecision, GateScores, Intent
-from freight_agent.ports.decisions import (
+from freight_agent.interfaces.decisions import (
     Choice,
     ChoiceAnswer,
     DecisionModel,
@@ -50,8 +50,8 @@ from freight_agent.ports.decisions import (
     YesNo,
     YesNoAnswer,
 )
-from freight_agent.ports.llm import ModelRole
-from freight_agent.ports.prompts import ChatPrompt, PromptError
+from freight_agent.interfaces.llm import ModelRole
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError
 
 INTENT_QUESTION = "intent"
 ACT_QUESTION = "act"

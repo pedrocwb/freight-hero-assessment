@@ -61,8 +61,8 @@ from freight_agent.application.graph.nodes import (
 from freight_agent.application.graph.state import RunState
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import Rule
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.prompts import PromptRole
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.prompts import PromptRole
 
 PREFILTER = "prefilter"
 # The triage step keeps the node id it had as the gate: LangSmith traces name each node

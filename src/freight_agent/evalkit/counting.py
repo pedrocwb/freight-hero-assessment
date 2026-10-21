@@ -14,13 +14,13 @@ is given one: the gate is one call whichever engine reads the message.
 """
 
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.decisions import (
+from freight_agent.interfaces.decisions import (
     DecisionError,
     DecisionModel,
     DecisionRequest,
     DecisionResponse,
 )
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LanguageModel,

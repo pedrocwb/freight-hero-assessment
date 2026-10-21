@@ -26,7 +26,7 @@ from freight_agent.adapters.prompts.templates import (
     write_prompt_file,
 )
 from freight_agent.domain.broker import FieldKind
-from freight_agent.ports.prompts import PromptError, PromptRole
+from freight_agent.interfaces.prompts import PromptError, PromptRole
 from tests.prompts import PROMPTS_DIR
 
 pytestmark = pytest.mark.unit

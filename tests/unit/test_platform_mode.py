@@ -16,7 +16,7 @@ from freight_agent.application.escalation import MODEL_FAILURE_TITLE
 from freight_agent.domain.load import Channel
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.runs import RunStatus
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from freight_agent.settings import Settings
 
 pytestmark = pytest.mark.unit

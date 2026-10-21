@@ -26,7 +26,7 @@ from freight_agent.adapters.llm.resilient import (
 from freight_agent.domain.actions import AgentOutcome
 from freight_agent.domain.intents import GateDecision, Intent
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatReply,
     ChatRequest,

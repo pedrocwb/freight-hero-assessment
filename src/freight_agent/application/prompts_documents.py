@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from freight_agent.application.prompts import check_variables
 from freight_agent.domain.broker import DocumentTypeDef, FieldDef
 from freight_agent.domain.documents import Page
-from freight_agent.ports.prompts import ChatPrompt
+from freight_agent.interfaces.prompts import ChatPrompt
 
 # The document's text the model sees at most, all pages together (the stored text is
 # whole); a longer document is cut and the cut is said.

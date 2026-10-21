@@ -27,7 +27,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation, ObligationStatus
 from freight_agent.domain.sop import ResolvedSection, SearchHit
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.llm import ToolSpec
+from freight_agent.interfaces.llm import ToolSpec
 from tests.unit.application.test_runtime_harness import FakeSop
 
 pytestmark = pytest.mark.unit

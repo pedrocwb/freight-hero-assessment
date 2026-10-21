@@ -9,7 +9,7 @@ puts this router in front: the application never learns which model serves which
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LanguageModel,

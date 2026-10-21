@@ -33,7 +33,7 @@ from freight_agent.domain.obligations import ObligationStatus as Status
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import ValidationConfig
-from freight_agent.ports.repositories import UnitOfWork
+from freight_agent.interfaces.repositories import UnitOfWork
 
 pytestmark = pytest.mark.unit
 

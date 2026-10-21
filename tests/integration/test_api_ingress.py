@@ -12,7 +12,7 @@ import pytest
 
 from freight_agent.domain.actions import WriteTmsNote
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from tests.integration.test_api_harness import (
     ASK_AGAIN,
     ASK_ETA,

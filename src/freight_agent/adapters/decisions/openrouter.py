@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from freight_agent.adapters.llm.models_config import DecisionRoleConfig, ModelPricing
 from freight_agent.adapters.llm.resilient import RetryPolicy
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.decisions import (
+from freight_agent.interfaces.decisions import (
     Answer,
     Choice,
     ChoiceAnswer,

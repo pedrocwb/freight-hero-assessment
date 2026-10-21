@@ -8,7 +8,7 @@ only designed. The answers to the assignment's questions are in
 | Diagram | Shows |
 |---|---|
 | [1. System context](#1-system-context) | Who sends events, who receives actions, which services the agent calls |
-| [2. Code layers](#2-code-layers) | Domain, ports, application, adapters, and who may import whom |
+| [2. Code layers](#2-code-layers) | Domain, interfaces, application, adapters, and who may import whom |
 | [3. One run](#3-one-run-claim-think-commit-deliver) | The three phases of a run and the outbox |
 | [4. The run graph](#4-the-run-graph) | The LangGraph graph, its budgets and its exits |
 | [5. Memory](#5-memory) | Event log, ledger, timers, outbox, documents, run records |
@@ -78,22 +78,22 @@ flowchart TB
   entry["Entry points: api/ (FastAPI), cli.py (agent ...), studio.py (LangGraph Studio), evalkit/ (experiments)"]
   boot["bootstrap.py: the composition root, the only place that picks adapters"]
   app["application/: run context, prefilter, gate, agent and tools, run graph, executor, runtime, document pipeline"]
-  ports["ports/: repositories, SOP index, language model, decision model, prompts, gateways, blobs, page reader, clock, tracer"]
+  interfaces["interfaces/: repositories, SOP index, language model, decision model, prompts, gateways, blobs, page reader, clock, tracer"]
   domain["domain/: load, events, obligations, timers, rules and validation, SOP merge, catalog, documents, actions"]
   adapters["adapters/: memory store, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
 
   entry --> boot
   boot --> app
   boot --> adapters
-  app --> ports
+  app --> interfaces
   app --> domain
-  ports --> domain
-  adapters --> ports
+  interfaces --> domain
+  adapters --> interfaces
   adapters --> domain
 ```
 
 The arrows are the only imports allowed. import-linter enforces them (`make arch`, five
-contracts in `pyproject.toml`), pyright runs in strict mode on `domain`, `ports` and
+contracts in `pyproject.toml`), pyright runs in strict mode on `domain`, `interfaces` and
 `application`, and LangChain is imported only in `adapters/llm`.
 
 ## 3. One run: claim, think, commit, deliver
@@ -339,7 +339,7 @@ each role and the SOP hash. Promotion of a prompt: edit, `push --tag candidate`,
 
 ## 10. Production at 10x (designed)
 
-Not built. The ports stay the same; the adapters behind them change.
+Not built. The interfaces stay the same; the adapters behind them change.
 
 ```mermaid
 flowchart LR

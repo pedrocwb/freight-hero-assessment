@@ -19,7 +19,7 @@ from freight_agent.adapters.prompts.hub import (
     short_commit,
 )
 from freight_agent.adapters.prompts.templates import PromptFile, to_langchain
-from freight_agent.ports.prompts import ChatPrompt, PromptError, PromptRole
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError, PromptRole
 
 pytestmark = [
     pytest.mark.unit,

@@ -48,10 +48,10 @@ from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.runner import play_scenario
 from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.evalkit.suite import gating
-from freight_agent.ports.decisions import DecisionModel
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel
-from freight_agent.ports.prompts import Prompts
+from freight_agent.interfaces.decisions import DecisionModel
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.prompts import Prompts
 
 logger = logging.getLogger(__name__)
 

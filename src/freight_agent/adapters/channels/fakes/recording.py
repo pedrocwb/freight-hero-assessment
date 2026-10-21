@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from freight_agent.domain.load import Stage
-from freight_agent.ports.gateways import DeliveryError, Gateways
+from freight_agent.interfaces.gateways import DeliveryError, Gateways
 
 
 @dataclass(frozen=True)

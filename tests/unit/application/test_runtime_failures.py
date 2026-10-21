@@ -19,7 +19,7 @@ from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.sop import MergeMode, ResolvedSop
 from freight_agent.domain.validation import Severity
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LlmError,

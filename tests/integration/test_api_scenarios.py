@@ -21,7 +21,7 @@ import pytest
 from freight_agent.api.simulation import SimulationService
 from freight_agent.domain.actions import AgentOutcome, WriteTmsNote
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.ports.llm import ChatReply, ChatRequest, LlmRequest, LlmResponse, SchemaT
+from freight_agent.interfaces.llm import ChatReply, ChatRequest, LlmRequest, LlmResponse, SchemaT
 from tests.fakes import FakeModel, Round, act
 from tests.integration.test_api_harness import (
     ASK_AGAIN,

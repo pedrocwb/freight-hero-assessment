@@ -27,7 +27,7 @@ from freight_agent.adapters.decisions.openrouter import (
 )
 from freight_agent.adapters.decisions.unavailable import UnavailableDecisions
 from freight_agent.adapters.llm.models_config import DecisionRoleConfig, ModelPricing
-from freight_agent.ports.decisions import (
+from freight_agent.interfaces.decisions import (
     Choice,
     ChoiceAnswer,
     DecisionError,
@@ -38,7 +38,7 @@ from freight_agent.ports.decisions import (
     YesNo,
     YesNoAnswer,
 )
-from freight_agent.ports.llm import LlmError, ModelRole
+from freight_agent.interfaces.llm import LlmError, ModelRole
 
 pytestmark = pytest.mark.unit
 

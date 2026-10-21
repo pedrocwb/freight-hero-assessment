@@ -145,7 +145,7 @@ the fake model only, not by a live run.
 
 **Trade-off.** One multimodal call per document is simple and handles phone photos.
 OCR (for example AWS Textract) plus a text model would be cheaper on clean digital PDFs,
-and a layout model would do better on dense rate confirmations; the pipeline's port
+and a layout model would do better on dense rate confirmations; the pipeline's interface
 (`DocumentProcessor`) allows either without touching the agent.
 
 ## 2. Instructions
@@ -547,7 +547,7 @@ and 12.5 s at p95.
 
 | Mechanism | Where |
 |---|---|
-| One event per load in flight, loads in parallel; stateless runs | `EventQueue` (`ports/repositories.py`), `application/runtime.py` |
+| One event per load in flight, loads in parallel; stateless runs | `EventQueue` (`interfaces/repositories.py`), `application/runtime.py` |
 | No transaction open while a model thinks | claim, think, commit in `AgentRuntime.process_next` |
 | No model call for pings, stale timers, duplicates, empty messages; intents of system events from code | `domain/ping_filter.py`, `application/prefilter.py`, `application/gate.py` |
 | At most 8 agent rounds and $0.05 per run, then a forced answer | `BrokerLimits`, `application/graph/nodes.py` |
@@ -569,7 +569,7 @@ timers over chatter.
 ### 5.2 Volume x10: what must change?
 
 **Short answer.** The logic, the prompts and the cost per load stay; the adapters behind
-the ports change: a durable queue partitioned by load, a timer scheduler, Postgres, an
+the interfaces change: a durable queue partitioned by load, a timer scheduler, Postgres, an
 object store, worker pools that scale on queue age, and higher model rate limits. The
 first limit this design meets is the model providers' rate limits, not compute.
 
@@ -585,7 +585,7 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 | Workers | `tick()` in one process | Stateless async workers, about 30 runs in flight each, autoscaled on queue age |
 | Timers | Rows fired by `tick()` | A scheduler claiming due timers with `FOR UPDATE SKIP LOCKED`, or EventBridge Scheduler |
 | Pings | One transaction per ping | A stream partitioned by load holds the risk tracker; only transitions reach the queue |
-| Storage | In-memory store behind the repository ports | Postgres: the events table partitioned by month, closed loads archived to object storage, a pooler, a read replica for the platform and metrics |
+| Storage | In-memory store behind the repository interfaces | Postgres: the events table partitioned by month, closed loads archived to object storage, a pooler, a read replica for the platform and metrics |
 | SOP index | Files read per run | Published versions in Postgres, cached per client by hash; hybrid search with pgvector |
 | Documents | Blobs on the filesystem; read in the tick | An object store behind `BlobStore`; document workers scaled on pending documents |
 | Models | One OpenRouter key; a rate limit is retried on the same model, OpenRouter may serve the model from another provider that takes the same parameters (the gate: OpenAI, then Azure), then a fallback model that passes the suite serves the call | Higher rate limits or provisioned throughput, per-client concurrency limits |
@@ -593,7 +593,7 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 | Cost | About $0.04 per load | The same per load; the total grows linearly |
 
 The layer rules (import-linter contracts in `pyproject.toml`) keep storage, queues, blobs
-and providers behind ports, so the run graph, the rules, the ledger and the eval suites do
+and providers behind interfaces, so the run graph, the rules, the ledger and the eval suites do
 not change. An earlier build of the Postgres adapter, with the same contract tests as the
 memory store, is at tag `full-platform`.
 

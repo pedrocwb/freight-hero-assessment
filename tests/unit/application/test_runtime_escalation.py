@@ -19,7 +19,7 @@ from freight_agent.domain.events import Event, EventType
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.validation import Severity, ValidationOutcome, Violation
-from freight_agent.ports.llm import LlmError
+from freight_agent.interfaces.llm import LlmError
 from tests.unit.application.test_runtime_harness import DRIVER, LOAD_ID, at, plan
 
 pytestmark = pytest.mark.unit

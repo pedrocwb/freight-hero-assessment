@@ -22,7 +22,7 @@ from freight_agent.domain.intents import GateDecision
 from freight_agent.domain.runs import RunStatus, TrajectoryStep, Usage
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.validation import ValidationOutcome, Violation
-from freight_agent.ports.llm import AssistantTurn, ModelRole, ToolCall, Turn
+from freight_agent.interfaces.llm import AssistantTurn, ModelRole, ToolCall, Turn
 
 
 @dataclass(frozen=True)

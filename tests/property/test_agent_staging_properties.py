@@ -32,7 +32,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import OutboundRecord, validate
-from freight_agent.ports.llm import ToolCall
+from freight_agent.interfaces.llm import ToolCall
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

@@ -61,8 +61,8 @@ from freight_agent.evalkit.runner import (
     scenario_start,
 )
 from freight_agent.evalkit.spec import Scenario, load_scenario
-from freight_agent.ports.decisions import DecisionError, DecisionRequest
-from freight_agent.ports.llm import ChatRequest, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.decisions import DecisionError, DecisionRequest
+from freight_agent.interfaces.llm import ChatRequest, LlmError, LlmRequest, ModelRole
 from tests.fakes import FakeDecisions, FakeModel, Round, act, call, gate_answers
 from tests.prompts import PROMPTS
 

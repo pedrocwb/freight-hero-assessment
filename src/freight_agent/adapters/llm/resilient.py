@@ -37,8 +37,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from freight_agent.ports.clock import Clock
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.clock import Clock
+from freight_agent.interfaces.llm import (
     ChatReply,
     ChatRequest,
     LanguageModel,

@@ -68,15 +68,15 @@ from freight_agent.adapters.prompts.pins import load_pins
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.gate import GateEngine
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
-from freight_agent.ports.clock import Clock
-from freight_agent.ports.decisions import DecisionModel
-from freight_agent.ports.documents import BlobStore, DocumentProcessor
-from freight_agent.ports.gateways import Gateways
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import LanguageModel, ModelRole
-from freight_agent.ports.prompts import PromptError, PromptRegistry, Prompts
-from freight_agent.ports.repositories import UnitOfWorkFactory
-from freight_agent.ports.tracing import Tracer
+from freight_agent.interfaces.clock import Clock
+from freight_agent.interfaces.decisions import DecisionModel
+from freight_agent.interfaces.documents import BlobStore, DocumentProcessor
+from freight_agent.interfaces.gateways import Gateways
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import LanguageModel, ModelRole
+from freight_agent.interfaces.prompts import PromptError, PromptRegistry, Prompts
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
+from freight_agent.interfaces.tracing import Tracer
 from freight_agent.settings import MissingSetting, Settings, is_set
 
 logger = logging.getLogger(__name__)

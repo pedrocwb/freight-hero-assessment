@@ -314,7 +314,7 @@ Studio:
 - Five templates, one per model role: `gate`, `agent`, `extract`, `judge`, and
   `gate_decision` (the jev gate's texts: the two messages are the parts of the state the
   decision model reads, and the template's `tools` hold its questions' instructions and
-  criteria). Each is a chat template of a system and a user message (`ports/prompts.py`),
+  criteria). Each is a chat template of a system and a user message (`interfaces/prompts.py`),
   stored in the LangSmith Prompt Hub as `freight-agent-<role>` with a reviewable copy in
   `prompts/<role>.yaml`.
 - `config/prompts.yaml` pins each role to a reference: `<name>:<tag>` (`prod` is what runs)
@@ -341,7 +341,7 @@ Studio:
 
 The import rules in `pyproject.toml` (import-linter, `make arch`, also a unit test):
 `domain` imports nothing outside itself (no LangChain, LangGraph, FastAPI or httpx);
-`ports` import only the domain; `application` imports neither adapters nor the API (it
+`interfaces` import only the domain; `application` imports neither adapters nor the API (it
 may import LangGraph, not LangChain); `adapters` import neither the application nor the
 API; `evalkit` does not import the API. `bootstrap.py` is the only place that wires
-adapters to ports. pyright runs in strict mode on `domain`, `ports` and `application`.
+adapters to interfaces. pyright runs in strict mode on `domain`, `interfaces` and `application`.

@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.adapters.llm.models_config import load_models_config
-from freight_agent.ports.prompts import Prompts
+from freight_agent.interfaces.prompts import Prompts
 
 _GIT_TIMEOUT_S = 10
 

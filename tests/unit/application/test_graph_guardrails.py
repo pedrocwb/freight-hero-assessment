@@ -40,7 +40,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.evalkit.runner import build_trial_runtime
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from tests.fakes import FakeModel, Round, call
 from tests.prompts import PROMPTS
 

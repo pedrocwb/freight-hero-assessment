@@ -35,7 +35,7 @@ from freight_agent.settings import MissingSetting, Settings
 
 if TYPE_CHECKING:
     from freight_agent.adapters.prompts.hub import PromptHub
-    from freight_agent.ports.prompts import ChatPrompt, PromptRole
+    from freight_agent.interfaces.prompts import ChatPrompt, PromptRole
 
 prompts_app = typer.Typer(
     no_args_is_help=True, help="Version the prompt templates in the LangSmith Prompt Hub."
@@ -59,7 +59,7 @@ def _checks() -> "dict[PromptRole, Callable[[ChatPrompt], ChatPrompt]]":
     from freight_agent.application.gate_decision import check_gate_decision_prompt
     from freight_agent.application.prompts_documents import check_extract_prompt
     from freight_agent.evalkit.judge import check_judge_prompt
-    from freight_agent.ports.prompts import PromptRole
+    from freight_agent.interfaces.prompts import PromptRole
 
     return {
         PromptRole.GATE: check_gate_prompt,
@@ -84,7 +84,7 @@ def status() -> None:
     from freight_agent.adapters.prompts.hub import short_commit
     from freight_agent.adapters.prompts.local import LocalPromptRegistry, local_version
     from freight_agent.adapters.prompts.pins import load_pins, prompt_name
-    from freight_agent.ports.prompts import PromptError, PromptRole
+    from freight_agent.interfaces.prompts import PromptError, PromptRole
 
     settings = Settings()
     try:
@@ -136,7 +136,7 @@ def push(
 
     from freight_agent.adapters.prompts.hub import short_commit
     from freight_agent.adapters.prompts.local import LocalPromptRegistry
-    from freight_agent.ports.prompts import PromptError, PromptRole
+    from freight_agent.interfaces.prompts import PromptError, PromptRole
 
     settings = Settings()
     checks = _checks()
@@ -177,7 +177,7 @@ def pull(
     from freight_agent.adapters.prompts.local import LocalPromptRegistry
     from freight_agent.adapters.prompts.pins import load_pins, prompt_name
     from freight_agent.adapters.prompts.templates import chat_prompt, write_prompt_file
-    from freight_agent.ports.prompts import PromptError, PromptRole
+    from freight_agent.interfaces.prompts import PromptError, PromptRole
 
     settings = Settings()
     checks = _checks()

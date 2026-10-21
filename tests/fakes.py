@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome, Plan
 from freight_agent.domain.runs import Usage
-from freight_agent.ports.decisions import (
+from freight_agent.interfaces.decisions import (
     Answer,
     ChoiceAnswer,
     DecisionError,
@@ -34,7 +34,7 @@ from freight_agent.ports.decisions import (
     DecisionResponse,
     YesNoAnswer,
 )
-from freight_agent.ports.llm import (
+from freight_agent.interfaces.llm import (
     AssistantTurn,
     ChatReply,
     ChatRequest,

@@ -32,7 +32,7 @@ from freight_agent.evalkit.judge import JudgeResult, JudgeSpec, JudgeVerdict
 from freight_agent.evalkit.results import StepObservation
 from freight_agent.evalkit.runner import play_scenario
 from freight_agent.evalkit.spec import Scenario, load_scenario
-from freight_agent.ports.llm import ModelRole
+from freight_agent.interfaces.llm import ModelRole
 from tests.fakes import FakeModel, Round, act, call
 from tests.prompts import PROMPTS
 

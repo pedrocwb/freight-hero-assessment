@@ -22,7 +22,7 @@ from freight_agent.evalkit.judge import (
     judged_texts,
     render_judge_prompt,
 )
-from freight_agent.ports.llm import ChatRequest, LlmError, LlmRequest, ModelRole
+from freight_agent.interfaces.llm import ChatRequest, LlmError, LlmRequest, ModelRole
 from tests.fakes import FakeModel
 from tests.prompts import PROMPTS
 

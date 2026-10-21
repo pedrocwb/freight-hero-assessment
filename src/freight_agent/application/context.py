@@ -21,8 +21,8 @@ from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.domain.validation import OutboundRecord
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.repositories import EventLog, UnitOfWork
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.repositories import EventLog, UnitOfWork
 
 
 @dataclass(frozen=True)

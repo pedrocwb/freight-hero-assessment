@@ -12,7 +12,7 @@ from freight_agent.domain.actions import Purpose, SendSms
 from freight_agent.domain.intents import Intent
 from freight_agent.domain.load import DelayRisk, Load
 from freight_agent.domain.runs import RunStatus
-from freight_agent.ports.decisions import DecisionError
+from freight_agent.interfaces.decisions import DecisionError
 from tests.fakes import FakeDecisions, gate_answers
 from tests.prompts import PROMPTS
 from tests.unit.application.test_runtime_harness import (

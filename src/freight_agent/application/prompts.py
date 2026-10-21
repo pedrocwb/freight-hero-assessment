@@ -49,7 +49,7 @@ from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
 from freight_agent.domain.timers import Timer
-from freight_agent.ports.prompts import ChatPrompt, PromptError
+from freight_agent.interfaces.prompts import ChatPrompt, PromptError
 
 GATE_RECENT_EVENTS = 5
 CLOSED_OBLIGATIONS_SHOWN = 3

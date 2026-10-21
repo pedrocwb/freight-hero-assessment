@@ -66,8 +66,8 @@ from freight_agent.domain.actions import (
 )
 from freight_agent.domain.events import Attachment
 from freight_agent.domain.sop import ResolvedSection
-from freight_agent.ports.knowledge import SopIndex
-from freight_agent.ports.llm import ToolSpec
+from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.llm import ToolSpec
 
 __all__ = [
     "ACTION_TOOLS",
