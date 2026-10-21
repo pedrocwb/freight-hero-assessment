@@ -8,10 +8,14 @@
 #
 #   postgres  the database (pgvector/pgvector:pg17, the image CI's integration job uses).
 #             It keeps every load's memory: the event log, the obligations ledger, the
-#             timers, the outbox, the run records, the event queue and the documents.
-#   migrate   one shot: `agent db migrate` once postgres is healthy, then it exits.
+#             timers, the outbox, the run records, the event queue and the documents; and
+#             the facility notes learned across loads (LangGraph's store, with pgvector).
+#   migrate   one shot: `agent db migrate` once postgres is healthy, then it exits (the
+#             SQL migrations, then the facility memory store's tables and vector index).
 #   app       the Dockerfile's default image: the API on :8000, serving the built UI, on
-#             PERSISTENCE=postgres, so loads, runs and the ledger survive a restart.
+#             PERSISTENCE=postgres, so loads, runs, the ledger and the facility notes
+#             survive a restart. The notes are embedded with the OpenRouter key of .env
+#             (MEMORY_EMBEDDINGS=auto), or an offline hash without it.
 #             Uploaded attachments go to the `blobs` volume (BLOBS_DIR).
 #   studio    the Dockerfile's `studio` stage: the `scenario` graph of langgraph.json for
 #             LangGraph Studio. Each play runs in a fresh in-memory world, so it needs no
