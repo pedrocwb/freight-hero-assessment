@@ -87,8 +87,8 @@ from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.bootstrap import (
     build_runtime,
-    build_uow_factory,
     gate_decisions,
+    memory_uow_factory,
     platform_llm,
 )
 from freight_agent.domain.events import Event
@@ -333,7 +333,9 @@ class _Nodes:
         except ScenarioSetupError as exc:
             raise StudioError(str(exc)) from exc
         clock = VirtualClock(scenario_start(scenario))
-        persistence = build_uow_factory(settings)
+        # A fresh in-memory world per play, whatever PERSISTENCE says: a play is a
+        # throwaway world, never the platform's data.
+        persistence = memory_uow_factory()
         gateways = RecordingGateways()
         blobs = MemoryBlobStore()
         inner = self._model(clock)

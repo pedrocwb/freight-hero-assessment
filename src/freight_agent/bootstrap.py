@@ -6,8 +6,12 @@ Nothing else imports adapters into the core, and `application`, `domain` and `in
 never import this module (the import-linter contracts forbid it).
 
 The model is always the live one on OpenRouter, per role (`config/models.yaml`), behind
-the fallback chain, its retries and its circuit breakers. Storage is in memory and the
-gateways record what they would send (there are no real integrations). Tracing is
+the fallback chain, its retries and its circuit breakers. The gateways record what they
+would send (there are no real integrations). Storage is `PERSISTENCE`: in memory by
+default, or Postgres on `DATABASE_URL` (`build_uow_factory`), where the platform's loads,
+runs and ledger survive a restart (`build_platform_store`). The evals and Studio build
+a fresh in-memory world per play (`memory_uow_factory`) whatever `PERSISTENCE` says: a
+play is a throwaway world, not the platform's data. Tracing is
 LangGraph's own, on LangSmith, when `LANGSMITH_TRACING` is on and its key is set;
 switched on without its key it falls back to no tracing, with a warning that names no
 secret. Without `OPENROUTER_API_KEY` the platform still starts (`platform_llm`): each run
@@ -40,7 +44,7 @@ read the SOP files of `SOPS_DIR`, and each client's catalog there.
 import importlib
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +66,7 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
+from freight_agent.adapters.persistence.postgres.store import PostgresUnitOfWorkFactory
 from freight_agent.adapters.prompts.hub import LangSmithPromptRegistry, langsmith_hub
 from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.prompts.pins import load_pins
@@ -205,9 +210,44 @@ def build_runtime_config(settings: Settings) -> RuntimeConfig:
 # --- persistence ---------------------------------------------------------------
 
 
-def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
-    """One in-memory store per runtime, shared by every unit of work it opens."""
+def memory_uow_factory() -> UnitOfWorkFactory:
+    """A fresh in-memory store: the world of one eval or Studio play."""
     return MemoryStore().unit_of_work
+
+
+def build_uow_factory(settings: Settings) -> UnitOfWorkFactory:
+    """The store `PERSISTENCE` names: a fresh in-memory one, or Postgres on `DATABASE_URL`
+    (`MissingSetting` without it), whose pool opens on the first unit of work. Each call
+    builds a new store (for Postgres, a new pool on the same database)."""
+    return build_platform_store(settings).uow_factory
+
+
+async def _nothing() -> None:
+    return None
+
+
+@dataclass(frozen=True)
+class PlatformStore:
+    """The platform's store, with what its lifecycle needs.
+
+    `clear` empties it (a reset of the simulation). `durable` says whether it outlives
+    the process, so the platform resumes what it holds after a restart. `close` belongs
+    in the shutdown (the Postgres pool).
+    """
+
+    uow_factory: UnitOfWorkFactory
+    durable: bool
+    clear: Callable[[], Awaitable[None]]
+    close: Callable[[], Awaitable[None]] = _nothing
+
+
+def build_platform_store(settings: Settings) -> PlatformStore:
+    if settings.persistence == "postgres":
+        url = settings.require_database_url().get_secret_value()
+        postgres = PostgresUnitOfWorkFactory(url)
+        return PlatformStore(postgres, durable=True, clear=postgres.clear, close=postgres.close)
+    memory = MemoryStore()
+    return PlatformStore(memory.unit_of_work, durable=False, clear=memory.clear)
 
 
 # --- tracing -------------------------------------------------------------------

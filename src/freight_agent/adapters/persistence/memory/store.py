@@ -1,4 +1,5 @@
-"""In-memory persistence, for unit tests, evals and the simulation: the only store.
+"""In-memory persistence: unit tests, evals, Studio worlds, and the platform by default
+(`PERSISTENCE=memory`; `adapters/persistence/postgres/` is the durable store).
 
 Transactions are serialized with a lock and rolled back by restoring a snapshot,
 so a failed run leaves no partial state, exactly like a database transaction.
@@ -73,6 +74,11 @@ class MemoryStore:
 
     def unit_of_work(self) -> "MemoryUnitOfWork":
         return MemoryUnitOfWork(self)
+
+    async def clear(self) -> None:
+        """Forget everything: a fresh store, as `PostgresStore.clear` empties its tables."""
+        async with self.lock:
+            self.state = _State()
 
 
 class MemoryLoadRepository:

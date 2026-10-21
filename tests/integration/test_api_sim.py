@@ -79,22 +79,28 @@ async def test_reset_starts_a_fresh_simulation_at_the_given_time(api: Api) -> No
     assert (await api.get("/api/sim/state"))["loads"] == []
 
 
-async def test_a_reset_gives_the_session_fresh_ports(api: Api) -> None:
+async def test_a_reset_gives_the_session_fresh_ports_and_an_empty_store(api: Api) -> None:
     """The routes the runtime facade does not cover (documents, knowledge) read the
-    current session's store, SOP index and blobs; a reset replaces all three."""
+    current session's store, SOP index and blobs. A reset replaces the SOP index and the
+    blobs, and empties the store: the process keeps one store (a Postgres pool, say)."""
     service: SimulationService = api.app.state.service
-    before = (service.uow_factory, service.knowledge, service.blobs)
+    before = (service.knowledge, service.blobs)
     ref = await service.blobs.put(b"pod", "application/pdf")
     assert isinstance(service.blobs, MemoryBlobStore)
     assert await service.knowledge.version("northline") is not None
+    store = service.uow_factory
+    assert (await api.client.post("/api/loads", json=await api.fixture())).status_code == 201
 
     response = await api.client.post("/api/sim/reset", json={})
 
     assert response.status_code == 200
-    after = (service.uow_factory, service.knowledge, service.blobs)
+    after = (service.knowledge, service.blobs)
     assert all(old is not new for old, new in zip(before, after, strict=True))
     with pytest.raises(KeyError):
         await service.blobs.get(ref)
+    assert service.uow_factory is store
+    async with store() as uow:
+        assert await uow.loads.list_ids() == []
 
 
 async def test_reset_reads_a_time_without_offset_in_the_simulation_timezone(api: Api) -> None:

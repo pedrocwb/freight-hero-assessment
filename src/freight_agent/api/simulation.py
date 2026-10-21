@@ -1,10 +1,17 @@
 """The simulation service: one in-process simulation that people drive through the API.
 
-It holds the current `Session` (a runtime on a virtual clock with recording gateways and
-an in-memory store) and an `asyncio.Lock` that serializes everything that moves the clock
-or feeds the agent. Reads take no lock: each one reads the store through its own unit of
-work, which the store serializes on its own. While a scenario plays (`api.scenarios`)
-every write from a client is refused (409): another client would break the run.
+It holds the current `Session` (a runtime on a virtual clock with recording gateways) and
+an `asyncio.Lock` that serializes everything that moves the clock or feeds the agent.
+Reads take no lock: each one reads the store through its own unit of work.
+
+The store is the process's one platform store (`bootstrap.build_platform_store`):
+in memory by default, or Postgres with `PERSISTENCE=postgres`. A reset (and a scenario,
+which resets first) empties it. On Postgres the loads, runs and ledger survive a
+restart: the new process resumes them (`resume`), its clock at the latest time they
+hold, and attachment bytes go to `BLOBS_DIR` so the documents' files survive too.
+
+While a scenario plays (`api.scenarios`) every write from a client is refused (409):
+another client would break the run.
 
 Time moves the way the scenario player moves it (`evalkit.runner`, `docs/decisions.md`):
 advancing stops at every timer due on the way and ticks there with zero latency; an
@@ -48,11 +55,13 @@ from freight_agent.api.schemas import (
 from freight_agent.application.contracts import IngestResult, LoadSnapshot
 from freight_agent.bootstrap import (
     BootstrapError,
+    PlatformStore,
     Simulation,
+    build_blobs,
     build_knowledge,
+    build_platform_store,
     build_runtime,
     build_tracer,
-    build_uow_factory,
     gate_decisions,
     platform_llm,
 )
@@ -132,20 +141,19 @@ def open_session(
     *,
     start: datetime,
     timezone: ZoneInfo,
+    persistence: UnitOfWorkFactory,
+    blobs: BlobStore,
     llm: LanguageModel | None = None,
     tracer: Tracer | None = None,
 ) -> Session:
-    """A fresh simulation, as `bootstrap.build_simulation` builds it, keeping its store.
+    """A simulation on `persistence` and `blobs`, as `bootstrap.build_simulation` builds
+    it. It reads what the store holds: emptying it first (a reset) is the caller's part.
 
-    The platform runs on an in-memory store, so a reset really starts over; attachment
-    bytes live in memory with it. The model is the live one (`platform_llm`, on the
-    session's clock for its circuit breakers) unless `llm` is given, which tests use to
-    play the agent's rounds.
+    The model is the live one (`platform_llm`, on the session's clock for its circuit
+    breakers) unless `llm` is given, which tests use to play the agent's rounds.
     """
-    persistence = build_uow_factory(settings)
     clock = VirtualClock(start.astimezone(timezone))
     gateways = RecordingGateways()
-    blobs = MemoryBlobStore()
     try:
         inner = llm if llm is not None else platform_llm(settings, clock=clock)
         decisions = gate_decisions(settings)
@@ -193,6 +201,9 @@ class SimulationService:
         self.bus = bus or EventBus()
         self._lock = asyncio.Lock()
         self._tracer = build_tracer(settings)
+        self._store: PlatformStore = build_platform_store(settings)
+        # Durable attachment bytes go with a durable store; in memory they reset with it.
+        self._durable_blobs = build_blobs(settings) if self._store.durable else None
         self._session = self._open(ResetRequest())
         self.playing: str | None = None  # the scenario playing (`api.scenarios`), if any
 
@@ -231,17 +242,47 @@ class SimulationService:
         timezone = zone(request.timezone or DEFAULT_TIMEZONE)
         start = request.start or DEFAULT_START
         start = start.replace(tzinfo=timezone) if start.tzinfo is None else start
+        return self._open_at(start, timezone)
+
+    def _open_at(self, start: datetime, timezone: ZoneInfo) -> Session:
         return open_session(
-            self._settings, start=start, timezone=timezone, llm=self._llm, tracer=self._tracer
+            self._settings,
+            start=start,
+            timezone=timezone,
+            persistence=self._store.uow_factory,
+            blobs=self._durable_blobs or MemoryBlobStore(),
+            llm=self._llm,
+            tracer=self._tracer,
         )
+
+    # --- lifecycle ------------------------------------------------------------------------
+
+    async def resume(self) -> SimState:
+        """At startup: on a durable store that holds loads, the simulation goes on from the
+        latest time they hold (the clock is not stored, and timers due before it would
+        otherwise fire again on the next advance); otherwise nothing changes."""
+        async with self._lock:
+            session = self._session
+            if self._store.durable:
+                latest = _latest(await self._snapshots(session))
+                if latest is not None and _after(latest, session.clock.now()):
+                    session.clock.set(session.local(latest))
+            return await self._publish(session, ())
+
+    async def close(self) -> None:
+        """At shutdown: release the store (the Postgres pool)."""
+        await self._store.close()
 
     # --- simulation -----------------------------------------------------------------------
 
     async def reset(self, request: ResetRequest) -> SimState:
-        """A fresh simulation; the old one stays if the new one cannot be built."""
+        """A fresh simulation on an emptied store; the old one stays, store included, if
+        the new one cannot be built."""
         self._writable()
         async with self._lock:
-            self._session = self._open(request)
+            session = self._open(request)
+            await self._store.clear()
+            self._session = session
             return await self._publish(self._session, ())
 
     async def state(self) -> SimState:
@@ -279,9 +320,9 @@ class SimulationService:
     async def open_scenario(self, start: datetime, timezone: ZoneInfo) -> Session:
         """A fresh simulation whose clock starts at a scenario's start, in its timezone."""
         async with self._lock:
-            self._session = open_session(
-                self._settings, start=start, timezone=timezone, llm=self._llm, tracer=self._tracer
-            )
+            session = self._open_at(start, timezone)
+            await self._store.clear()
+            self._session = session
             await self._publish(self._session, ())
             return self._session
 
@@ -509,6 +550,20 @@ class SimulationService:
                 self.bus.publish("load", summary)
         self.bus.publish("clock", state)
         return state
+
+
+def _latest(snapshots: Sequence[LoadSnapshot]) -> datetime | None:
+    """The latest instant the loads hold: an event, a run, an outbox item."""
+    times = [
+        moment
+        for snapshot in snapshots
+        for moment in (
+            *(event.occurred_at for event in snapshot.events),
+            *(run.finished_at or run.started_at for run in snapshot.runs),
+            *(item.created_at for item in snapshot.outbox),
+        )
+    ]
+    return max(times, key=lambda moment: moment.astimezone(UTC)) if times else None
 
 
 async def _logged(session: Session, event_id: str) -> bool:

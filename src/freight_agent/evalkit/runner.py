@@ -56,6 +56,7 @@ from freight_agent.interfaces.documents import BlobStore
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import LanguageModel
 from freight_agent.interfaces.prompts import Prompts
+from freight_agent.interfaces.repositories import UnitOfWorkFactory
 
 # Each tick fires every due timer, so a timer still due after this many ticks at
 # one instant means the runtime never fires it; stop instead of looping forever.
@@ -345,17 +346,19 @@ def build_trial_runtime(
     *,
     config: RuntimeConfig | None = None,
     decisions: DecisionModel | None = None,
+    uow_factory: UnitOfWorkFactory | None = None,
 ) -> TrialRuntime:
     """The product runtime on a fresh memory store, with a virtual clock at `start`,
     recording gateways, deterministic ids, the document pipeline, the experiment's prompt
     templates and no trace links (in an experiment the runs nest under the example's own
     trace). `config` sets the gate's engine; `decisions` is the jev engine's model,
-    counted with the model's calls."""
+    counted with the model's calls. `uow_factory` replaces the memory store with another
+    empty one (the Postgres integration tests play a scenario on both)."""
     clock = VirtualClock(start)
     counted = CountingModel(model, decisions)
     blobs = MemoryBlobStore()
     deps = RuntimeDeps(
-        uow_factory=MemoryStore().unit_of_work,
+        uow_factory=MemoryStore().unit_of_work if uow_factory is None else uow_factory,
         clock=clock,
         ids=SequentialIdGenerator(),
         llm=counted,
@@ -394,10 +397,11 @@ async def play_scenario(
     on_step: Callable[[StepObservation], None] | None = None,
     config: RuntimeConfig | None = None,
     decisions: DecisionModel | None = None,
+    uow_factory: UnitOfWorkFactory | None = None,
 ) -> Played:
-    """Play every step of `scenario` on a fresh trial runtime (`config` and `decisions`:
-    see `build_trial_runtime`). An error stops the play there; the steps already played
-    are kept, so the graders still show how far it got."""
+    """Play every step of `scenario` on a fresh trial runtime (`config`, `decisions` and
+    `uow_factory`: see `build_trial_runtime`). An error stops the play there; the steps
+    already played are kept, so the graders still show how far it got."""
     try:
         load = read_load(evals_dir, scenario)
         files = read_attachments(evals_dir, scenario)
@@ -408,6 +412,7 @@ async def play_scenario(
             prompts,
             config=config,
             decisions=decisions,
+            uow_factory=uow_factory,
         )
     except ScenarioSetupError as exc:
         return Played(scenario_id=scenario.id, error=str(exc))

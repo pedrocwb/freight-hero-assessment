@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # Secrets
     openrouter_api_key: SecretStr | None = None
     langsmith_api_key: SecretStr | None = None
+    # A connection string carries a password: a secret like the keys.
+    database_url: SecretStr | None = None
+
+    # Where the platform keeps each load's memory (the event log, the obligations
+    # ledger, timers, outbox, run records, the event queue, documents): memory, gone with
+    # the process, or postgres on DATABASE_URL, kept across restarts. The evals and
+    # Studio always play in a fresh in-memory world, whatever this says.
+    persistence: Literal["memory", "postgres"] = "memory"
 
     # Tracing: LangSmith when on and the key is set, otherwise no tracing
     langsmith_tracing: bool = False
@@ -79,6 +87,9 @@ class Settings(BaseSettings):
 
     def require_langsmith_key(self) -> SecretStr:
         return _required(self.langsmith_api_key, "LANGSMITH_API_KEY", "a LangSmith experiment")
+
+    def require_database_url(self) -> SecretStr:
+        return _required(self.database_url, "DATABASE_URL", "Postgres persistence")
 
     @property
     def model_ready(self) -> bool:

@@ -33,6 +33,7 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
+from freight_agent.adapters.persistence.postgres.store import PostgresUnitOfWorkFactory
 from freight_agent.adapters.prompts.hub import HubClient, LangSmithPromptRegistry, PromptHub
 from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -717,3 +718,50 @@ def test_on_jev_a_models_file_without_the_gates_decision_model_stops_the_build(
 
     with pytest.raises(BootstrapError, match=r"no decisions\.gate entry"):
         build_decisions(_settings(models_config=models, openrouter_api_key=KEY))
+
+
+# --- persistence -------------------------------------------------------------------------
+
+
+def test_the_store_is_in_memory_by_default_and_each_call_is_a_new_one() -> None:
+    first = bootstrap.build_platform_store(_settings())
+    second = bootstrap.build_uow_factory(_settings())
+
+    assert first.durable is False
+    assert isinstance(first.uow_factory(), MemoryUnitOfWork)
+    assert first.uow_factory is not second
+
+
+async def test_clearing_the_memory_store_forgets_its_loads(load: Load) -> None:
+    store = bootstrap.build_platform_store(_settings())
+    async with store.uow_factory() as uow:
+        await uow.loads.save(load)
+        await uow.commit()
+
+    await store.clear()
+    await store.close()
+
+    async with store.uow_factory() as uow:
+        assert await uow.loads.list_ids() == []
+
+
+def test_postgres_needs_its_database_url() -> None:
+    with pytest.raises(MissingSetting, match="DATABASE_URL"):
+        bootstrap.build_platform_store(_settings(persistence="postgres"))
+
+
+def test_postgres_is_a_durable_store_whose_pool_opens_on_first_use() -> None:
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+
+    store = bootstrap.build_platform_store(_settings(persistence="postgres", database_url=url))
+
+    assert store.durable is True
+    assert isinstance(store.uow_factory, PostgresUnitOfWorkFactory)
+    assert store.uow_factory.pool.closed  # nothing connects before the first unit of work
+
+
+def test_studio_and_eval_worlds_are_fresh_memory_stores() -> None:
+    first, second = bootstrap.memory_uow_factory(), bootstrap.memory_uow_factory()
+
+    assert isinstance(first(), MemoryUnitOfWork)
+    assert first is not second
