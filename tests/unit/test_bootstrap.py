@@ -717,3 +717,56 @@ def test_on_jev_a_models_file_without_the_gates_decision_model_stops_the_build(
 
     with pytest.raises(BootstrapError, match=r"no decisions\.gate entry"):
         build_decisions(_settings(models_config=models, openrouter_api_key=KEY))
+
+
+# --- facility memory ---------------------------------------------------------------------
+
+
+def test_the_facility_memory_embeds_offline_without_the_key_or_when_asked() -> None:
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    assert isinstance(build_embeddings(_settings()), HashEmbeddings)
+    keyed = _settings(openrouter_api_key="sk-test", memory_embeddings="fake")
+    assert isinstance(build_embeddings(keyed), HashEmbeddings)
+
+
+def test_with_the_key_the_facility_memory_embeds_with_the_configured_model() -> None:
+    from freight_agent.adapters.memory.embeddings import OpenRouterEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    embeddings = build_embeddings(_settings(openrouter_api_key="sk-test"))
+
+    assert isinstance(embeddings, OpenRouterEmbeddings)
+    assert (embeddings.config.model, embeddings.dims) == ("openai/text-embedding-3-small", 1536)
+
+
+def test_a_models_file_without_memory_embeddings_embeds_offline(tmp_path: Path) -> None:
+    import yaml
+
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
+    del data["embeddings"]
+    models = tmp_path / "models.yaml"
+    models.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    settings = _settings(openrouter_api_key="sk-test", models_config=models)
+
+    assert isinstance(build_embeddings(settings), HashEmbeddings)
+
+
+def test_the_runtime_gets_a_facility_memory_and_its_extraction() -> None:
+    from freight_agent.adapters.memory.store import StoreFacilityMemory
+    from freight_agent.application.memory import MemoryExtractor
+    from freight_agent.bootstrap import build_memory, build_runtime_deps
+
+    deps = build_runtime_deps(_settings())
+
+    assert isinstance(deps.memory, StoreFacilityMemory)
+    assert deps.memory_queue is deps.memory
+    assert isinstance(deps.memory_extraction, MemoryExtractor)
+    assert deps.memory_extraction.prompt.role.value == "memory"
+    given = build_memory(_settings())
+    assert build_runtime_deps(_settings(), memory=given).memory is given

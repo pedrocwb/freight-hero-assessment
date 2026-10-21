@@ -83,6 +83,7 @@ from freight_agent.adapters.clock import VirtualClock
 from freight_agent.adapters.documents.memory_blobs import MemoryBlobStore
 from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.null import NullTracer
+from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.application.runtime import AgentRuntime
 from freight_agent.bootstrap import (
@@ -109,6 +110,7 @@ from freight_agent.evalkit.runner import (
 from freight_agent.evalkit.spec import Scenario
 from freight_agent.evalkit.suite import discover, suites
 from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.interfaces.prompts import Prompts
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from freight_agent.settings import Settings
 
@@ -558,12 +560,14 @@ def _live_model(settings: Settings) -> ModelFactory:
 
 def _drawn_run_graph(settings: Settings) -> Any:
     """A run graph built as every world's is, on a model that is never called: what
-    LangGraph draws inside `run` and reads the run graph's checkpoints with."""
+    LangGraph draws inside `run` and reads the run graph's checkpoints with. Its prompts
+    are the repository copy: a drawing renders none, so it needs no Hub version."""
     runtime = build_runtime(
         settings,
         llm=UnavailableModel("the drawing of the run graph never runs"),
         blobs=MemoryBlobStore(),
         tracer=NullTracer(),
+        prompts=Prompts.resolve(LocalPromptRegistry(settings.prompts_dir)),
     )
     return runtime.graph.compiled
 

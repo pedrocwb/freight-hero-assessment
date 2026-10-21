@@ -35,6 +35,11 @@ editing this file:
 
 Until one exists, the runtime behaves as before wave 3: it reads no document. The runs
 read the SOP files of `SOPS_DIR`, and each client's catalog there.
+
+The facility memory (`build_memory`) is a LangGraph `InMemoryStore` with an embeddings
+index, one per runtime: the `embeddings.memory` model of `config/models.yaml` on
+OpenRouter, or a deterministic offline hash without the key or with
+`MEMORY_EMBEDDINGS=fake`. Its extraction runs on the `memory` role's model and template.
 """
 
 import importlib
@@ -46,6 +51,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from langchain_core.embeddings import Embeddings
 from pydantic import SecretStr
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
@@ -59,6 +65,13 @@ from freight_agent.adapters.llm.openrouter import models_for_role
 from freight_agent.adapters.llm.resilient import ResilientModel
 from freight_agent.adapters.llm.router import RoleRouter
 from freight_agent.adapters.llm.unavailable import UnavailableModel
+from freight_agent.adapters.memory.embeddings import (
+    HashEmbeddings,
+    OpenRouterEmbeddings,
+    embeddings_dims,
+    memory_store,
+)
+from freight_agent.adapters.memory.store import StoreFacilityMemory
 from freight_agent.adapters.observability.langsmith import LangSmithLinks, langsmith_client_factory
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore
@@ -67,6 +80,7 @@ from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.prompts.pins import load_pins
 from freight_agent.application.documents import NullDocumentProcessor
 from freight_agent.application.gate import GateEngine
+from freight_agent.application.memory import MemoryExtractor
 from freight_agent.application.runtime import AgentRuntime, RuntimeConfig, RuntimeDeps
 from freight_agent.interfaces.clock import Clock
 from freight_agent.interfaces.decisions import DecisionModel
@@ -74,6 +88,7 @@ from freight_agent.interfaces.documents import BlobStore, DocumentProcessor
 from freight_agent.interfaces.gateways import Gateways
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import LanguageModel, ModelRole
+from freight_agent.interfaces.memory import MemoryProcessor
 from freight_agent.interfaces.prompts import PromptError, PromptRegistry, Prompts
 from freight_agent.interfaces.repositories import UnitOfWorkFactory
 from freight_agent.interfaces.tracing import Tracer
@@ -311,6 +326,55 @@ def build_documents(deps: RuntimeDeps) -> DocumentProcessor:
     )
 
 
+# --- facility memory -------------------------------------------------------------
+
+MEMORY_EMBEDDINGS = "memory"  # the use of the facility memory in `embeddings:`
+
+
+def build_embeddings(settings: Settings) -> Embeddings:
+    """The facility memory's embeddings: the `embeddings.memory` model on OpenRouter, or
+    the offline hash (`MEMORY_EMBEDDINGS=fake`, no key, or no such entry)."""
+    if settings.memory_embeddings == "fake" or not settings.model_ready:
+        return HashEmbeddings()
+    config = _models_config(settings.models_config)
+    entry = config.embeddings.get(MEMORY_EMBEDDINGS)
+    if entry is None:
+        logger.warning(
+            "%s has no embeddings.memory entry: the facility memory embeds offline",
+            settings.models_config,
+        )
+        return HashEmbeddings()
+    return OpenRouterEmbeddings(
+        entry, config.pricing_for(entry.model), settings.require_openrouter_key()
+    )
+
+
+def build_memory(
+    settings: Settings, *, embeddings: Embeddings | None = None
+) -> StoreFacilityMemory:
+    """The facility memory and its extraction queue, on a fresh in-memory LangGraph store
+    whose index embeds each fact's text."""
+    embeddings = build_embeddings(settings) if embeddings is None else embeddings
+    return StoreFacilityMemory(memory_store(embeddings, embeddings_dims(embeddings)))
+
+
+def build_memory_extraction(deps: RuntimeDeps) -> MemoryProcessor:
+    """The extraction over the runtime's own interfaces, on the `memory` role and template;
+    nothing to extract without a facility memory."""
+    if deps.memory is None or deps.memory_queue is None:
+        return deps.memory_extraction
+    return MemoryExtractor(
+        uow_factory=deps.uow_factory,
+        clock=deps.clock,
+        ids=deps.ids,
+        llm=deps.llm,
+        memory=deps.memory,
+        queue=deps.memory_queue,
+        prompt=deps.prompts.memory,
+        timeout_s=deps.config.llm_timeout_s,
+    )
+
+
 # --- runtime -------------------------------------------------------------------
 
 
@@ -326,12 +390,14 @@ def build_runtime_deps(
     tracer: Tracer | None = None,
     prompts: Prompts | None = None,
     decisions: DecisionModel | None = None,
+    memory: StoreFacilityMemory | None = None,
 ) -> RuntimeDeps:
     """Every interface of the runtime, from the settings; what the caller passes wins.
 
     `gateways` defaults to recording fakes: this build has no real integrations, so
     deliveries are recorded, not sent. `prompts` default to `build_prompts`. The
-    decision model is built only for the jev gate engine (`build_decisions`).
+    decision model is built only for the jev gate engine (`build_decisions`). `memory`
+    defaults to a fresh facility memory (`build_memory`).
     """
     clock = SystemClock() if clock is None else clock
     uow_factory = build_uow_factory(settings) if persistence is None else persistence
@@ -339,6 +405,8 @@ def build_runtime_deps(
         knowledge = build_knowledge(settings)
     if decisions is None:
         decisions = gate_decisions(settings)
+    if memory is None:
+        memory = build_memory(settings)
     deps = RuntimeDeps(
         uow_factory=uow_factory,
         clock=clock,
@@ -351,8 +419,11 @@ def build_runtime_deps(
         prompts=build_prompts(settings) if prompts is None else prompts,
         config=build_runtime_config(settings),
         decisions=decisions,
+        memory=memory,
+        memory_queue=memory,
     )
-    return replace(deps, documents=build_documents(deps))
+    deps = replace(deps, documents=build_documents(deps))
+    return replace(deps, memory_extraction=build_memory_extraction(deps))
 
 
 def build_runtime(
@@ -367,6 +438,7 @@ def build_runtime(
     tracer: Tracer | None = None,
     prompts: Prompts | None = None,
     decisions: DecisionModel | None = None,
+    memory: StoreFacilityMemory | None = None,
 ) -> AgentRuntime:
     """The agent, wired from the settings (see `build_runtime_deps`)."""
     return AgentRuntime(
@@ -381,6 +453,7 @@ def build_runtime(
             tracer=tracer,
             prompts=prompts,
             decisions=decisions,
+            memory=memory,
         )
     )
 
