@@ -2,12 +2,12 @@
 
 Two experiments can only be compared when it is known what changed between them: the
 code (git sha, uncommitted edits), the SOP text (the tree's content hash), the model of
-each role and the prompts the models read. A prompt is its template's version (the
-LangSmith Hub commit, or `local:<sha256 prefix>` of the repository copy) and the
-reference it was resolved from (`freight-agent-agent:candidate`): an experiment run on a
-candidate tag says which commit it measured, and the catalog the templates are rendered
-with is the SOP tree's, in `sop_version`. LangSmith records this on the experiment, next
-to its results.
+each role, the gate's engine (and its act threshold) and the prompts the models read. A
+prompt is its template's version (the LangSmith Hub commit, or `local:<sha256 prefix>`
+of the repository copy) and the reference it was resolved from
+(`freight-agent-agent:candidate`): an experiment run on a candidate tag says which commit
+it measured, and the catalog the templates are rendered with is the SOP tree's, in
+`sop_version`. LangSmith records this on the experiment, next to its results.
 
 Collecting never fails a run: a value that cannot be read (no git, a broken models
 file) is recorded as unknown (`None`), and the run itself reports the real problem.
@@ -43,7 +43,9 @@ class RunMetadata(BaseModel):
     git_sha: str | None = None
     git_dirty: bool | None = None  # uncommitted or untracked files in the checkout
     sop_version: str | None = None
-    models: dict[str, list[str]] = {}  # role -> [primary, *fallbacks]
+    models: dict[str, list[str]] = {}  # role -> [primary, *fallbacks]; decision_<role>
+    gate_engine: str | None = None  # llm or jev
+    gate_act_threshold: float | None = None  # the jev engine's; None on llm
     prompts: dict[str, str] = {}  # role -> template version (Hub commit, or local:<hash>)
     prompt_refs: dict[str, str] = {}  # role -> what the version was resolved from
     python: str | None = None
@@ -70,6 +72,8 @@ def collect_metadata(
     prompts: Prompts,
     repo: Path,
     git: GitRunner | None = None,
+    gate_engine: str | None = None,
+    gate_act_threshold: float | None = None,
 ) -> RunMetadata:
     sha, dirty = git_state(repo, git or run_git)
     return RunMetadata(
@@ -81,6 +85,8 @@ def collect_metadata(
         git_dirty=dirty,
         sop_version=sop_version,
         models=_models(models_config),
+        gate_engine=gate_engine,
+        gate_act_threshold=gate_act_threshold if gate_engine == "jev" else None,
         prompts=prompts.versions(),
         prompt_refs=prompts.refs(),
         python=platform.python_version(),
@@ -119,7 +125,9 @@ def _models(path: Path) -> dict[str, list[str]]:
         config = load_models_config(path)
     except (OSError, ValueError):
         return {}
-    return {
+    models = {
         role.value: [role_config.model, *role_config.fallbacks]
         for role, role_config in config.roles.items()
     }
+    models.update({f"decision_{role.value}": [d.model] for role, d in config.decisions.items()})
+    return models

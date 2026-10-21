@@ -21,6 +21,8 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from freight_agent import bootstrap, cli
+from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
+from freight_agent.application.gate import GateEngine
 from freight_agent.evalkit import experiment
 from freight_agent.evalkit.experiment import (
     ExperimentRun,
@@ -284,6 +286,49 @@ def test_eval_run_hands_the_experiment_the_suite_the_choice_and_the_limits(
     prompts = ", ".join(p.describe() for p in PROMPTS.all())
     assert f"prompts: {prompts}" in result.output
     assert offline.clients == [{"api_key": "lsv2-test", "api_url": None}]
+
+
+@pytest.mark.usefixtures("keys")
+def test_eval_run_records_the_llm_gate_by_default(offline: Offline) -> None:
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
+
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open")
+
+    assert result.exit_code == 0, result.output
+    assert "gate engine: llm" in result.output
+    (call,) = offline.calls
+    metadata: RunMetadata = call["metadata"]
+    assert (metadata.gate_engine, metadata.gate_act_threshold) == ("llm", None)
+    assert call["target"]._decisions is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.usefixtures("keys")
+def test_eval_run_on_the_jev_gate_records_it_and_hands_the_trials_its_model(
+    offline: Offline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GATE_ACT_THRESHOLD", "0.15")
+    offline.run = experiment_run(outcome("b_ack_with_nothing_open", True))
+
+    result = agent("eval", "run", "--scenario", "b_ack_with_nothing_open", "--gate-engine", "jev")
+
+    assert result.exit_code == 0, result.output
+    assert "gate engine: jev" in result.output
+    (call,) = offline.calls
+    metadata: RunMetadata = call["metadata"]
+    assert (metadata.gate_engine, metadata.gate_act_threshold) == ("jev", 0.15)
+    assert metadata.for_langsmith()["model_decision_gate"] == "typesafe/jev-1.14"
+    target: ScenarioTarget = call["target"]
+    config = target._config  # pyright: ignore[reportPrivateUsage]
+    assert config is not None and config.gate_engine is GateEngine.JEV
+    assert isinstance(target._decisions, OpenRouterDecisions)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_eval_run_refuses_a_gate_engine_it_does_not_know(offline: Offline) -> None:
+    result = agent("eval", "run", "--gate-engine", "gpt")
+
+    assert result.exit_code == 2
+    assert "--gate-engine is llm or jev, not 'gpt'" in result.stderr
+    assert offline.calls == []
 
 
 @pytest.mark.usefixtures("keys")

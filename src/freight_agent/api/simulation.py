@@ -53,6 +53,7 @@ from freight_agent.bootstrap import (
     build_runtime,
     build_tracer,
     build_uow_factory,
+    gate_decisions,
     platform_llm,
 )
 from freight_agent.domain.errors import DomainError
@@ -147,7 +148,8 @@ def open_session(
     blobs = MemoryBlobStore()
     try:
         inner = llm if llm is not None else platform_llm(settings, clock=clock)
-        model = CountingModel(inner)
+        decisions = gate_decisions(settings)
+        model = CountingModel(inner, decisions)  # the jev gate's calls are counted too
         knowledge = build_knowledge(settings)
         runtime = build_runtime(
             settings,
@@ -158,6 +160,7 @@ def open_session(
             knowledge=knowledge,
             blobs=blobs,
             tracer=tracer,
+            decisions=model if decisions is not None else None,
         )
     except (MissingSetting, BootstrapError, ValueError) as exc:
         raise BadRequest(str(exc)) from exc

@@ -51,6 +51,7 @@ from freight_agent.evalkit.counting import CountingModel
 from freight_agent.evalkit.judge import Judge, JudgeResult
 from freight_agent.evalkit.results import StepObservation
 from freight_agent.evalkit.spec import Scenario, Step
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.documents import BlobStore
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
@@ -337,14 +338,21 @@ class TrialRuntime:
 
 
 def build_trial_runtime(
-    model: LanguageModel, knowledge: SopIndex, start: datetime, prompts: Prompts
+    model: LanguageModel,
+    knowledge: SopIndex,
+    start: datetime,
+    prompts: Prompts,
+    *,
+    config: RuntimeConfig | None = None,
+    decisions: DecisionModel | None = None,
 ) -> TrialRuntime:
     """The product runtime on a fresh memory store, with a virtual clock at `start`,
     recording gateways, deterministic ids, the document pipeline, the experiment's prompt
     templates and no trace links (in an experiment the runs nest under the example's own
-    trace)."""
+    trace). `config` sets the gate's engine; `decisions` is the jev engine's model,
+    counted with the model's calls."""
     clock = VirtualClock(start)
-    counted = CountingModel(model)
+    counted = CountingModel(model, decisions)
     blobs = MemoryBlobStore()
     deps = RuntimeDeps(
         uow_factory=MemoryStore().unit_of_work,
@@ -358,7 +366,8 @@ def build_trial_runtime(
         prompts=prompts,
         # A harness error (a bug) must end the play with its own message, not become a
         # failed run that the scenario then reports as the agent's.
-        config=RuntimeConfig(reraise_unexpected=True),
+        config=replace(config or RuntimeConfig(), reraise_unexpected=True),
+        decisions=counted if decisions is not None else None,
     )
     pipeline = DocumentPipeline(
         uow_factory=deps.uow_factory,
@@ -383,13 +392,23 @@ async def play_scenario(
     prompts: Prompts,
     model: LanguageModel,
     on_step: Callable[[StepObservation], None] | None = None,
+    config: RuntimeConfig | None = None,
+    decisions: DecisionModel | None = None,
 ) -> Played:
-    """Play every step of `scenario` on a fresh trial runtime. An error stops the play
-    there; the steps already played are kept, so the graders still show how far it got."""
+    """Play every step of `scenario` on a fresh trial runtime (`config` and `decisions`:
+    see `build_trial_runtime`). An error stops the play there; the steps already played
+    are kept, so the graders still show how far it got."""
     try:
         load = read_load(evals_dir, scenario)
         files = read_attachments(evals_dir, scenario)
-        trial = build_trial_runtime(model, knowledge, scenario_start(scenario), prompts)
+        trial = build_trial_runtime(
+            model,
+            knowledge,
+            scenario_start(scenario),
+            prompts,
+            config=config,
+            decisions=decisions,
+        )
     except ScenarioSetupError as exc:
         return Played(scenario_id=scenario.id, error=str(exc))
     player = ScenarioPlayer(

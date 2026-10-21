@@ -94,6 +94,13 @@ def eval_run(
             show_default="the pins",
         ),
     ] = None,
+    gate_engine: Annotated[
+        str | None,
+        typer.Option(
+            help="The gate's engine: llm (the gate's chat model) or jev (the decision model).",
+            show_default="GATE_ENGINE, else llm",
+        ),
+    ] = None,
 ) -> None:
     """Run a suite live, as a LangSmith experiment, and print its pass^k table.
 
@@ -108,6 +115,11 @@ def eval_run(
     settings = Settings()
     if prompt_tag:
         settings = settings.model_copy(update={"prompts_tag": prompt_tag})
+    if gate_engine:
+        if gate_engine not in ("llm", "jev"):
+            typer.echo(f"error: --gate-engine is llm or jev, not {gate_engine!r}", err=True)
+            raise typer.Exit(HARNESS_ERROR)
+        settings = settings.model_copy(update={"gate_engine": gate_engine})
     try:
         code = _run(
             settings,
@@ -142,7 +154,9 @@ def _run(
         BootstrapError,
         build_llm,
         build_prompts,
+        build_runtime_config,
         enable_native_tracing,
+        gate_decisions,
     )
     from freight_agent.evalkit.experiment import (
         CostMeter,
@@ -165,8 +179,10 @@ def _run(
         raise UsageProblem(str(exc)) from exc
     try:
         prompts = build_prompts(settings)  # each pin pulled once, before anything plays
+        decisions = gate_decisions(settings)  # the jev engine's model, else None
     except BootstrapError as exc:
         raise UsageProblem(str(exc)) from exc
+    config = build_runtime_config(settings)
     # The examples' traces carry each graph node and model round: LangChain traces them
     # into the experiment through LangSmith's context.
     enable_native_tracing(settings)
@@ -180,6 +196,8 @@ def _run(
         models_config=settings.models_config,
         prompts=prompts,
         repo=Path.cwd(),
+        gate_engine=config.gate_engine.value,
+        gate_act_threshold=config.gate_act_threshold,
     )
     target = ScenarioTarget(
         {s.id: s for s in suite_scenarios},
@@ -188,6 +206,8 @@ def _run(
         prompts=prompts,
         model_factory=lambda: build_llm(settings, clock=SystemClock()),
         meter=CostMeter(cap_usd=cost_cap_usd),
+        config=config,
+        decisions=decisions,
     )
     client = Client(
         api_key=langsmith_key.get_secret_value(),
@@ -197,6 +217,7 @@ def _run(
         f"{suite}: {len(chosen)} scenarios, k={k}, live on OpenRouter, cost cap ${cost_cap_usd:.2f}"
     )
     typer.echo("prompts: " + ", ".join(p.describe() for p in prompts.all()))
+    typer.echo(f"gate engine: {config.gate_engine.value}")
     try:
         run = asyncio.run(
             run_experiment(

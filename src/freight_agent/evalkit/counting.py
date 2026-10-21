@@ -8,9 +8,18 @@ read) is one call, and an agent loop is one call however many rounds it takes (a
 whose request has no history starts a loop). So `expect.llm_calls` stays a fact about
 the run's path (did the gate run, did the agent run), not about a live model's rounds.
 `rounds` counts every request; `usage` has one entry per successful request.
+
+It counts a decision model too (`decide`, the jev gate's one call per message), when it
+is given one: the gate is one call whichever engine reads the message.
 """
 
 from freight_agent.domain.runs import Usage
+from freight_agent.ports.decisions import (
+    DecisionError,
+    DecisionModel,
+    DecisionRequest,
+    DecisionResponse,
+)
 from freight_agent.ports.llm import (
     ChatReply,
     ChatRequest,
@@ -22,8 +31,9 @@ from freight_agent.ports.llm import (
 
 
 class CountingModel:
-    def __init__(self, inner: LanguageModel) -> None:
+    def __init__(self, inner: LanguageModel, decisions: DecisionModel | None = None) -> None:
         self._inner = inner
+        self._decisions = decisions
         self.calls = 0  # failed ones too: a failed call still counts toward budgets
         self.rounds = 0
         self.usage: list[Usage] = []  # one entry per successful request, in order
@@ -45,3 +55,12 @@ class CountingModel:
         reply = await self._inner.chat(request, schema)
         self.usage.append(reply.usage)
         return reply
+
+    async def decide(self, request: DecisionRequest) -> DecisionResponse:
+        self.calls += 1
+        self.rounds += 1
+        if self._decisions is None:
+            raise DecisionError("this runtime was given no decision model to count")
+        response = await self._decisions.decide(request)
+        self.usage.append(response.usage)
+        return response

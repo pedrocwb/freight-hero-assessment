@@ -27,7 +27,8 @@ from freight_agent.application.contracts import (
     LocationPing,
 )
 from freight_agent.application.documents import DocumentPipeline
-from freight_agent.application.runtime import AgentRuntime
+from freight_agent.application.gate import GateEngine
+from freight_agent.application.runtime import AgentRuntime, RuntimeConfig
 from freight_agent.domain.actions import (
     AgentOutcome,
     CloseObligation,
@@ -60,8 +61,9 @@ from freight_agent.evalkit.runner import (
     scenario_start,
 )
 from freight_agent.evalkit.spec import Scenario, load_scenario
+from freight_agent.ports.decisions import DecisionError, DecisionRequest
 from freight_agent.ports.llm import ChatRequest, LlmError, LlmRequest, ModelRole
-from tests.fakes import FakeModel, Round, act, call
+from tests.fakes import FakeDecisions, FakeModel, Round, act, call, gate_answers
 from tests.prompts import PROMPTS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -684,6 +686,40 @@ async def test_scenario_a_step_0_passes_with_one_counted_call_for_two_rounds() -
         (OutboxKind.SMS, DRIVER)
     ]
     assert model.remaining() == 0
+
+
+async def test_on_the_jev_gate_an_ok_ends_at_the_gate_in_one_counted_call() -> None:
+    b1 = real("b_ack_with_nothing_open")
+    model, decisions = FakeModel(), FakeDecisions(cost_usd=0.00002)
+    decisions.push(gate_answers("acknowledgement", 0.02))
+
+    played = await play_scenario(
+        b1,
+        evals_dir=EVALS,
+        knowledge=SOPS,
+        prompts=PROMPTS,
+        model=model,
+        config=RuntimeConfig(gate_engine=GateEngine.JEV),
+        decisions=decisions,
+    )
+
+    assert played.error is None
+    assert grade(b1, played.observations) == []  # llm_calls: 1, the gate's decision
+    (observation,) = played.observations
+    (run,) = observation.runs
+    assert (run.gate_engine, run.gate_scores is not None) == ("jev", True)
+    assert model.calls == [] and len(decisions.requests) == 1
+    assert [(u.role, u.model) for u in played.usage] == [("gate", "fake-jev")]
+    assert played.cost_usd == pytest.approx(0.00002)
+
+
+async def test_a_counting_model_without_a_decision_model_refuses_to_decide() -> None:
+    counted = CountingModel(FakeModel())
+
+    with pytest.raises(DecisionError, match="no decision model"):
+        await counted.decide(DecisionRequest(role=ModelRole.GATE, state=("ok",), questions={}))
+
+    assert (counted.calls, counted.usage) == (1, [])
 
 
 async def test_an_ok_from_the_driver_ends_at_the_gate() -> None:

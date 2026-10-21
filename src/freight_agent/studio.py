@@ -85,7 +85,12 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.application.contracts import LoadSnapshot
 from freight_agent.application.runtime import AgentRuntime
-from freight_agent.bootstrap import build_runtime, build_uow_factory, platform_llm
+from freight_agent.bootstrap import (
+    build_runtime,
+    build_uow_factory,
+    gate_decisions,
+    platform_llm,
+)
 from freight_agent.domain.events import Event
 from freight_agent.domain.runs import RunRecord
 from freight_agent.evalkit.counting import CountingModel
@@ -332,12 +337,14 @@ class _Nodes:
         gateways = RecordingGateways()
         blobs = MemoryBlobStore()
         inner = self._model(clock)
-        model = CountingModel(inner)
+        decisions = gate_decisions(settings)
+        model = CountingModel(inner, decisions)  # the jev gate's calls are counted too
         runtime = build_runtime(
             settings,
             clock=clock,
             gateways=gateways.as_gateways(),
             llm=model,
+            decisions=model if decisions is not None else None,
             persistence=persistence,
             blobs=blobs,
             # The Agent Server traces the whole play, the run graph nested in it, when

@@ -133,7 +133,10 @@ def test_collect_metadata_records_the_code_the_sops_the_models_and_the_prompts(
     assert (found.git_sha, found.git_dirty, found.sop_version) == ("abc1234", True, "sop-v1")
     assert git.calls[0][0] == tmp_path
     config = load_models_config(MODELS)
-    assert found.models == {role.value: [c.model, *c.fallbacks] for role, c in config.roles.items()}
+    assert found.models == {
+        **{role.value: [c.model, *c.fallbacks] for role, c in config.roles.items()},
+        "decision_gate": ["typesafe/jev-1.14"],
+    }
     assert found.models["gate"][0] == "openai/gpt-4.1-nano"
     assert found.prompts == PROMPTS.versions()
     assert found.python is not None
@@ -171,6 +174,8 @@ def test_for_langsmith_flattens_the_models_and_the_prompts() -> None:
         "git_sha": "abc1234",
         "git_dirty": False,
         "sop_version": None,
+        "gate_engine": None,
+        "gate_act_threshold": None,
         "python": None,
         "model_gate": "openai/gpt-4.1-nano",
         "model_agent": "openai/gpt-oss-120b, x/y",
@@ -179,3 +184,15 @@ def test_for_langsmith_flattens_the_models_and_the_prompts() -> None:
         "prompt_ref_judge": "freight-agent-judge:prod",
         "prompt_ref_gate": "freight-agent-gate:prod",
     }
+
+
+# --- the gate's engine ------------------------------------------------------------------
+
+
+def test_the_gate_engine_is_recorded_and_its_threshold_only_on_jev() -> None:
+    jev = collect(gate_engine="jev", gate_act_threshold=0.2).for_langsmith()
+    llm = collect(gate_engine="llm", gate_act_threshold=0.2).for_langsmith()
+
+    assert (jev["gate_engine"], jev["gate_act_threshold"]) == ("jev", 0.2)
+    assert jev["model_decision_gate"] == "typesafe/jev-1.14"
+    assert (llm["gate_engine"], llm["gate_act_threshold"]) == ("llm", None)

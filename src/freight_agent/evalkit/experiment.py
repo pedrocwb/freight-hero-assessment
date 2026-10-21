@@ -41,12 +41,14 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
+from freight_agent.application.runtime import RuntimeConfig
 from freight_agent.evalkit.graders import GROUPS, CheckGroup, grade
 from freight_agent.evalkit.metadata import RunMetadata
 from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.runner import play_scenario
 from freight_agent.evalkit.spec import Scenario, Step
 from freight_agent.evalkit.suite import gating
+from freight_agent.ports.decisions import DecisionModel
 from freight_agent.ports.knowledge import SopIndex
 from freight_agent.ports.llm import LanguageModel
 from freight_agent.ports.prompts import Prompts
@@ -295,7 +297,8 @@ class CostMeter:
 class ScenarioTarget:
     """The experiment's target: one example in, one scenario played live, its
     observations out. A new model per example (`model_factory`), so circuit breakers
-    never carry one example's outage into the next."""
+    never carry one example's outage into the next. `config` sets the gate's engine, and
+    `decisions` is the jev engine's model (one for the experiment: it has no breaker)."""
 
     def __init__(
         self,
@@ -306,6 +309,8 @@ class ScenarioTarget:
         prompts: Prompts,
         model_factory: Callable[[], LanguageModel],
         meter: CostMeter,
+        config: RuntimeConfig | None = None,
+        decisions: DecisionModel | None = None,
     ) -> None:
         self._scenarios = scenarios
         self._evals_dir = evals_dir
@@ -313,6 +318,8 @@ class ScenarioTarget:
         self._prompts = prompts
         self._model_factory = model_factory
         self.meter = meter
+        self._config = config
+        self._decisions = decisions
 
     async def __call__(self, inputs: dict[str, Any]) -> dict[str, Any]:
         scenario = self._scenarios[inputs["scenario_id"]]
@@ -329,6 +336,8 @@ class ScenarioTarget:
             knowledge=self._knowledge,
             prompts=self._prompts,
             model=self._model_factory(),
+            config=self._config,
+            decisions=self._decisions,
         )
         meter.spent_usd += played.cost_usd
         return {
