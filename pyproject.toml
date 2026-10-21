@@ -7,7 +7,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
-    "langchain>=1.0",
+    "langchain-core>=1.0",
     "langchain-openrouter>=0.2.9",
     "langgraph>=1.0",
     "langgraph-checkpoint-postgres>=2.0",
@@ -112,7 +112,7 @@ forbidden_modules = [
     "freight_agent.api",
     "freight_agent.evalkit",
     "freight_agent.bootstrap",
-    "langchain",
+    "langchain_core",
     "langgraph",
     "fastapi",
     "httpx",
@@ -128,7 +128,7 @@ forbidden_modules = [
     "freight_agent.api",
     "freight_agent.evalkit",
     "freight_agent.bootstrap",
-    "langchain",
+    "langchain_core",
     "langgraph",
     "fastapi",
 ]
@@ -142,7 +142,7 @@ forbidden_modules = [
     "freight_agent.api",
     "freight_agent.evalkit",
     "freight_agent.bootstrap",
-    "langchain",
+    "langchain_core",
     "fastapi",
 ]
 
