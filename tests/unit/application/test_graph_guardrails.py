@@ -134,7 +134,9 @@ async def test_an_email_to_an_address_quoted_in_a_message_is_refused_and_handed_
     assert (looked.tool, looked.accepted) == ("get_load", None)
     assert (emailed.tool, emailed.accepted) == ("send_email", False)
     assert emailed.result == (
-        f"rejected by recipient_is_contact: not a contact of load 481207: {OUTSIDE}"
+        f"rejected by recipient_is_contact: not a contact of load 481207: {OUTSIDE}. Only the "
+        "load's contacts, named by contact id, can receive a message: send nothing to another "
+        "address"
     )
     assert run.rejections == 1  # within the budget: the high severity alone escalates
     assert run.status is RunStatus.ESCALATED

@@ -374,9 +374,9 @@ def test_the_catalog_kinds_and_the_caps_are_the_brokers(load: Load) -> None:
 
     first, sms = staged(ctx, "send_sms", ask_pod)
     assert first == "accepted as action #1" and sms is not None
-    assert staged(ctx, "send_email", email_pod, proposals=(sms,))[0] == (
+    assert staged(ctx, "send_email", email_pod, proposals=(sms,))[0].startswith(
         "rejected by attempt_cap: pod was already requested 1 times (cap 1): its requests "
-        "are used up"
+        "are used up. No further message may carry requests: pod."
     )
 
 
