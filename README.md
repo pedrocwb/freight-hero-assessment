@@ -59,6 +59,23 @@ cp .env.example .env                     # then fill in OPENROUTER_API_KEY and L
 make hooks                               # optional: the pre-commit hooks (they refuse a committed .env)
 ```
 
+**Storage.** `PERSISTENCE` chooses where each load's memory lives (the event log, the
+obligations ledger, timers, outbox, run records, the event queue, documents): `memory`, the
+default, is gone when the process stops; `postgres` keeps it in the database at
+`DATABASE_URL`, so loads, runs and the ledger survive a restart. `docker compose up` runs
+the platform on Postgres by itself. To run `uv run agent serve` on Postgres from the host:
+
+```bash
+docker compose up -d postgres            # Postgres 17 with pgvector on 127.0.0.1:5432
+export PERSISTENCE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent
+uv run agent db migrate                  # creates the tables; a rerun applies only new files
+uv run agent serve
+```
+
+A reset of the simulation (and a scenario, which resets first) empties the tables. The
+evals and LangGraph Studio always play each scenario in a fresh in-memory world, whatever
+`PERSISTENCE` says.
+
 **With your own LangSmith workspace, publish the prompts once.** The runtime reads its
 prompt templates from the LangSmith Prompt Hub at the pins of `config/prompts.yaml`
 (`freight-agent-<role>:prod`). A new workspace does not have them, and the process refuses
@@ -87,7 +104,9 @@ by the API. `.env.example` lists every setting with its default.
 | Command | What it does | Cost |
 |---|---|---|
 | `make test` | Unit, contract, property and integration tests with a fake model (`tests/fakes.py`) | free, about 20 s |
-| `make ci` | What CI runs: ruff, pyright (strict on the core), import-linter layer rules, tests with the 90% coverage gate, SOP lint | free, about 1 min |
+| `make ci` | What CI runs: ruff, pyright (strict on the core), import-linter layer rules, tests with the 90% coverage gate, SOP lint. The Postgres tests skip: no database needed | free, about 1 min |
+| `make integration` | The Postgres tests: every contract suite on Postgres too, the migrations, a platform restart, the assignment's scenario on both stores. Needs `docker compose up -d postgres` (or `TEST_DATABASE_URL=...`); each test uses a schema or database of its own and drops it | free, about 10 s |
+| `uv run agent db migrate` | Applies the pending files of `migrations/` to `DATABASE_URL`, each once (recorded in `schema_migrations`) | free |
 | `uv run agent eval list` | The scenarios of each suite with their tags | free |
 | `uv run agent sop lint` | Checks every SOP file and catalog; warns about sections no scenario covers | free |
 | `uv run agent eval run --suite core --k 3 --cost-cap-usd 0.15` | One suite live, as a LangSmith experiment: pass^k table and the experiment's link. Suites: `core`, `agent`, `docs`. `--scenario ID` for one; `--prompt-tag candidate` to measure a prompt candidate | core $0.03 to $0.04 per repetition; the cap stops it (exit 3) |
@@ -97,7 +116,7 @@ by the API. `.env.example` lists every setting with its default.
 | `cd web && pnpm dev` | The UI on http://localhost:5173, proxying `/api` to port 8000 | |
 | `cd web && pnpm build`, then `uv run agent serve` | The API serves the built UI on port 8000 | |
 | `make studio` | The local LangGraph Agent Server for Studio, on port 2024 (`STUDIO_ARGS=--tunnel` for Safari) | each play spends on the model |
-| `docker compose up --build` | UI and API on http://localhost:8000, and the Agent Server for Studio on port 2024 (open `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`); keys from `.env`. `docker compose up --build app` for the platform only | runs and plays spend on the model |
+| `docker compose up --build` | Postgres, a one-shot `migrate` job, the UI and API on http://localhost:8000 (on Postgres: a restart keeps the loads), and the Agent Server for Studio on port 2024 (open `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`); keys from `.env`. `docker compose up --build app` for the platform and its database only; `docker compose down -v` also drops the database | runs and plays spend on the model |
 
 `agent eval run` exit codes: 0 every regression scenario passed pass^k, 1 one failed, 2 the
 run could not start (a bad scenario, a missing key, LangSmith down), 3 the cost cap stopped
@@ -114,7 +133,7 @@ src/freight_agent/
                  prompts, gateways, blobs, page reader, clock, tracer
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
                  (graph/), executor, escalations, runtime, document pipeline, prompt variables
-  adapters/      memory store, OpenRouter with retries, fallbacks and circuit breakers,
+  adapters/      memory and Postgres stores, OpenRouter with retries, fallbacks and circuit breakers,
                  OpenRouter's Decisions API (the gate's decision model), SOP files and
                  lint, Prompt Hub and local prompts, pypdfium2 pages, blobs, LangSmith
                  links, recording gateways
@@ -125,6 +144,7 @@ src/freight_agent/
   studio.py      LangGraph Studio's scenario graph (langgraph.json)
 sops/            the SOPs: standard, client and load-type sections, client catalogs
 prompts/         the reviewable copy of the five prompt templates
+migrations/      the Postgres schema, numbered SQL files (`agent db migrate`)
 config/          models per role with prices and the gate's decision model (models.yaml),
                  prompt pins (prompts.yaml)
 evals/           scenarios (core, agent, docs), fixtures (load 481207, POD and BOL PDFs),
@@ -137,13 +157,15 @@ tests/           unit, contract, property, integration, eval harness
 
 - **Integrations are recording gateways.** SMS, email, Slack, the TMS and the Hero task
   tool record what they would send; nothing leaves the process.
-- **Storage is in memory**, behind repository interfaces with contract tests; a restart starts
-  over. Attachment bytes are files under `BLOBS_DIR` (in memory on the platform).
+- **Storage is in memory by default, or Postgres** (`PERSISTENCE=postgres`, the compose
+  setup), behind repository interfaces whose contract suites both stores pass. Attachment
+  bytes are files under `BLOBS_DIR` on Postgres, in memory otherwise.
 - **No always-on worker or scheduler.** `tick()` fires timers, reads documents, runs the
   queue and delivers the outbox; the platform, the evals and Studio call it on a virtual
   clock.
-- **Not built, designed in [`docs/answers.md`](docs/answers.md):** Postgres, a durable
-  queue and workers at scale (5.2), an SOP editor with review and approval, SOP versions
+- **Not built, designed in [`docs/answers.md`](docs/answers.md):** a durable queue and
+  workers at scale (5.2; the Postgres queue claims with `SKIP LOCKED`, but one process
+  drives it), an SOP editor with review and approval, SOP versions
   with canary and rollback (2.3), hybrid search over SOPs (2.2), metrics and alerts (4.1),
   the per-load cost cap and a rolling summary of old events (5.3). An earlier build of
   several of these is at the git tag `full-platform`.

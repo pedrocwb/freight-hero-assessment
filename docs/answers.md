@@ -12,9 +12,9 @@ not in the code.
 
 | Built | Designed, not built |
 |---|---|
-| The runtime (per-load FIFO, claim/think/commit, outbox, claim lease), the LangGraph run graph with the bounded tool loop, the rules, the ledger and timers, the document pipeline, the SOP layers and client catalogs with their lint, the prompt templates versioned in the LangSmith Prompt Hub, the eval harness as LangSmith experiments, the platform (FastAPI and React), LangGraph Studio, the Docker image | An always-on worker and timer scheduler, real integrations (the gateways record what they would send), Postgres (the store is in memory), an SOP editor with review and approval, SOP versioning with canary and rollback, hybrid search over SOPs, operational metrics and alerts, the per-load cost cap, a rolling summary of old events |
+| The runtime (per-load FIFO, claim/think/commit, outbox, claim lease), the LangGraph run graph with the bounded tool loop, the rules, the ledger and timers, the document pipeline, the SOP layers and client catalogs with their lint, the prompt templates versioned in the LangSmith Prompt Hub, the eval harness as LangSmith experiments, the platform (FastAPI and React), LangGraph Studio, the Docker image, Postgres for the load memory (`PERSISTENCE=postgres`, run by Docker Compose; the same contract suites as the memory store) | An always-on worker and timer scheduler, real integrations (the gateways record what they would send), an SOP editor with review and approval, SOP versioning with canary and rollback, hybrid search over SOPs, operational metrics and alerts, the per-load cost cap, a rolling summary of old events |
 
-An earlier build of several designed parts (Postgres with pgvector search, SOP onboarding
+An earlier build of several designed parts (pgvector search over SOPs, SOP onboarding
 from a PDF with review and publish, client config versions with a canary, metrics) is at
 the git tag `full-platform`.
 
@@ -277,6 +277,12 @@ ledger, with its timers; documents are rows with their values and checks.
   so a run never acts on an ETA that has not arrived for it; agent actions are always kept.
 - **The ledger holds only facts**, never a pointer into the SOP text, and nothing is kept
   in the process between runs, so any worker can run the next event.
+- **Where it is stored.** `PERSISTENCE=memory` (the default, the tests and evals) keeps
+  it in the process; `PERSISTENCE=postgres` (Docker Compose) keeps it in Postgres, one
+  table per kind (`migrations/0001_load_memory.sql`), so a restarted platform goes on with
+  its loads, runs and ledger. One transaction per unit of work; queue claims and due timers
+  use `FOR UPDATE SKIP LOCKED`. Both stores pass the same contract suites
+  (`tests/contract/`), and the assignment's scenario leaves the same state on both.
 - **Designed, not built:** a rolling summary of the events older than the last 30. Today
   the agent pages back with `get_history`.
 
@@ -581,11 +587,11 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 
 | Part | Today | At 10x (designed) |
 |---|---|---|
-| Queue | Per-load FIFO in memory | SQS FIFO with `MessageGroupId = load_id` (order per load, parallel across loads), or Temporal with a workflow per load |
+| Queue | Per-load FIFO in the store (a Postgres table on the platform) | SQS FIFO with `MessageGroupId = load_id` (order per load, parallel across loads), or Temporal with a workflow per load |
 | Workers | `tick()` in one process | Stateless async workers, about 30 runs in flight each, autoscaled on queue age |
 | Timers | Rows fired by `tick()` | A scheduler claiming due timers with `FOR UPDATE SKIP LOCKED`, or EventBridge Scheduler |
 | Pings | One transaction per ping | A stream partitioned by load holds the risk tracker; only transitions reach the queue |
-| Storage | In-memory store behind the repository interfaces | Postgres: the events table partitioned by month, closed loads archived to object storage, a pooler, a read replica for the platform and metrics |
+| Storage | Postgres (`PERSISTENCE=postgres`, one instance in Docker Compose) or the in-memory store, behind the repository interfaces | The same schema with the events table partitioned by month, closed loads archived to object storage, a pooler (the adapter needs no session state), a read replica for the platform and metrics |
 | SOP index | Files read per run | Published versions in Postgres, cached per client by hash; hybrid search with pgvector |
 | Documents | Blobs on the filesystem; read in the tick | An object store behind `BlobStore`; document workers scaled on pending documents |
 | Models | One OpenRouter key; a rate limit is retried on the same model, OpenRouter may serve the model from another provider that takes the same parameters (the gate: OpenAI, then Azure), then a fallback model that passes the suite serves the call | Higher rate limits or provisioned throughput, per-client concurrency limits |
@@ -594,8 +600,9 @@ them, that is about 50 agent runs per second; at 7 s each, about 350 runs in fli
 
 The layer rules (import-linter contracts in `pyproject.toml`) keep storage, queues, blobs
 and providers behind interfaces, so the run graph, the rules, the ledger and the eval suites do
-not change. An earlier build of the Postgres adapter, with the same contract tests as the
-memory store, is at tag `full-platform`.
+not change. The Postgres adapter already passes the memory store's contract suites, and
+its queue claim and due-timer read skip rows another worker holds (`SKIP LOCKED`), so
+several workers can share them.
 
 ### 5.3 How do you keep LLM cost at about $1 or less per load?
 

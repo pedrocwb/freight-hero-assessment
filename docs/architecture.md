@@ -67,9 +67,10 @@ flowchart LR
   runtime -. "traces; templates at start" .-> langsmith
 ```
 
-Built: the runtime, the in-memory store, the SOP files, the OpenRouter and LangSmith
-adapters, the platform (FastAPI and a React UI) that plays every contact. Not built: real
-integrations (the gateways record what they would send), Postgres, an always-on worker.
+Built: the runtime, the load memory in memory or in Postgres (`PERSISTENCE`), the SOP
+files, the OpenRouter and LangSmith adapters, the platform (FastAPI and a React UI) that
+plays every contact. Not built: real integrations (the gateways record what they would
+send), an always-on worker.
 
 ## 2. Code layers
 
@@ -80,7 +81,7 @@ flowchart TB
   app["application/: run context, prefilter, gate, agent and tools, run graph, executor, runtime, document pipeline"]
   interfaces["interfaces/: repositories, SOP index, language model, decision model, prompts, gateways, blobs, page reader, clock, tracer"]
   domain["domain/: load, events, obligations, timers, rules and validation, SOP merge, catalog, documents, actions"]
-  adapters["adapters/: memory store, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
+  adapters["adapters/: memory and Postgres stores, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
 
   entry --> boot
   boot --> app
@@ -214,6 +215,15 @@ Every run reads one snapshot of this memory (`application/context.py`); it never
 on anything kept in the process between runs. The agent's own actions come back as
 `agent_action` events, so the next run reads what was sent, to whom and when.
 
+The memory lives in the store `PERSISTENCE` names, behind the interfaces of
+`interfaces/repositories.py`: in the process (`adapters/persistence/memory/`, the default,
+the tests, the evals and Studio, each play in a fresh world), or in Postgres
+(`adapters/persistence/postgres/`, the Docker Compose platform), one table per entity of
+the diagram plus `risk_trackers` and `event_queue` (`migrations/`, applied by
+`agent db migrate`). A unit of work is one transaction; the queue claim and the due
+timers skip rows another worker holds (`FOR UPDATE SKIP LOCKED`); a partial unique index
+allows one event in flight per load. Both stores pass the same contract suites.
+
 ## 6. Load 481207, 07:00 to 08:01
 
 ```mermaid
@@ -339,7 +349,8 @@ each role and the SOP hash. Promotion of a prompt: edit, `push --tag candidate`,
 
 ## 10. Production at 10x (designed)
 
-Not built. The interfaces stay the same; the adapters behind them change.
+Not built, except Postgres, which the platform already runs on. The interfaces stay the
+same; the adapters behind them change.
 
 ```mermaid
 flowchart LR
@@ -363,5 +374,5 @@ flowchart LR
 ```
 
 Sizing and the reasons for each piece are in [`answers.md`, 5.2](answers.md#52-volume-x10-what-must-change).
-An earlier build of the Postgres adapter, the timer claim with `SKIP LOCKED`, the pgvector
-search and the operational metrics is at the git tag `full-platform`.
+An earlier build of the pgvector search and the operational metrics is at the git tag
+`full-platform`.

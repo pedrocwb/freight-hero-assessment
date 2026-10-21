@@ -337,6 +337,30 @@ Studio:
   changed template and moves T; `pull` writes a Hub version back. Both refuse a template
   the code cannot render.
 
+## Storage
+
+- **Choice.** `PERSISTENCE=memory` (default) or `postgres` with `DATABASE_URL`, read
+  only by `bootstrap.py` (`build_platform_store`). The platform API and its simulation run
+  on it; Docker Compose sets `postgres`. The evals and Studio build a fresh in-memory
+  store per play (`memory_uow_factory`), whatever the setting: a play is a throwaway world.
+- **Schema.** `migrations/NNNN_name.sql`, applied in order by `agent db migrate`, each in
+  its own transaction with its row in `schema_migrations`; an applied file that changed is
+  refused (add a new file instead). `0001` holds the tables, `0002` enables pgvector for
+  embeddings in the same database. Ids are text in the `C` collation, ties sort by natural
+  id (`id_order`) as in the memory store, foreign keys are checked at commit, the event log
+  refuses UPDATE and DELETE, and a load's metadata and a run record are JSONB.
+- **Transactions and locks.** One transaction per unit of work. `loads.get` locks the
+  load's row, `obligations.get` the obligation's; the queue claim and the due timers take
+  `FOR UPDATE SKIP LOCKED`, so several workers could share them; a partial unique index
+  allows one event in flight per load. The claim time is the runtime's clock, for the
+  claim lease.
+- **Lifecycle.** A reset (and a scenario) empties every domain table (`TRUNCATE`). On
+  start the platform resumes a durable store: its virtual clock goes to the latest time
+  the loads hold. Attachment bytes go to `BLOBS_DIR` on Postgres, in memory otherwise.
+- **Tests.** `tests/contract/` runs every suite on both stores (Postgres when
+  `TEST_DATABASE_URL` or `DATABASE_URL` is set, marked `integration`, each test in a
+  schema of its own); `make integration` runs them with the Postgres-only tests.
+
 ## Layers
 
 The import rules in `pyproject.toml` (import-linter, `make arch`, also a unit test):
