@@ -47,7 +47,7 @@ flowchart LR
     tms["TMS: notes, stage"]
   end
 
-  openrouter["OpenRouter: gate, agent, extract, judge models"]
+  openrouter["OpenRouter: the gate's decision model; agent, extract, judge models"]
   langsmith["LangSmith: traces, Prompt Hub, datasets, experiments"]
 
   driverIn --> ingress
@@ -78,9 +78,9 @@ flowchart TB
   entry["Entry points: api/ (FastAPI), cli.py (agent ...), studio.py (LangGraph Studio), evalkit/ (experiments)"]
   boot["bootstrap.py: the composition root, the only place that picks adapters"]
   app["application/: run context, prefilter, gate, agent and tools, run graph, executor, runtime, document pipeline"]
-  ports["ports/: repositories, SOP index, language model, prompts, gateways, blobs, page reader, clock, tracer"]
+  ports["ports/: repositories, SOP index, language model, decision model, prompts, gateways, blobs, page reader, clock, tracer"]
   domain["domain/: load, events, obligations, timers, rules and validation, SOP merge, catalog, documents, actions"]
-  adapters["adapters/: memory store, OpenRouter with retries and fallbacks, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
+  adapters["adapters/: memory store, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
 
   entry --> boot
   boot --> app
@@ -135,8 +135,8 @@ flowchart TD
   prefilter -- "duplicate, stale timer, empty message" --> skipped(["skipped: no model call"])
   prefilter -- "sender is not a load contact" --> unknown(["escalated: Hero task, no model call"])
   prefilter --> gate
-  gate["gate: intent from code for system events; gate model for messages"]
-  gate -- "act false and intent not must_act" --> noop1(["noop: one model call"])
+  gate["gate: intent from code for system events; for a message, a decision model's probabilities and a policy in code"]
+  gate -- "a quiet intent and P(act) under 0.2" --> noop1(["noop: one model call"])
   gate --> knowledge
   knowledge["knowledge: SOP sections for intent and stage, procedures in progress, catalog of the rest"]
   knowledge --> agent
@@ -221,7 +221,7 @@ sequenceDiagram
   participant T as Tracking feed
   participant R as Runtime
   participant L as Ledger and timers
-  participant G as Gate model
+  participant G as Gate (decision model)
   participant A as Agent model
   participant D as Driver
   participant P as Dispatcher
@@ -235,7 +235,7 @@ sequenceDiagram
   R->>D: SMS asking for the ETA
   D->>R: 07:12 "What's the PO number?"
   R->>G: 07:13 run 2: triage the message
-  G-->>R: question, act
+  G-->>R: question (1.00), needs the agent now (0.97), so on to the agent
   R->>A: driver_questions in full, delay_risk_high as procedure in progress, ledger: 1 attempt, T1 at 07:31
   A-->>R: send_sms(driver, reply, "PO 55821"), finish
   Note over L: unchanged: a reply requests nothing, so attempts 1 and T1 stay
@@ -319,7 +319,7 @@ flowchart LR
 
   subgraph ls["LangSmith"]
     dataset["dataset freight-agent-SUITE: one example per scenario"]
-    hub["Prompt Hub: freight-agent-gate, -agent, -extract, -judge; commits, tags prod and candidate"]
+    hub["Prompt Hub: freight-agent-gate, -agent, -extract, -judge, -gate_decision; commits, tags prod and candidate"]
     experiment["experiment: rows, evaluator scores, pass^k summary, metadata"]
   end
 

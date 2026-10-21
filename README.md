@@ -6,7 +6,10 @@ POD) and acts on each one as the client's SOP says: it asks for an ETA, answers 
 load data, reads a document, follows up, escalates to the dispatcher, the broker or the
 internal Hero team, and does nothing when nothing should be done. A LangGraph run graph
 holds the model inside one bounded tool loop; every action is checked by code at the call
-and happens only when the run commits.
+and happens only when the run commits. Each inbound message is first read by a decision
+model (TypeSafe's Jev, on OpenRouter) that answers its intent and whether it needs the
+agent as probabilities, not text; code decides from them, and a doubtful message goes on
+to the agent (`GATE_ENGINE=llm` reads it with a chat model instead).
 
 | Read | For |
 |---|---|
@@ -63,7 +66,7 @@ to start with a pin it cannot resolve (the message says so). Either publish the 
 copy in `prompts/` to your workspace:
 
 ```bash
-uv run agent prompts push --tag prod     # creates freight-agent-gate, -agent, -extract, -judge
+uv run agent prompts push --tag prod     # creates freight-agent-gate, -agent, -extract, -judge, -gate_decision
 uv run agent prompts status              # every role: "matches"
 ```
 
@@ -107,21 +110,23 @@ run in CI; `.github/workflows/evals-live.yml` runs them by hand.
 src/freight_agent/
   domain/        entities and rules, no I/O: load, events, obligations, timers, ping filter,
                  actions, validation rules, SOP merge, client catalog, documents, run records
-  ports/         interfaces: repositories, SOP index, language model, prompts, gateways,
-                 blobs, page reader, clock, tracer
+  ports/         interfaces: repositories, SOP index, language model, decision model,
+                 prompts, gateways, blobs, page reader, clock, tracer
   application/   run context, prefilter, gate, agent and its tools, the LangGraph run graph
                  (graph/), executor, escalations, runtime, document pipeline, prompt variables
-  adapters/      memory store, OpenRouter with retries, fallbacks and circuit breakers, SOP
-                 files and lint, Prompt Hub and local prompts, pypdfium2 pages, blobs,
-                 LangSmith links, recording gateways
+  adapters/      memory store, OpenRouter with retries, fallbacks and circuit breakers,
+                 OpenRouter's Decisions API (the gate's decision model), SOP files and
+                 lint, Prompt Hub and local prompts, pypdfium2 pages, blobs, LangSmith
+                 links, recording gateways
   evalkit/       scenario spec, player, graders, judge, LangSmith experiments, metadata
   api/           FastAPI platform: simulation, ingress, scenarios, SOPs, documents, stream
   bootstrap.py   the composition root: the only place that wires adapters to ports
   cli.py         the `agent` command (cli_sop.py, cli_prompts.py)
   studio.py      LangGraph Studio's scenario graph (langgraph.json)
 sops/            the SOPs: standard, client and load-type sections, client catalogs
-prompts/         the reviewable copy of the four prompt templates
-config/          models per role with prices (models.yaml), prompt pins (prompts.yaml)
+prompts/         the reviewable copy of the five prompt templates
+config/          models per role with prices and the gate's decision model (models.yaml),
+                 prompt pins (prompts.yaml)
 evals/           scenarios (core, agent, docs), fixtures (load 481207, POD and BOL PDFs),
                  RESULTS.md
 web/             React and Vite platform UI

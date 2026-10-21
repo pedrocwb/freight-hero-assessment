@@ -24,8 +24,10 @@ the git tag `full-platform`.
 
 **Short answer.** One stateless run per event, with a FIFO queue per load. Code does every
 deterministic step: it reads the load's memory, drops what needs no thought, gives system
-events their intent, selects the SOP sections and checks every action. The model works
-inside one bounded tool loop: it reads what it needs (SOP, history, ledger, load,
+events their intent, selects the SOP sections and checks every action. Each inbound
+message gets one call to a decision model that answers, with probabilities, its intent and
+whether it needs the agent now; code decides from them, and a doubtful message goes on to
+the agent. The agent model works inside one bounded tool loop: it reads what it needs (SOP, history, ledger, load,
 documents) and stages actions one at a time. Each staged action is checked by the rules at
 the call and answered "accepted" or "rejected by <rule>", with what an acceptable action
 looks like; nothing runs until the run commits, and then only through an outbox. Memory
@@ -37,7 +39,7 @@ The run graph (`application/graph/build.py`, diagram in
 | Node | Code | Model call | Ends the run as |
 |---|---|---|---|
 | prefilter | `application/prefilter.py` | none | `skipped` (duplicate, stale timer, empty message); `escalated` (unknown sender) |
-| gate | `application/gate.py` | messages only, GPT-4.1 Nano; system events get their intent from code | `noop` (the gate says no action and the intent is not `must_act`) |
+| gate | `application/gate_decision.py` (`application/gate.py` on `GATE_ENGINE=llm`) | messages only: one call to TypeSafe's Jev 1.14, a decision model that answers the intent and the probability of "needs the agent now" (GPT-4.1 Nano writes the decision on `llm`); system events get their intent from code | `noop` (an intent that may end a run, such as an acknowledgement, with that probability under 0.2) |
 | knowledge | `application/graph/nodes.py`, `SopIndex.by_applies` | none | never |
 | agent, tools | `application/agent.py`, `application/agent_tools.py` | one call per round, gpt-oss-120b, at most `max_steps` rounds | goes to validate |
 | validate | `domain/validation.py`, `domain/rules.py` | none | `acted`, `noop`, `escalated` (blocked action, rejection budget, no procedure) |
@@ -87,6 +89,7 @@ the rules) and measured (trajectory checks, cost per run, pass^3).
 
 | Alternative | Why not here |
 |---|---|
+| A chat model writes the gate's decision (GPT-4.1 Nano) | Measured against the decision model on the core suite at k = 3: the same reading of every message but one and the same 9 runs ended at the gate, at twice the latency (p95 1.24 s against 0.80 s) and twice the cost per call. Kept as `GATE_ENGINE=llm`. |
 | One structured plan per event (one call, no tools) | Cheaper per run, and it was measured: 22/22 core scenarios on the same model. But it cannot search the SOP when the selected sections miss the situation, read a document on demand, or correct an action a rule refused. |
 | A ReAct agent whose tools execute directly | An injected email can trigger a send, and a loop that fails halfway leaves half-applied state. Here tools stage and the commit applies all or nothing. |
 | The whole SOP and history in every prompt | A 100-page SOP is about 50,000 to 70,000 tokens. On about 45 runs per load that is 2 to 3 million tokens per load: over $1 on any model above about $0.40 per million, and the model attends worse to the rule that matters. |
@@ -481,9 +484,16 @@ of each role. The safety rules do not depend on the model.
   provider to route an agent round to), and Google endpoints dropped a union type in a
   tool schema (the action tools have flat schemas, with no `$ref` and no union:
   `application/agent_tools.py`).
+- **The gate's engine went through the same kind of run.** The rule was fixed first: the
+  decision model would become the default gate only with a core pass^3 no lower than GPT-4.1
+  Nano's, no `must_act` message ended at the gate, and a gate p95 no higher. It passed
+  22/22 against 21/22 (the chat round's failure was the agent's), ended the same 9 runs
+  at the gate, and answered at p95 0.80 s against 1.24 s (`evals/RESULTS.md`, "How the
+  gate engine was chosen"). The experiment's metadata names the engine and its threshold.
 - **Independent of the model:** structured output is a forced tool call validated by
-  pydantic, so a malformed answer is an error (fallback, then a Hero task), never a
-  half-read plan; the rules hold for any model.
+  pydantic, and a decision model's answers are typed and checked the same way, so a
+  malformed answer is an error (fallback, then a Hero task), never a half-read plan; the
+  rules hold for any model.
 - **Prompts** follow the same path: a template change is pushed to the Prompt Hub as
   `candidate`, measured with `agent eval run --prompt-tag candidate`, then tagged `prod`.
 
@@ -546,9 +556,9 @@ and 12.5 s at p95.
 | A worker that dies mid-run: the claim lease (deadline plus 60 s) returns the event; 3 failures make a dead letter | `EventQueue.reclaim_expired` |
 
 **Measured** (`evals/RESULTS.md`, k = 3 round, 135 agent runs of the core suite): agent call
-p50 7.7 s, p95 12.5 s, max 16.6 s; gate call p50 0.9 s, p95 1.2 s; a document extraction
-1.3 s. A rate-limited round adds its backoff, about 1 to 3 s; 86 core rounds were rate
-limited, and no run reached its deadline. Eight rounds at the 60-second timeout could
+p50 7.3 s, p95 11.4 s, max 14.9 s; gate call p50 0.4 s, p95 0.8 s (0.9 s and 1.2 s on
+GPT-4.1 Nano); a document extraction 1.3 s. A rate-limited round adds its backoff, about 1
+to 3 s; 63 core rounds were rate limited, and no run reached its deadline. Eight rounds at the 60-second timeout could
 exceed 240 s, which is why the deadline, not the round count, is the bound. The deadline
 leaves 60 seconds of the 5 minutes for the queue wait and the delivery.
 
@@ -592,16 +602,16 @@ memory store, is at tag `full-platform`.
 **Short answer.** Most events never reach a model, the gate keeps chatter away from the
 agent, the agent runs a cheap model chosen by a bake-off, its prompt holds only the
 matching SOP sections, and each run has a round and a cost budget. Measured on the current
-design: about $0.0001 per gate call and $0.0007 per agent run, so about **$0.04 for a
-typical load and $0.07 for a heavy one**.
+design: about $0.00005 per gate call and $0.0007 per agent run, so about **$0.04 for a
+typical load and $0.06 for a heavy one**.
 
 | Per load | Typical | Heavy |
 |---|---|---|
-| Inbound messages, one gate call each ($0.000099) | 75: $0.007 | 100: $0.010 |
+| Inbound messages, one gate call each ($0.000049) | 75: $0.004 | 100: $0.005 |
 | Agent runs ($0.00068): messages the gate passes, plus risk changes, timers and documents | 42: $0.029 | 77: $0.052 |
 | Document extractions ($0.0008) | 4: $0.003 | 5: $0.004 |
 | Location pings | no model call | no model call |
-| **Total** | **about $0.04** | **about $0.07** |
+| **Total** | **about $0.04** | **about $0.06** |
 | With the agent on Claude Haiku 5.5 | about $0.11 | about $0.20 |
 
 Per-call figures are means over the k = 3 round (`evals/RESULTS.md`); the volumes are the
@@ -613,8 +623,10 @@ assignment's 50 to 100 messages and an assumption for the rest.
    few risk transitions (`b_medium_risk_does_not_wake`).
 2. **The prefilter:** duplicates, stale timers, empty messages and unknown senders stop in
    code.
-3. **The gate:** an "ok" ends as `noop` after a $0.0001 call instead of an $0.0008 loop;
-   `must_act` keeps the intents that need action.
+3. **The gate:** an "ok" ends as `noop` after a $0.00005 decision call instead of an
+   $0.0007 loop; only an intent the catalog lets end a run can end it, so `must_act`
+   keeps the intents that need action. The decision model's input costs $0.042 per
+   million tokens and its output nothing.
 4. **A cheap model per role,** chosen by the bake-off (4.3): the same loop on a $3 / $12 per
    million model with no caching would cost about 42 x (16,200 x $3 + 220 x $12) / 1M,
    about $2.15 per typical load.
