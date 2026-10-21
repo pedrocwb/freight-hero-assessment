@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api, runCost } from "../api";
 import { DocumentsPanel } from "../components/Documents";
+import { FacilityMemoryPanel } from "../components/FacilityMemory";
 import { FreePlay } from "../components/FreePlay";
 import { LedgerPanel, TimersPanel } from "../components/Ledger";
 import { LoadCard } from "../components/LoadCard";
@@ -143,6 +144,7 @@ export function LoadInspector({ params }: { params: URLSearchParams }) {
             <LedgerPanel snapshot={data} />
             <TimersPanel snapshot={data} />
             <DocumentsPanel />
+            <FacilityMemoryPanel />
             {load ? <LoadCard load={load} /> : null}
           </div>
         </div>

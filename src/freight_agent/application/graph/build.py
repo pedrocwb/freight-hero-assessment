@@ -9,7 +9,8 @@
 - `prefilter` and `gate` (the triage step) end the run when they write a verdict:
   `skipped` or `escalated` (unknown sender) after the prefilter, `noop` after the gate.
 - `knowledge` never ends the run: an event no section covers is the agent's
-  `no_procedure`.
+  `no_procedure`. It also reads the facility notes of the load's current and next stop
+  (`application/memory.py`).
 - `agent` is one model round. It goes to `tools` when the round called tools (an
   answer given next to tool calls waits for them), to `validate` when it answered
   (`finish`), and back to itself when the model replied in prose (the next round must
@@ -62,6 +63,7 @@ from freight_agent.application.graph.state import RunState
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.validation import Rule
 from freight_agent.interfaces.knowledge import SopIndex
+from freight_agent.interfaces.memory import FacilityMemory
 from freight_agent.interfaces.prompts import PromptRole
 
 PREFILTER = "prefilter"
@@ -123,6 +125,7 @@ class GraphDeps:
     agent: Agent
     knowledge: SopIndex
     rules: Sequence[Rule] = field(default_factory=default_rules)
+    memory: FacilityMemory | None = None  # the facility notes the knowledge node reads
 
     def prompt_versions(self) -> dict[str, str]:
         """Role -> the version of the prompt template the graph's model calls render."""
@@ -215,7 +218,7 @@ def compile_graph(deps: GraphDeps) -> _Compiled:
     builder = cast(_Builder, StateGraph(RunState))
     builder.add_node(PREFILTER, prefilter_node())
     builder.add_node(TRIAGE, triage_node(deps.gate))
-    builder.add_node(KNOWLEDGE, knowledge_node(deps.knowledge))
+    builder.add_node(KNOWLEDGE, knowledge_node(deps.knowledge, deps.memory))
     builder.add_node(AGENT, agent_node(deps.agent))
     builder.add_node(TOOLS, tools_node(deps.agent))
     builder.add_node(VALIDATE, validate_node(deps.rules))

@@ -458,6 +458,7 @@ def test_list_shows_every_suite_and_scenario_with_its_tags() -> None:
         "agent (1 scenarios)",
         "core (22 scenarios)",
         "docs (3 scenarios)",
+        "memory (3 scenarios)",
     ]
     line = next(x for x in result.output.splitlines() if "d4_lumper_no_sop" in x)
     assert "capability, sop:driver_questions" in line

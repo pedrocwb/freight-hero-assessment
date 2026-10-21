@@ -52,6 +52,7 @@ from freight_agent.application.prompts import (
 from freight_agent.domain.actions import FINISH, Action, AgentOutcome
 from freight_agent.domain.broker import Broker
 from freight_agent.domain.intents import GateDecision
+from freight_agent.domain.memory import FacilityFact
 from freight_agent.domain.rules import default_rules
 from freight_agent.domain.runs import TrajectoryStep
 from freight_agent.domain.sop import ResolvedSection, ResolvedSop
@@ -66,6 +67,7 @@ from freight_agent.interfaces.llm import (
     ToolResult,
     Turn,
 )
+from freight_agent.interfaces.memory import FacilityMemory
 from freight_agent.interfaces.prompts import ChatPrompt, PromptError
 
 logger = logging.getLogger(__name__)
@@ -160,17 +162,20 @@ class Agent:
         *,
         rules: Sequence[Rule] | None = None,
         timeout_s: float = 60.0,
+        memory: FacilityMemory | None = None,
     ) -> None:
-        """`PromptError` when the template does not fit the agent (`check_agent_prompt`)."""
+        """`PromptError` when the template does not fit the agent (`check_agent_prompt`).
+        `memory` backs the `recall_facility` tool (none without it)."""
         self._llm = llm
         self._knowledge = knowledge
+        self._memory = memory
         self.prompt = check_agent_prompt(prompt)
         self._finish = prompt.tools[FINISH].strip()
         self.rules: tuple[Rule, ...] = tuple(rules) if rules is not None else default_rules()
         self._timeout_s = timeout_s
 
     def tools(self, ctx: RunContext, visible_sections: Sequence[ResolvedSection]) -> Toolbox:
-        return agent_tools(ctx, visible_sections, self._knowledge)
+        return agent_tools(ctx, visible_sections, self._knowledge, self._memory)
 
     def prompts(
         self,
@@ -178,13 +183,14 @@ class Agent:
         gate: GateDecision,
         sop: ResolvedSop,
         visible_sections: Sequence[ResolvedSection],
+        facility_facts: Sequence[FacilityFact] = (),
     ) -> tuple[str, str]:
         """The agent's system and user prompts: the one place the loop renders them, the
         same for every round of a run."""
         in_progress = sections_in_progress(ctx, sop, visible_sections)
         return (
             render_agent_system_prompt(self.prompt, ctx.broker),
-            render_agent_prompt(self.prompt, ctx, gate, sop, in_progress),
+            render_agent_prompt(self.prompt, ctx, gate, sop, in_progress, facility_facts),
         )
 
     async def round(
@@ -195,12 +201,14 @@ class Agent:
         visible_sections: Sequence[ResolvedSection],
         history: Sequence[Turn],
         *,
+        facility_facts: Sequence[FacilityFact] = (),
         force_answer: bool = False,
     ) -> ChatReply[AgentOutcome]:
         """One model round. `sop` holds the sections for this intent and stage;
         `visible_sections` back the `read_sop_section` tool (every section this broker and
-        load can see). `LlmError` propagates: the runtime escalates a model failure."""
-        system, user = self.prompts(ctx, gate, sop, visible_sections)
+        load can see); `facility_facts` are the notes on the load's stops the prompt shows.
+        `LlmError` propagates: the runtime escalates a model failure."""
+        system, user = self.prompts(ctx, gate, sop, visible_sections, facility_facts)
         request = ChatRequest(
             role=ModelRole.AGENT,
             system=system,

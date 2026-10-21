@@ -263,7 +263,7 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
 - `ingest_message` saves one pending `Document` per attachment of a new message, in the
   message's transaction.
 - `tick()` is `fire_due_timers -> documents.process_pending -> process_all ->
-  dispatch_outbox`, so a document is read before the queue runs and its event queues
+  dispatch_outbox -> process_background` (the facility memory extraction), so a document is read before the queue runs and its event queues
   behind the message.
 - The pipeline (`application/documents.py`): blob, pages (a page with little text becomes
   an image), one `extract` call answering `{type_id, confidence, fields, notes}`, checks
@@ -276,6 +276,67 @@ description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms
   `mc_number` (the carrier's), `stop_name` (a stop, the shipper or the consignee),
   `date_in_window` (the appointment's day, or inside its window), `seal_number` (the last
   seal a message reported), `signature` (present).
+
+## Facility memory
+
+- A `FacilityFact` (`domain/memory.py`): `fact_id`, `client_id`, `facility_key`,
+  `facility_name`, `text` (at most 200 characters), `kind` (`check_in | hours |
+  requirement | access | contact | other`), `source_load_id`, `source_event_id`,
+  `source_at`, `created_at`, `updated_at`.
+- `facility_key(stop)` is `<slug of the name>~<slug of the address>`, lower case ASCII
+  words joined by hyphens: `riverbend-plant~stockton-ca`. The same place on two loads gets
+  the same key; a renamed stop is a new facility.
+- Namespaces of the LangGraph store: `("facility_memory", <client>, <facility_key>)` for
+  the notes, keyed by fact id and indexed on `text`; `("facility_memory_jobs", <client>)`
+  for the extraction jobs, keyed by load id, not indexed. Every method of
+  `interfaces/memory.py` names the client; a write naming another client is refused whole,
+  and a read drops any value of another client.
+- Read: the knowledge node reads up to 5 notes of the current stop and 5 of the next
+  (most recently updated first) and the run record keeps them (`RunRecord.facility_facts`).
+  A memory that fails gives no notes; the run goes on. The agent prompt's variable is
+  `facility_memory`: one line per note, `- stop <n> (current), "<facility>", <kind>, told
+  on load "<id>" <date>: "<text>"`, every outside text as a JSON string.
+  `recall_facility {query, stop}` searches by meaning, within one stop's facility or across
+  the client's facilities.
+- Write: a run whose commit moves the load to `delivered` enqueues `ExtractionJob(load_id,
+  client_id, queued_at)` after the commit (fail-open: the run stands if the enqueue fails).
+  A job lost that way, or to a crash between the commit and the enqueue, is queued again
+  when the platform starts on a durable store: `queue_missed_extractions` queues every
+  delivered load without a job (a load has at most one job, so it is never extracted
+  twice), and `agent memory extract --load` runs one by hand. Chosen over enqueuing in the
+  load memory's transaction, which would need the job table in the domain schema and a
+  second implementation of the queue: a crash means a restart, so the restart is when to
+  look, and the store keeps one home for everything the facility memory owns. `tick()` ends with
+  `process_background()`, which runs up to 5 pending jobs. One `memory` call per job reads
+  the load's inbound messages and Hero updates, each with its event id and the stops it may
+  be about, and the current notes of its facilities, and answers
+  `{operations: [{op, facility_key, fact_id, text, kind, event_id}]}`.
+- Which stop a message is about: the stop of the stage in effect when it arrived (the last
+  stage update logged before it; before any, the stage the first update leaves), plus any
+  stop whose name it mentions. A load with no stage update may be at any of its stops.
+- Guardrails, checked on every operation, in order: the facility is a stop of the load;
+  the cited event is an inbound message or Hero update of the load with text; that event
+  is about that stop; an update or a delete names an existing note of that facility; the
+  text is not empty, at most 200 characters, and has no email address, phone number,
+  money (rates, prices, pay, fees, "$") or words aimed at the agent ("ignore your rules",
+  "system prompt"); an add is not a note the facility already has and fits its cap of 12
+  notes; at most 10 operations per job. A refused operation is dropped with its reason,
+  kept on the job (`ExtractionJob.dropped`).
+- A model failure leaves the job pending; after 3 tries it is `failed`. A load with no
+  inbound text is `done` with no model call.
+- Store: `PERSISTENCE` chooses it, as for the load memory (`bootstrap.build_platform_memory`).
+  `postgres`: LangGraph's `AsyncPostgresStore` on `DATABASE_URL`, in the database's default
+  schema, on a small pool of its own (LangGraph's store needs `dict_row` connections) that
+  opens on first use, with a pgvector index `{dims: 1536, embed, fields: ["text"]}` (HNSW,
+  cosine). `agent db migrate` runs LangGraph's `setup()` after the SQL files (its tables
+  `store`, `store_vectors`, `store_migrations`, `vector_migrations`, idempotent), so the
+  app never creates tables at start. The vector width is fixed by that table, so on
+  Postgres the offline hash is built 1536 wide too, and an embedder of another width stops
+  the start. `memory`: an `InMemoryStore` with the same index. The evals and Studio always
+  get a fresh in-memory one per play.
+- Lifecycle: one facility memory per platform process, shared by every session; a reset
+  (and a scenario) forgets every note and job with the load memory, so a scenario never
+  reads another's notes.
 
 ## Event ids
 
@@ -311,10 +372,10 @@ Studio:
 
 ## Prompts and their versions
 
-- Five templates, one per model role: `gate`, `agent`, `extract`, `judge`, and
+- Six templates, one per model role: `gate`, `agent`, `extract`, `judge`,
   `gate_decision` (the jev gate's texts: the two messages are the parts of the state the
   decision model reads, and the template's `tools` hold its questions' instructions and
-  criteria). Each is a chat template of a system and a user message (`interfaces/prompts.py`),
+  criteria), and `memory` (the facility memory extraction). Each is a chat template of a system and a user message (`interfaces/prompts.py`),
   stored in the LangSmith Prompt Hub as `freight-agent-<role>` with a reviewable copy in
   `prompts/<role>.yaml`.
 - `config/prompts.yaml` pins each role to a reference: `<name>:<tag>` (`prod` is what runs)
@@ -336,6 +397,33 @@ Studio:
 - `agent prompts status` compares the copy with each pin; `push --tag T` commits each
   changed template and moves T; `pull` writes a Hub version back. Both refuse a template
   the code cannot render.
+
+## Storage
+
+- **Choice.** `PERSISTENCE=memory` (default) or `postgres` with `DATABASE_URL`, read
+  only by `bootstrap.py` (`build_platform_store`). The platform API and its simulation run
+  on it; Docker Compose sets `postgres`. The evals and Studio build a fresh in-memory
+  store per play (`memory_uow_factory`), whatever the setting: a play is a throwaway world.
+- **Schema.** `migrations/NNNN_name.sql`, applied in order by `agent db migrate`, each in
+  its own transaction with its row in `schema_migrations`; an applied file that changed is
+  refused (add a new file instead). `0001` holds the tables, `0002` enables pgvector,
+  which the facility memory's vector table uses. Then the command runs the setup of
+  LangGraph's Postgres store (the facility memory). Ids are text in the `C` collation, ties sort by natural
+  id (`id_order`) as in the memory store, foreign keys are checked at commit, the event log
+  refuses UPDATE and DELETE, and a load's metadata and a run record are JSONB.
+- **Transactions and locks.** One transaction per unit of work. `loads.get` locks the
+  load's row, `obligations.get` the obligation's; the queue claim and the due timers take
+  `FOR UPDATE SKIP LOCKED`, so several workers could share them; a partial unique index
+  allows one event in flight per load. The claim time is the runtime's clock, for the
+  claim lease.
+- **Lifecycle.** A reset (and a scenario) empties every domain table (`TRUNCATE`) and the
+  facility memory. On start the platform resumes a durable store: its virtual clock goes
+  to the latest time the loads hold, and delivered loads without an extraction job are
+  queued again. Attachment bytes go to `BLOBS_DIR` on Postgres, in memory otherwise.
+- **Tests.** `tests/contract/` runs every suite on both stores (Postgres when
+  `TEST_DATABASE_URL` or `DATABASE_URL` is set, marked `integration`, each test in a
+  schema of its own), the facility memory's included (`InMemoryStore` and
+  `AsyncPostgresStore`); `make integration` runs them with the Postgres-only tests.
 
 ## Layers
 

@@ -12,6 +12,8 @@ the API alone, and the UI runs on the Vite dev server.
 
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -55,13 +57,25 @@ def create_app(
     the environment or `.env`). A folder with no `index.html` serves nothing.
     """
     settings = Settings() if settings is None else settings
+    service = SimulationService(settings, llm=llm)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # On a durable store the platform goes on with the loads it holds.
+        await service.resume()
+        try:
+            yield
+        finally:
+            await service.close()
+
     app = FastAPI(
         title="Freight agent platform",
         description="Drive a load through time, play its contacts and the Hero team, and "
         "inspect every agent run.",
         version="0.1.0",
+        lifespan=lifespan,
     )
-    app.state.service = SimulationService(settings, llm=llm)
+    app.state.service = service
     app.state.scenarios = ScenarioRunner(app.state.service)
     app.state.heartbeat_s = heartbeat_s
     app.add_middleware(

@@ -39,6 +39,16 @@ read a message (`RunRecord.gate_engine`) and keeps the jev engine's probabilitie
 A tick also runs the document pipeline (`RuntimeDeps.documents`) between firing the
 timers and processing the queue, so a message's attachment is read before the queue
 runs and its `document_processed` event is queued behind the message.
+
+Facility memory (`application/memory.py`): a run reads the notes of its load's current
+and next stop from `RuntimeDeps.memory` in its knowledge node, and the run record keeps
+them. A run that sets its load to `delivered` queues the load's extraction
+(`RuntimeDeps.memory_queue`) once its commit is done, and the tick's last part, after the
+outbox, works through that queue (`RuntimeDeps.memory_extraction`). The queue sits beside
+the unit of work, not in it (it is the facility memory's store), so a crash between the
+commit and the queue, or a failed enqueue, leaves a delivered load without its job:
+`queue_missed_extractions` queues every such load again, and the platform calls it when
+it starts on a durable store. `agent memory extract --load` also runs one by hand.
 """
 
 import asyncio
@@ -71,11 +81,13 @@ from freight_agent.application.graph import (
     need,
 )
 from freight_agent.application.graph.build import AGENT, TRIAGE
+from freight_agent.application.memory import NullMemoryProcessor
 from freight_agent.application.prefilter import SkipReason
 from freight_agent.domain.documents import Document
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.events import Event, EventType
-from freight_agent.domain.load import Channel, DelayRisk, Load, Stage
+from freight_agent.domain.load import Channel, DelayRisk, Load, Stage, Stop
+from freight_agent.domain.memory import ExtractionJob, FacilityFact, facility_key
 from freight_agent.domain.outbox import OutboxItem, OutboxKind, OutboxStatus
 from freight_agent.domain.ping_filter import (
     PingFilterConfig,
@@ -91,6 +103,7 @@ from freight_agent.interfaces.documents import BlobStore, DocumentProcessor
 from freight_agent.interfaces.gateways import DeliveryError, Gateways
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import LanguageModel, LlmError
+from freight_agent.interfaces.memory import ExtractionQueue, FacilityMemory, MemoryProcessor
 from freight_agent.interfaces.prompts import PromptRole, Prompts
 from freight_agent.interfaces.repositories import EventLog, UnitOfWork, UnitOfWorkFactory
 from freight_agent.interfaces.tracing import Tracer
@@ -149,6 +162,20 @@ class RuntimeDeps:
     documents: DocumentProcessor = field(default_factory=NullDocumentProcessor)
     config: RuntimeConfig = field(default_factory=RuntimeConfig)
     decisions: DecisionModel | None = None  # the jev gate engine's model
+    # Facility memory: the notes runs read, the loads queued for extraction, and what the
+    # tick runs to extract them. None and the null processor: no facility memory.
+    memory: FacilityMemory | None = None
+    memory_queue: ExtractionQueue | None = None
+    memory_extraction: MemoryProcessor = field(default_factory=NullMemoryProcessor)
+
+
+@dataclass(frozen=True)
+class StopFacts:
+    """One stop of a load and its client's facts about the stop's facility."""
+
+    stop: Stop
+    facility_key: str
+    facts: tuple[FacilityFact, ...]
 
 
 @dataclass
@@ -181,8 +208,11 @@ def graph_deps(deps: RuntimeDeps) -> GraphDeps:
     timeout_s = deps.config.llm_timeout_s
     return GraphDeps(
         gate=build_gate(deps),
-        agent=Agent(deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=timeout_s),
+        agent=Agent(
+            deps.llm, deps.knowledge, deps.prompts.agent, timeout_s=timeout_s, memory=deps.memory
+        ),
         knowledge=deps.knowledge,
+        memory=deps.memory,
     )
 
 
@@ -468,7 +498,49 @@ class AgentRuntime:
             await uow.runs.save(record)
             await uow.queue.complete(event_id)
             await uow.commit()
+        if result.load.stage is Stage.DELIVERED and state.ctx.load.stage is not Stage.DELIVERED:
+            await self._queue_extraction(result.load)
         return _Finished(record, stored=True, trace_id=attempt.trace_id)
+
+    async def _queue_extraction(self, load: Load) -> None:
+        """Queue the delivered load's facility memory extraction. Fail-open: the run is
+        committed, and a lost job only means its facts are not learned."""
+        queue = self._deps.memory_queue
+        if queue is None:
+            return
+        job = ExtractionJob(
+            load_id=load.load_id, client_id=load.broker_id, queued_at=self._deps.clock.now()
+        )
+        try:
+            await queue.enqueue(job)
+        except Exception:
+            logger.warning(
+                "the facility memory extraction of load %s was not queued",
+                load.load_id,
+                exc_info=True,
+            )
+
+    async def queue_missed_extractions(self) -> list[str]:
+        """Queue the extraction of every delivered load that has no job: one whose job
+        was lost between its run's commit and the queue. Returns the loads it queued.
+        Idempotent: a load with a job, pending, done or failed, is left alone."""
+        queue = self._deps.memory_queue
+        if queue is None:
+            return []
+        async with self._uow() as uow:
+            loads = [await uow.loads.get(load_id) for load_id in await uow.loads.list_ids()]
+        queued: list[str] = []
+        for load in loads:
+            if load is None or load.stage is not Stage.DELIVERED:
+                continue
+            if await queue.get(load.broker_id, load.load_id) is not None:
+                continue
+            job = ExtractionJob(
+                load_id=load.load_id, client_id=load.broker_id, queued_at=self._deps.clock.now()
+            )
+            if await queue.enqueue(job):
+                queued.append(load.load_id)
+        return queued
 
     async def _fail(self, attempt: _Attempt, exc: Exception) -> _Finished:
         error = f"{type(exc).__name__}: {exc}"
@@ -517,6 +589,7 @@ class AgentRuntime:
             prompts=self._prompts_used(state),
             gate_engine=state.gate.engine if state and state.gate else None,
             gate_scores=state.gate.scores if state and state.gate else None,
+            facility_facts=state.facility_facts if state else (),
         )
 
     def _prompts_used(self, state: RunState | None) -> dict[str, str]:
@@ -602,11 +675,18 @@ class AgentRuntime:
         return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
 
     async def tick(self) -> list[RunRecord]:
-        """queue_due_events, then process_all, then dispatch_outbox."""
+        """queue_due_events, then process_all, then dispatch_outbox, then
+        process_background."""
         await self.queue_due_events()
         runs = await self.process_all()
         await self.dispatch_outbox()
+        await self.process_background()
         return runs
+
+    async def process_background(self) -> list[ExtractionJob]:
+        """The end of a tick: the facility memory extraction of the loads delivered so
+        far. It never acts on a load, so it runs after the outbox."""
+        return await self._deps.memory_extraction.process_pending()
 
     async def queue_due_events(self) -> None:
         """The start of a tick: fire the due timers, then read the pending documents, so
@@ -617,6 +697,26 @@ class AgentRuntime:
         await self._deps.documents.process_pending()
 
     # --- read model -------------------------------------------------------------------------
+
+    @property
+    def facility_memory(self) -> FacilityMemory | None:
+        """The facility memory the runs read, for the platform and the eval harness."""
+        return self._deps.memory
+
+    async def facility_facts(self, load_id: str) -> list[StopFacts]:
+        """Each stop of the load with its client's facts about the stop's facility, in stop
+        order. Raises `DomainError` for an unknown load."""
+        async with self._uow() as uow:
+            load = await uow.loads.get(load_id)
+        if load is None:
+            raise DomainError(f"unknown load {load_id!r}")
+        memory = self._deps.memory
+        found: list[StopFacts] = []
+        for stop in sorted(load.stops, key=lambda s: s.sequence):
+            key = facility_key(stop)
+            facts = await memory.recall(load.broker_id, key, limit=100) if memory else []
+            found.append(StopFacts(stop=stop, facility_key=key, facts=tuple(facts)))
+        return found
 
     async def snapshot(self, load_id: str) -> LoadSnapshot:
         """Everything stored for the load. Raises `DomainError` for an unknown load."""

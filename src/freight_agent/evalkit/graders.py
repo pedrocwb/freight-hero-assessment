@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict
 
 from freight_agent.domain.load import Load
+from freight_agent.domain.memory import FacilityFact, facility_key
 from freight_agent.domain.obligations import Obligation
 from freight_agent.domain.outbox import OutboxItem, OutboxKind
 from freight_agent.domain.runs import RunRecord, RunStatus, TrajectoryStep
@@ -38,6 +39,7 @@ from freight_agent.evalkit.results import Failure, StepObservation
 from freight_agent.evalkit.spec import (
     ActionMatcher,
     Expectation,
+    MemoryMatcher,
     ObligationExpectation,
     Scenario,
     Step,
@@ -90,6 +92,7 @@ def grade_step(
             *_check_run_status(expect.run_status, obs.runs),
             *_check_llm_calls(expect.llm_calls, obs),
             *_check_runs(expect.runs, obs),
+            *_check_memories(expect.memories, expect.no_memories, obs),
         ]
     if "trajectory" in groups:
         findings += _check_trajectory(expect, obs.runs)
@@ -137,6 +140,8 @@ def declared_checks(step: Step) -> list[str]:
     names += ["expect.no_actions"] if expect.no_actions else []
     names += [f"forbid[{i}]" for i in range(len(step.forbid))]
     names += [f"expect.obligations.{kind}" for kind in expect.obligations]
+    names += [f"expect.memories[{i}]" for i in range(len(expect.memories))]
+    names += [f"expect.no_memories[{i}]" for i in range(len(expect.no_memories))]
     optional: dict[str, object] = {
         "expect.timers": expect.timers,
         "expect.run_status": expect.run_status or None,
@@ -189,6 +194,67 @@ def _check_forbid(matchers: Sequence[ActionMatcher], items: Sequence[OutboxItem]
                 f"expected no {_describe_matcher(matcher)}, found {len(found)}: "
                 f"{_list_items(found)}",
             )
+
+
+def _check_memories(
+    wanted: Sequence[MemoryMatcher], unwanted: Sequence[MemoryMatcher], obs: StepObservation
+) -> _Findings:
+    """The facility notes of the load's stops at the end of the step."""
+    stops = {s.sequence: facility_key(s) for s in obs.snapshot.load.stops}
+    notes = obs.memories
+    for index, matcher in enumerate(wanted):
+        found = _select_notes(matcher, notes, stops)
+        if matcher.count is None and not found:
+            want = "at least 1"
+        elif matcher.count is not None and len(found) != matcher.count:
+            want = f"exactly {matcher.count}"
+        else:
+            continue
+        yield (
+            f"expect.memories[{index}]",
+            f"expected {want} {_describe_note_matcher(matcher)}, found {len(found)}; "
+            f"notes: {_list_notes(notes)}",
+        )
+    for index, matcher in enumerate(unwanted):
+        found = _select_notes(matcher, notes, stops)
+        if found:
+            yield (
+                f"expect.no_memories[{index}]",
+                f"expected no {_describe_note_matcher(matcher)}, found {len(found)}: "
+                f"{_list_notes(found)}",
+            )
+
+
+def _select_notes(
+    matcher: MemoryMatcher, notes: Sequence[FacilityFact], stops: Mapping[int, str]
+) -> list[FacilityFact]:
+    key = stops.get(matcher.stop)
+    pattern = re.compile(matcher.regex, re.IGNORECASE) if matcher.regex else None
+    return [
+        n
+        for n in notes
+        if n.facility_key == key
+        and (matcher.kind is None or n.kind == matcher.kind)
+        and all(c.lower() in n.text.lower() for c in matcher.contains)
+        and (pattern is None or pattern.search(n.text))
+    ]
+
+
+def _describe_note_matcher(matcher: MemoryMatcher) -> str:
+    parts = [f"note on stop {matcher.stop}"]
+    if matcher.kind is not None:
+        parts.append(f"kind {matcher.kind.value}")
+    if matcher.contains:
+        parts.append("containing " + ", ".join(repr(c) for c in matcher.contains))
+    if matcher.regex:
+        parts.append(f"matching /{matcher.regex}/")
+    return " ".join(parts)
+
+
+def _list_notes(notes: Sequence[FacilityFact]) -> str:
+    if not notes:
+        return "none"
+    return "; ".join(f"{n.facility_name} ({n.kind.value}): {n.text!r}" for n in notes)
 
 
 def _check_obligations(

@@ -256,6 +256,37 @@ export interface RunRecord {
   rejections: number;
   /** The graph nodes the run went through, in order, one entry per visit (`GET /api/graph` ids). */
   nodes: string[];
+  /** The facility notes the agent's prompt showed: the load's current and next stop. */
+  facility_facts?: FacilityFact[];
+}
+
+// --- facility memory (api/routes/loads.py) -------------------------------------------
+
+export type FactKind = "check_in" | "hours" | "requirement" | "access" | "contact" | "other";
+
+/** One note an earlier load of the same client left about a facility. Untrusted text. */
+export interface FacilityFact {
+  fact_id: string;
+  client_id: string;
+  facility_key: string;
+  facility_name: string;
+  text: string;
+  kind: FactKind;
+  source_load_id: string;
+  source_event_id: string;
+  source_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `GET /api/loads/{id}/facility-memory`: one entry per stop, in stop order. */
+export interface StopNotes {
+  sequence: number;
+  type: "pickup" | "delivery";
+  name: string;
+  address: string;
+  facility_key: string;
+  facts: FacilityFact[];
 }
 
 // --- API read models -----------------------------------------------------------------
@@ -719,6 +750,8 @@ export function createApi(fetcher: Fetcher, base = "/api") {
       }),
     loadDocuments: (loadId: string) =>
       call<DocumentView[]>({ method: "GET", path: `${load(loadId)}/documents` }),
+    facilityMemory: (loadId: string) =>
+      call<StopNotes[]>({ method: "GET", path: `${load(loadId)}/facility-memory` }),
   };
 }
 

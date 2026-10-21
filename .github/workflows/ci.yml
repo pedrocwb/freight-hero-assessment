@@ -1,7 +1,8 @@
 # The quality gates of every change: lint, types, layer rules, tests with coverage and
 # the SOP lint. Each gate is a Makefile target, so `make ci` runs the same checks locally.
 # The scenario evals are live LangSmith experiments that spend money, so they run by hand
-# (evals-live.yml), never here. The image build is a job of its own (`docker build .`).
+# (evals-live.yml), never here. The Postgres tests (`make integration`) and the image build
+# are jobs of their own.
 name: CI
 
 on:
@@ -71,6 +72,53 @@ jobs:
       # Errors in any SOP file fail the build; sections no scenario covers only warn.
       - name: SOP lint
         run: make sop-lint
+
+  # The Postgres tests: every contract suite on Postgres too, the migrations, the
+  # platform's restart and the assignment's scenario on both stores.
+  integration:
+    name: Integration tests (Postgres)
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # The image of docker-compose.yml: Postgres 17 with pgvector.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+          POSTGRES_DB: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent -d agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://agent:agent@localhost:5432/agent
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # What the compose `migrate` service runs before the app, from an empty database.
+      - name: Migrations (agent db migrate)
+        run: uv run agent db migrate
+
+      # `-rs` lists what was skipped and why: nothing should be.
+      - name: Integration tests
+        run: make integration TEST_DATABASE_URL=$DATABASE_URL
 
   # The image `docker compose up --build` runs: it builds (web UI included), starts with
   # no key (the platform says the model is not ready), answers and serves the UI.

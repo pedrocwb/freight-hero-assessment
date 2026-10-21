@@ -33,6 +33,7 @@ from freight_agent.adapters.llm.unavailable import UnavailableModel
 from freight_agent.adapters.observability.langsmith import LangSmithLinks
 from freight_agent.adapters.observability.null import NullTracer
 from freight_agent.adapters.persistence.memory.store import MemoryStore, MemoryUnitOfWork
+from freight_agent.adapters.persistence.postgres.store import PostgresUnitOfWorkFactory
 from freight_agent.adapters.prompts.hub import HubClient, LangSmithPromptRegistry, PromptHub
 from freight_agent.adapters.prompts.local import LocalPromptRegistry
 from freight_agent.adapters.sop.files import FileSopRepository
@@ -717,3 +718,185 @@ def test_on_jev_a_models_file_without_the_gates_decision_model_stops_the_build(
 
     with pytest.raises(BootstrapError, match=r"no decisions\.gate entry"):
         build_decisions(_settings(models_config=models, openrouter_api_key=KEY))
+
+
+# --- persistence -------------------------------------------------------------------------
+
+
+def test_the_store_is_in_memory_by_default_and_each_call_is_a_new_one() -> None:
+    first = bootstrap.build_platform_store(_settings())
+    second = bootstrap.build_uow_factory(_settings())
+
+    assert first.durable is False
+    assert isinstance(first.uow_factory(), MemoryUnitOfWork)
+    assert first.uow_factory is not second
+
+
+async def test_clearing_the_memory_store_forgets_its_loads(load: Load) -> None:
+    store = bootstrap.build_platform_store(_settings())
+    async with store.uow_factory() as uow:
+        await uow.loads.save(load)
+        await uow.commit()
+
+    await store.clear()
+    await store.close()
+
+    async with store.uow_factory() as uow:
+        assert await uow.loads.list_ids() == []
+
+
+def test_postgres_needs_its_database_url() -> None:
+    with pytest.raises(MissingSetting, match="DATABASE_URL"):
+        bootstrap.build_platform_store(_settings(persistence="postgres"))
+
+
+def test_postgres_is_a_durable_store_whose_pool_opens_on_first_use() -> None:
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+
+    store = bootstrap.build_platform_store(_settings(persistence="postgres", database_url=url))
+
+    assert store.durable is True
+    assert isinstance(store.uow_factory, PostgresUnitOfWorkFactory)
+    assert store.uow_factory.pool.closed  # nothing connects before the first unit of work
+
+
+def test_studio_and_eval_worlds_are_fresh_memory_stores() -> None:
+    first, second = bootstrap.memory_uow_factory(), bootstrap.memory_uow_factory()
+
+    assert isinstance(first(), MemoryUnitOfWork)
+    assert first is not second
+
+
+# --- facility memory ---------------------------------------------------------------------
+
+
+def test_the_facility_memory_embeds_offline_without_the_key_or_when_asked() -> None:
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    assert isinstance(build_embeddings(_settings()), HashEmbeddings)
+    keyed = _settings(openrouter_api_key="sk-test", memory_embeddings="fake")
+    assert isinstance(build_embeddings(keyed), HashEmbeddings)
+
+
+def test_with_the_key_the_facility_memory_embeds_with_the_configured_model() -> None:
+    from freight_agent.adapters.memory.embeddings import OpenRouterEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    embeddings = build_embeddings(_settings(openrouter_api_key="sk-test"))
+
+    assert isinstance(embeddings, OpenRouterEmbeddings)
+    assert (embeddings.config.model, embeddings.dims) == ("openai/text-embedding-3-small", 1536)
+
+
+def test_a_models_file_without_memory_embeddings_embeds_offline(tmp_path: Path) -> None:
+    import yaml
+
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings
+    from freight_agent.bootstrap import build_embeddings
+
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
+    del data["embeddings"]
+    models = tmp_path / "models.yaml"
+    models.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    settings = _settings(openrouter_api_key="sk-test", models_config=models)
+
+    assert isinstance(build_embeddings(settings), HashEmbeddings)
+
+
+def test_the_runtime_gets_a_facility_memory_and_its_extraction() -> None:
+    from freight_agent.adapters.memory.store import StoreFacilityMemory
+    from freight_agent.application.memory import MemoryExtractor
+    from freight_agent.bootstrap import build_memory, build_runtime_deps
+
+    deps = build_runtime_deps(_settings())
+
+    assert isinstance(deps.memory, StoreFacilityMemory)
+    assert deps.memory_queue is deps.memory
+    assert isinstance(deps.memory_extraction, MemoryExtractor)
+    assert deps.memory_extraction.prompt.role.value == "memory"
+    given = build_memory(_settings())
+    assert build_runtime_deps(_settings(), memory=given).memory is given
+
+
+def test_the_platform_facility_memory_is_in_memory_by_default() -> None:
+    from langgraph.store.memory import InMemoryStore
+
+    platform = bootstrap.build_platform_memory(_settings())
+
+    assert platform.durable is False
+    assert isinstance(platform.memory.store, InMemoryStore)
+
+
+def test_the_facility_memory_on_postgres_needs_its_database_url() -> None:
+    with pytest.raises(MissingSetting, match="DATABASE_URL"):
+        bootstrap.build_platform_memory(_settings(persistence="postgres"))
+
+
+def test_on_postgres_the_facility_memory_is_langgraphs_store_at_the_models_width() -> None:
+    from freight_agent.adapters.memory.embeddings import HashEmbeddings, OpenRouterEmbeddings
+    from freight_agent.adapters.memory.postgres import LazyPostgresStore
+
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    offline = bootstrap.build_platform_memory(_settings(persistence="postgres", database_url=url))
+    keyed = bootstrap.build_platform_memory(
+        _settings(persistence="postgres", database_url=url, openrouter_api_key="sk-test")
+    )
+
+    embedders: list[object] = []
+    for platform in (offline, keyed):
+        store = platform.memory.store
+        assert platform.durable is True
+        assert isinstance(store, LazyPostgresStore)
+        assert store.pool.closed  # nothing connects before the first operation
+        index = cast(dict[str, Any], store.index)
+        assert (index["dims"], index["fields"]) == (1536, ["text"])
+        embedders.append(index["embed"])
+    # Without the key the offline hash is built at the table's width.
+    hashed, live = embedders
+    assert isinstance(hashed, HashEmbeddings) and hashed.dims == 1536
+    assert isinstance(live, OpenRouterEmbeddings)
+
+
+def test_embeddings_of_another_width_than_the_postgres_table_stop_the_build() -> None:
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    settings = _settings(persistence="postgres", database_url=url)
+
+    from freight_agent.adapters.memory.embeddings import OpenRouterEmbeddings
+
+    class Narrow(OpenRouterEmbeddings):
+        @property
+        def dims(self) -> int:
+            return 3
+
+    config = bootstrap.load_models_config(MODELS_YAML)
+    entry = config.embeddings["memory"]
+    narrow = Narrow(entry, config.pricing_for(entry.model), SecretStr("sk-test"))
+
+    with pytest.raises(BootstrapError, match="1536"):
+        bootstrap.build_platform_memory(settings, embeddings=narrow)
+
+
+def test_the_runtime_on_the_settings_store_gets_the_platform_facility_memory() -> None:
+    from freight_agent.adapters.memory.postgres import LazyPostgresStore
+
+    url = SecretStr("postgresql://agent:agent@db.invalid:5432/agent")
+    settings = _settings(persistence="postgres", database_url=url)
+
+    own = build_runtime_deps(settings)
+    play = build_runtime_deps(settings, persistence=bootstrap.memory_uow_factory())
+
+    assert isinstance(cast(Any, own.memory).store, LazyPostgresStore)
+    assert not isinstance(cast(Any, play.memory).store, LazyPostgresStore)
+
+
+def test_the_memory_width_falls_back_without_a_memory_embeddings_model(tmp_path: Path) -> None:
+    import yaml
+
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
+    del data["embeddings"]
+    models = tmp_path / "models.yaml"
+    models.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    assert bootstrap.memory_dims(_settings(models_config=models)) == bootstrap.DEFAULT_MEMORY_DIMS

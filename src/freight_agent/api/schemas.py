@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 from freight_agent.application.contracts import InboundMessage, LocationPing
 from freight_agent.domain.documents import Document, DocumentStatus, FieldCheck
 from freight_agent.domain.events import Attachment
-from freight_agent.domain.load import Channel, DelayRisk, Stage
+from freight_agent.domain.load import Channel, DelayRisk, Stage, StopType
+from freight_agent.domain.memory import FacilityFact
 from freight_agent.domain.runs import RunRecord
 from freight_agent.domain.sop import ResolvedSection, SearchHit
 
@@ -195,3 +196,15 @@ class DocumentView(_Body):
     @classmethod
     def of(cls, document: Document) -> "DocumentView":
         return cls.model_validate(document.model_dump(exclude={"blob_ref"}))
+
+
+class StopNotesView(_Body):
+    """One stop of a load and its client's facility notes about the stop's place
+    (`GET /api/loads/{load_id}/facility-memory`), the most recently updated first."""
+
+    sequence: int
+    type: StopType
+    name: str
+    address: str
+    facility_key: str
+    facts: tuple[FacilityFact, ...]

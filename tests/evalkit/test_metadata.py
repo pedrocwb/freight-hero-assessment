@@ -46,7 +46,7 @@ def test_the_prompts_are_each_roles_version_and_the_reference_it_came_from() -> 
     found = collect(prompts=PROMPTS)
 
     assert found.prompts == PROMPTS.versions()
-    roles = ("gate", "agent", "extract", "judge", "gate_decision")
+    roles = ("gate", "agent", "extract", "judge", "gate_decision", "memory")
     assert set(found.prompts) == set(roles)
     assert all(v.startswith("local:") and len(v) == 18 for v in found.prompts.values())
     assert found.prompt_refs == {role: str(PROMPTS_DIR / f"{role}.yaml") for role in roles}

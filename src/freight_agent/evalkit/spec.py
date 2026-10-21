@@ -29,6 +29,11 @@ Player semantics (implemented in `evalkit.runner`):
    `{"broker": {"id": "keystone", "name": "Keystone Freight"}, "load_types": ["reefer"]}`.
 7. Tags of the form `sop:<section_id>` declare which SOP sections a scenario
    covers; the SOP coverage lint reads them.
+8. `memories` are facility notes an earlier load left, written into the trial's facility
+   memory before the first step: each names a stop of the scenario's load (by sequence),
+   for the load's client unless it names another `client`. `expect.memories` and
+   `expect.no_memories` check the notes of the load's stops at the end of a step, after
+   the tick's facility memory extraction (`application/memory.py`).
 """
 
 import re
@@ -41,6 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from freight_agent.domain.actions import Purpose
 from freight_agent.domain.load import Channel, DelayRisk, Stage
+from freight_agent.domain.memory import FactKind
 from freight_agent.domain.obligations import ObligationStatus
 from freight_agent.domain.outbox import OutboxKind
 from freight_agent.domain.runs import RunStatus
@@ -89,6 +95,39 @@ class ActionMatcher(_Spec):
         default=None, description="Why an SMS or email was sent (payload purpose)"
     )
     stage: Stage | None = Field(default=None, description="The new stage of a stage_update")
+    count: int | None = Field(
+        default=None, description="Exact number of matches; default at least 1"
+    )
+
+    @field_validator("regex")
+    @classmethod
+    def _compiles(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(f"invalid regex {value!r}: {exc}") from exc
+        return value
+
+
+class MemorySeed(_Spec):
+    """A facility note an earlier load left, in the trial's memory before the first step."""
+
+    stop: int = Field(description="The stop sequence of the scenario's load the note is about")
+    text: str = Field(min_length=1)
+    kind: FactKind = FactKind.OTHER
+    learned_on: date = Field(description="The day it was told")
+    load_id: str = Field(default="earlier-load", description="The load it was told on")
+    client: str | None = Field(default=None, description="Default: the load's broker")
+
+
+class MemoryMatcher(_Spec):
+    """Matches the facility notes of one stop of the load, at the end of a step."""
+
+    stop: int = Field(description="The stop sequence whose facility's notes are checked")
+    contains: tuple[str, ...] = Field(default=(), description="Case-insensitive substrings")
+    regex: str | None = None
+    kind: FactKind | None = None
     count: int | None = Field(
         default=None, description="Exact number of matches; default at least 1"
     )
@@ -156,6 +195,13 @@ class Expectation(_Spec):
     judge: JudgeSpec | None = Field(
         default=None, description="The judge grades the step's texts against this rubric"
     )
+    # Facility memory: the notes of the load's stops at the end of the step.
+    memories: tuple[MemoryMatcher, ...] = Field(
+        default=(), description="Facility notes that must exist at the end of the step"
+    )
+    no_memories: tuple[MemoryMatcher, ...] = Field(
+        default=(), description="Facility notes that must not exist at the end of the step"
+    )
 
     @model_validator(mode="after")
     def _rejection_bounds(self) -> "Expectation":
@@ -202,6 +248,9 @@ class Scenario(_Spec):
     date: date
     start: str
     run_latency_seconds: int = 60
+    memories: tuple[MemorySeed, ...] = Field(
+        default=(), description="Facility notes in the memory before the first step"
+    )
     steps: tuple[Step, ...] = Field(min_length=1)
 
     @model_validator(mode="after")

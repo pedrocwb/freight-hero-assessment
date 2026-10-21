@@ -10,7 +10,9 @@ dependencies = [
     "langchain>=1.0",
     "langchain-openrouter>=0.2.9",
     "langgraph>=1.0",
+    "langgraph-checkpoint-postgres>=2.0",
     "langsmith>=0.4",
+    "psycopg[binary,pool]>=3.2",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "pypdfium2>=4.30",
@@ -56,7 +58,8 @@ asyncio_mode = "auto"
 addopts = "-q --strict-markers"
 markers = [
     "unit: fast tests with no network",
-    "contract: port contract suites, run against the memory store",
+    "contract: interface contract suites, run on the memory store (and Postgres, see integration)",
+    "integration: needs a Postgres database (TEST_DATABASE_URL or DATABASE_URL); skipped without one",
     "property: hypothesis property tests",
 ]
 

@@ -1,0 +1,65 @@
+# M3: a delivered load teaches the facility memory. At the Valley DC the driver tells us
+# that the PO is needed at the gate and that check-in is at gate 4, with the shipping
+# office's phone number. Once the load is delivered, the extraction reads the load's
+# messages (one `memory` call) and the facility keeps two notes: the PO at the gate and
+# gate 4. The phone number is never stored (domain/memory.py), and nothing is noted on
+# the pickup, which no message was about.
+#
+# Timeline (Northline, load 481207 to_delivery, 2026-10-14, America/Los_Angeles):
+#   step 0  09:10  driver SMS at the Valley DC with the two facts and a phone number.
+#           09:11  run: gate (status_update, act); the agent writes a TMS note and sets
+#                  the stage to at_delivery (status_updates).
+#   step 1  09:50  driver SMS with only the POD (pod_clean.pdf).
+#           09:51  tick: the document pipeline reads the POD (processed, every check
+#                  ok); the message run does nothing; the document_processed run sets
+#                  the load to delivered with a TMS note (documents). At the end of the
+#                  tick, the extraction of the delivered load: the Valley DC's notes.
+id: m3_delivered_load_teaches_the_facility
+title: "Facility memory: a delivered load leaves notes on its facility"
+suite: memory
+tags: [regression, sop:status_updates, sop:documents]
+description: >-
+  The driver says at the Valley DC that the PO is required at the gate and check-in is
+  at gate 4. After the POD delivers the load, the facility has those two notes, and no
+  phone number.
+load: fixtures/load_481207.json
+load_overrides:
+  stage: to_delivery
+date: 2026-10-14
+start: "09:00"
+steps:
+  - at: "09:10"
+    note: "At the Valley DC: the PO is needed at the gate, check-in is at gate 4"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: "Checked in at Valley DC. Heads up for next time: they need the PO at the gate and check-in is at gate 4. Shipping office is 775-555-0142 if the gate is closed."
+    expect:
+      actions:
+        - {kind: stage_update, stage: at_delivery, count: 1}
+      no_memories:
+        - {stop: 2, regex: "."}
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}
+
+  - at: "09:50"
+    note: "The POD delivers the load; the extraction leaves the facility's notes"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: ""
+      attachments:
+        - {filename: pod_clean.pdf, fixture: fixtures/docs/pod_clean.pdf, content_type: application/pdf}
+    expect:
+      actions:
+        - {kind: stage_update, stage: delivered, count: 1}
+      memories:
+        - {stop: 2, contains: ["gate 4"]}
+        - {stop: 2, contains: ["PO"]}
+      no_memories:
+        - {stop: 2, regex: "\\d{3}[-. ]?\\d{4}"}
+        - {stop: 1, regex: "."}
+    forbid:
+      - {kind: email}
+      - {kind: hero_task}

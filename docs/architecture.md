@@ -67,9 +67,10 @@ flowchart LR
   runtime -. "traces; templates at start" .-> langsmith
 ```
 
-Built: the runtime, the in-memory store, the SOP files, the OpenRouter and LangSmith
-adapters, the platform (FastAPI and a React UI) that plays every contact. Not built: real
-integrations (the gateways record what they would send), Postgres, an always-on worker.
+Built: the runtime, the load memory and the facility memory in memory or in Postgres
+(`PERSISTENCE`; the facility notes on LangGraph's store with pgvector), the SOP files, the OpenRouter and LangSmith adapters, the platform (FastAPI and a React UI) that
+plays every contact. Not built: real integrations (the gateways record what they would
+send), an always-on worker.
 
 ## 2. Code layers
 
@@ -80,7 +81,7 @@ flowchart TB
   app["application/: run context, prefilter, gate, agent and tools, run graph, executor, runtime, document pipeline"]
   interfaces["interfaces/: repositories, SOP index, language model, decision model, prompts, gateways, blobs, page reader, clock, tracer"]
   domain["domain/: load, events, obligations, timers, rules and validation, SOP merge, catalog, documents, actions"]
-  adapters["adapters/: memory store, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
+  adapters["adapters/: memory and Postgres stores, OpenRouter with retries and fallbacks, OpenRouter Decisions API, SOP files, Prompt Hub, pypdfium2, LangSmith, recording gateways"]
 
   entry --> boot
   boot --> app
@@ -214,6 +215,53 @@ Every run reads one snapshot of this memory (`application/context.py`); it never
 on anything kept in the process between runs. The agent's own actions come back as
 `agent_action` events, so the next run reads what was sent, to whom and when.
 
+The memory lives in the store `PERSISTENCE` names, behind the interfaces of
+`interfaces/repositories.py`: in the process (`adapters/persistence/memory/`, the default,
+the tests, the evals and Studio, each play in a fresh world), or in Postgres
+(`adapters/persistence/postgres/`, the Docker Compose platform), one table per entity of
+the diagram plus `risk_trackers` and `event_queue` (`migrations/`, applied by
+`agent db migrate`). A unit of work is one transaction; the queue claim and the due
+timers skip rows another worker holds (`FOR UPDATE SKIP LOCKED`); a partial unique index
+allows one event in flight per load. Both stores pass the same contract suites.
+
+### Facility memory, across loads
+
+The memory above ends with its load. Facility notes outlive it: what a driver learns about
+a pickup or a delivery place is kept for the next load of the same client at that place.
+
+```mermaid
+flowchart LR
+  subgraph run["A run (knowledge node, outside the units of work)"]
+    K["facts_in_view: current and next stop"] --> P["agent prompt: Facility notes (untrusted)"]
+    T["recall_facility tool"]
+  end
+  subgraph store["LangGraph store: AsyncPostgresStore with pgvector, or InMemoryStore"]
+    N[("facility_memory / client / facility key: one item per note, text embedded")]
+    J[("facility_memory_jobs / client: one job per delivered load")]
+  end
+  C["commit of the run that sets delivered"] -->|enqueue| J
+  X["tick, after the outbox: MemoryExtractor"] -->|pending| J
+  X -->|"one memory model call: add, update, delete, each citing an event"| G["guardrails in code (domain/memory.py)"]
+  G -->|"writes that pass, one client's namespace"| N
+  K -->|recall by client and facility| N
+  T -->|semantic search by client| N
+```
+
+- A note (`FacilityFact`) is one short text with a kind (`check_in`, `hours`,
+  `requirement`, `access`, `contact`, `other`), its facility (`facility_key`: the stop's
+  normalized name and address), its client, and its source: the load, the inbound event and
+  when it was said.
+- Embeddings: `openai/text-embedding-3-small` on OpenRouter (`embeddings.memory` in
+  `config/models.yaml`), or a deterministic offline hash without the key and in the tests.
+- The store is any LangGraph `BaseStore` (`adapters/memory/store.py`). With
+  `PERSISTENCE=postgres` it is LangGraph's `AsyncPostgresStore` in the load memory's
+  database (`adapters/memory/postgres.py`): the notes in its `store` table, their text's
+  vectors in `store_vectors` under an HNSW index, created by `agent db migrate`. Otherwise,
+  and always in the tests, the evals and Studio, an `InMemoryStore` with the same index.
+- A job is queued after the delivering run's commit, outside its transaction. A crash in
+  between leaves a delivered load without a job; when the platform starts on Postgres it
+  queues every such load again (`AgentRuntime.queue_missed_extractions`).
+
 ## 6. Load 481207, 07:00 to 08:01
 
 ```mermaid
@@ -339,7 +387,8 @@ each role and the SOP hash. Promotion of a prompt: edit, `push --tag candidate`,
 
 ## 10. Production at 10x (designed)
 
-Not built. The interfaces stay the same; the adapters behind them change.
+Not built, except Postgres, which the platform already runs on. The interfaces stay the
+same; the adapters behind them change.
 
 ```mermaid
 flowchart LR
@@ -363,5 +412,5 @@ flowchart LR
 ```
 
 Sizing and the reasons for each piece are in [`answers.md`, 5.2](answers.md#52-volume-x10-what-must-change).
-An earlier build of the Postgres adapter, the timer claim with `SKIP LOCKED`, the pgvector
-search and the operational metrics is at the git tag `full-platform`.
+An earlier build of the pgvector search and the operational metrics is at the git tag
+`full-platform`.

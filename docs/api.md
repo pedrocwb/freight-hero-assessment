@@ -14,8 +14,9 @@ Base path `/api`, JSON everywhere. Domain objects are serialized as they are
 simulation's timezone, and a request time without an offset is read in that timezone.
 
 The API runs **one simulation in process**: the same `AgentRuntime` as the evals and the
-CLI, built by the composition root, on a virtual clock, an in-memory store and recording
-gateways (nothing is sent anywhere). The model is always the live one on OpenRouter: every
+CLI, built by the composition root, on a virtual clock, the store `PERSISTENCE` names (in
+memory by default; Postgres in Docker Compose, where loads, runs, the ledger and the
+facility notes survive a restart) and recording gateways (nothing is sent anywhere). The model is always the live one on OpenRouter: every
 run that reaches a model spends from `OPENROUTER_API_KEY`. Without the key the platform
 starts, `SimState.model_ready` is false, scenarios cannot start (503), and a run that
 needs the model escalates to a Hero. With `LANGSMITH_TRACING=true` and its key, each run
@@ -35,8 +36,10 @@ from a client is refused with 409.
 | POST | `/api/sim/tick` | | `StepResult` |
 
 - A new app, and `reset` without `start`, starts at `2026-10-13T06:55` in
-  `America/Los_Angeles`, five minutes before the assignment's ping. `reset` clears the
-  loads, runs, documents and blobs. An unknown timezone is a 400 and the old simulation
+  `America/Los_Angeles`, five minutes before the assignment's ping; a new app on a
+  Postgres store that holds loads starts at the latest time they hold instead. `reset`
+  clears the loads, runs, documents, blobs and facility notes (on Postgres, every domain
+  table and the facility memory's items). An unknown timezone is a 400 and the old simulation
   stays.
 - `advance` moves time as the scenario player does: it stops at every pending timer due
   on the way, in due order, sets the clock there and ticks (timers fire with zero
@@ -73,6 +76,7 @@ to template version), `skip_reason`, `error`, `broker_id`, `trace_url`.
 | POST | `/api/loads` | the assignment's load metadata JSON, plus optional `load_types` | `LoadSummary` (201); 400 with the reason on invalid metadata; 409 when the `load_id` exists |
 | GET | `/api/loads/{load_id}` | | `LoadSnapshot` = `{"load", "obligations", "timers", "events", "outbox", "runs"}`; 404 for an unknown load |
 | GET | `/api/loads/{load_id}/runs` | | `[Run]`, oldest first |
+| GET | `/api/loads/{load_id}/facility-memory` | | one entry per stop, in order: `{sequence, type, name, address, facility_key, facts}`, the client's notes on that place, most recent first; 404 for an unknown load |
 | GET | `/api/fixtures` | | `[{"name", "metadata"}]` |
 
 The list of loads is in `SimState.loads`. The fixtures are every `evals/fixtures/*.json`

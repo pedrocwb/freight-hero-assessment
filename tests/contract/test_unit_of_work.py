@@ -1,7 +1,8 @@
 """Contract suite for `UnitOfWork` and its repositories (`interfaces/repositories.py`).
 
-The memory store (unit tests, evals, the simulation) must pass it, each test on a fresh,
-empty store.
+Every implementation must pass it, so that the memory store (unit tests, evals, Studio)
+and Postgres (the platform, `PERSISTENCE=postgres`) are interchangeable. The suite runs
+once per entry of `uow_factories.UOW_FACTORIES`, each test on a fresh, empty store.
 
 It pins down what the interface docstrings leave implicit: the order of every list and its
 tie-break, a rejected duplicate that leaves the unit of work usable, queue state that
@@ -26,7 +27,7 @@ from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.domain.runs import RunRecord, RunStatus
 from freight_agent.domain.timers import Timer, TimerStatus
 from freight_agent.interfaces.repositories import UnitOfWork, UnitOfWorkFactory
-from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS
+from tests.contract.uow_factories import MAX_QUEUE_ATTEMPTS, UowFactory, open_memory
 
 pytestmark = pytest.mark.contract
 
@@ -1053,3 +1054,22 @@ async def test_concurrent_units_of_work_are_serialized(uow_factory: UnitOfWorkFa
     async with uow_factory() as uow:
         obligation = await uow.obligations.get("obl_1")
     assert obligation is not None and obligation.attempts == 1 + workers
+
+
+# --- The registry --------------------------------------------------------------------
+
+
+def test_postgres_is_skipped_while_no_test_database_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = UowFactory(open_memory, needs_database=True)
+    for name in ("TEST_DATABASE_URL", "DATABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    assert (
+        factory.skip_reason() == "set TEST_DATABASE_URL or DATABASE_URL to run this implementation"
+    )
+    monkeypatch.setenv("DATABASE_URL", "")
+    assert factory.skip_reason() is not None
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://localhost/freight")
+    assert factory.skip_reason() is None
+    assert UowFactory(open_memory).skip_reason() is None
