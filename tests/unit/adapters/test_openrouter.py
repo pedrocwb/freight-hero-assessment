@@ -616,6 +616,18 @@ async def test_usage_is_priced_and_timed_for_the_one_call() -> None:
     assert usage.latency_ms == 250
 
 
+async def test_usage_names_the_provider_that_served_the_call() -> None:
+    """OpenRouter may route to another provider of the model: the run records which."""
+    served = answers("GateDecision", ACK)
+    served.response_metadata["provider"] = "DeepInfra"
+    model, _ = make_model(served, answers("GateDecision", ACK))
+
+    first = await model.generate(GATE, GateDecision)
+    second = await model.generate(GATE, GateDecision)
+
+    assert (first.usage.provider, second.usage.provider) == ("DeepInfra", None)
+
+
 async def test_each_call_reports_its_own_usage() -> None:
     model, _ = make_model(
         answers("GateDecision", ACK, usage=_usage(300, 20)),
@@ -821,6 +833,7 @@ def _completion(name: str, args: dict[str, Any], call_id: str, **message: Any) -
     return {
         "id": f"gen-{call_id}",
         "model": "openai/gpt-4.1-nano",
+        "provider": "OpenAI",
         "choices": [
             {
                 "finish_reason": "tool_calls",
@@ -906,3 +919,4 @@ async def test_the_real_chat_openrouter_sends_the_expected_requests() -> None:
     assert tool["tool_call_id"] == "call_1"
     usage = second_reply.usage
     assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (300, 200, 40)
+    assert usage.provider == "OpenAI"

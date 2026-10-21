@@ -20,6 +20,9 @@ Every method is one model call:
   sends it back as LangChain would.
 - `request.images` go with the user prompt as image parts (data URLs).
 
+Each call's `Usage` names the provider that served it, as OpenRouter reports it: a role
+lists its preferred provider first and may let OpenRouter serve the model elsewhere.
+
 Any provider error, timeout (`request.timeout_s`, for the call) or answer that does not
 fit the schema becomes `LlmError`, named after the model. Each call is a LangChain run,
 named after its role and model, so a LangSmith trace shows it under its graph node, with
@@ -204,9 +207,11 @@ class OpenRouterModel:
         input_tokens = metadata["input_tokens"] if metadata else 0
         output_tokens = metadata["output_tokens"] if metadata else 0
         cached = (metadata.get("input_token_details", {}).get("cache_read") or 0) if metadata else 0
+        provider = reply.response_metadata.get("provider")
         return Usage(
             role=request.role.value,
             model=self.model_id,
+            provider=provider if isinstance(provider, str) and provider else None,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_tokens=cached,
