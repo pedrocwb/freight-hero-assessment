@@ -18,8 +18,9 @@ from fastapi import APIRouter, File, Form, UploadFile
 
 from freight_agent.api.deps import Service
 from freight_agent.api.errors import ApiError, BadRequest, NotFound
+from freight_agent.api.routes.ingress import Latency
 from freight_agent.api.schemas import AttachmentUploadResult, DocumentView
-from freight_agent.api.simulation import AttachmentUpload
+from freight_agent.api.simulation import DEFAULT_LATENCY_S, AttachmentUpload
 from freight_agent.domain.load import Channel
 
 router = APIRouter(tags=["documents"])
@@ -47,9 +48,14 @@ async def upload_attachment(
     ] = "sms",
     message_id: Annotated[str | None, Form(description="Default: a new uuid")] = None,
     occurred_at: Annotated[datetime | None, Form(description="Default: simulation now")] = None,
+    wait: Annotated[
+        bool, Form(description="Tick `latency_seconds` later and return the runs")
+    ] = False,
+    latency_seconds: Latency = DEFAULT_LATENCY_S,
 ) -> AttachmentUploadResult:
     """Store the file, log it as a message with the attachment, and leave its document
-    pending: the next tick reads it, then runs the message and the document's event."""
+    pending: the next tick reads it, then runs the message and the document's event.
+    With `wait`, that tick happens `latency_seconds` later and its runs come back."""
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise PayloadTooLarge(f"the file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
@@ -66,7 +72,7 @@ async def upload_attachment(
         message_id=message_id or None,
         occurred_at=occurred_at,
     )
-    return await service.upload_attachment(upload)
+    return await service.upload_attachment(upload, wait=wait, latency_s=latency_seconds)
 
 
 @router.get("/loads/{load_id}/documents")
