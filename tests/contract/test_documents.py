@@ -1,7 +1,7 @@
 """Contract suite for `DocumentRepository` (`interfaces/documents.py`).
 
-Owner: card W3-DOC. Runs on the memory store through the shared `uow_factory` fixture,
-each test on a fresh, empty store. A document's load exists, so an implementation may
+Runs on every store of `uow_factories.UOW_FACTORIES` through the shared `uow_factory`
+fixture, each test on a fresh, empty store. A document's load exists, so an implementation may
 enforce the foreign key.
 """
 
