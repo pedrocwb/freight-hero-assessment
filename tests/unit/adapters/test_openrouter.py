@@ -11,6 +11,7 @@ import json
 import traceback
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,6 +37,7 @@ from freight_agent.adapters.llm.models_config import (
     ModelsConfig,
     ProviderRouting,
     RoleConfig,
+    load_models_config,
 )
 from freight_agent.adapters.llm.openrouter import (
     OpenRouterModel,
@@ -60,6 +62,7 @@ from freight_agent.ports.llm import (
 
 pytestmark = pytest.mark.unit
 
+SHIPPED = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 KEY = "sk-or-v1-never-show-me-0123456789"
 ROLE = RoleConfig(model="acme/small", temperature=0, max_tokens=512)
 PRICING = ModelPricing(input=0.10, output=0.40, cached_input=0.01)
@@ -920,3 +923,63 @@ async def test_the_real_chat_openrouter_sends_the_expected_requests() -> None:
     usage = second_reply.usage
     assert (usage.input_tokens, usage.cached_tokens, usage.output_tokens) == (300, 200, 40)
     assert usage.provider == "OpenAI"
+
+
+async def test_the_agents_claude_fallback_sends_its_own_settings_in_rounds_and_answers() -> None:
+    """The shipped agent chain: gpt-oss on its preferred provider first, then Claude Haiku
+    with no temperature, no reasoning and its own cap, whose rounds use `auto` (no
+    Anthropic endpoint takes `required`) and whose forced answers name the tool."""
+    completions = _StubCompletions(
+        [
+            _completion("read_sop_section", {"section_id": "escalation"}, "call_1"),
+            _completion(FINISH, DONE, "call_2"),
+            _completion("GateDecision", ACK, "call_3"),
+        ]
+    )
+
+    def factory(config: RoleConfig, key: SecretStr) -> BaseChatModel:
+        chat = openrouter_chat(config, key)
+        assert isinstance(chat, ChatOpenRouter)
+        chat.client = SimpleNamespace(chat=completions)
+        return chat
+
+    config = load_models_config(SHIPPED)
+    primary, claude, *_ = models_for_role(
+        config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory
+    )
+    assert primary.model_id == "openai/gpt-oss-120b"
+    assert claude.model_id == "anthropic/claude-haiku-5.5"
+
+    await claude.chat(round_request(), AgentOutcome)
+    await claude.chat(round_request(force_answer=True), AgentOutcome)
+    await claude.generate(GATE, GateDecision)
+
+    first, forced, answer = completions.requests
+    assert first["model"] == "anthropic/claude-haiku-5.5"
+    assert "temperature" not in first
+    assert "reasoning" not in first
+    assert first["max_tokens"] == 2048
+    assert first["provider"] == {"require_parameters": True}
+    assert first["tool_choice"] == "auto"
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": FINISH}}
+    assert answer["tool_choice"] == {"type": "function", "function": {"name": "GateDecision"}}
+
+
+def test_the_agents_primary_prefers_its_provider_and_may_be_served_by_another() -> None:
+    config = load_models_config(SHIPPED)
+    built: list[RoleConfig] = []
+
+    def factory(role: RoleConfig, _key: SecretStr) -> BaseChatModel:
+        built.append(role)
+        return FakeChat()
+
+    models_for_role(config, ModelRole.AGENT, SecretStr(KEY), chat_factory=factory)
+
+    routing = built[0].provider.as_openrouter()
+    assert routing == {
+        "order": ["deepinfra"],
+        "allow_fallbacks": True,
+        "require_parameters": True,
+        "quantizations": ["bf16"],
+    }
+    assert [r.model for r in built] == list(config.role(ModelRole.AGENT).models)
