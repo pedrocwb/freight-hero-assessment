@@ -1,6 +1,7 @@
 """`GET /api/loads/{load_id}/facility-memory`: the notes of each stop of a load."""
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 import pytest
 
@@ -21,7 +22,7 @@ async def test_the_facility_memory_lists_each_stop_with_its_clients_notes(api: A
     runtime = api.app.state.service.session.simulation.runtime
     memory = runtime.facility_memory
     assert memory is not None
-    told = local(7, 0)
+    told = datetime.fromisoformat(local(7, 0))
     note = FacilityFact(
         fact_id="f1",
         client_id="northline",
