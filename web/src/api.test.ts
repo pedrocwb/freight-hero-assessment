@@ -253,7 +253,7 @@ describe("documents", () => {
     const { calls, api } = recorder(200, []);
     await api.facilityMemory("730118");
     expect(calls[0]?.url).toBe("/api/loads/730118/facility-memory");
-    expect(calls[0]?.method ?? "GET").toBe("GET");
+    expect(calls[0]?.init?.method ?? "GET").toBe("GET");
   });
 });
 
