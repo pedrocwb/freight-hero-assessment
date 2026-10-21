@@ -50,10 +50,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # What the app reads at run time, at the Settings defaults (relative to /app): the SOP
 # tree (with the clients' catalogs), the scenarios and their fixtures (load metadata, the
-# POD and BOL PDFs), the models config and the built UI.
+# POD and BOL PDFs), the models config and the prompt pins, the repository copy of the
+# prompt templates (what runs without LANGSMITH_API_KEY) and the built UI.
 COPY sops ./sops
 COPY evals ./evals
 COPY config ./config
+COPY prompts ./prompts
 COPY --from=web /web/dist ./web/dist
 
 # A non-root user. The code and the venv stay owned by root, so the app cannot change
