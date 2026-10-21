@@ -1,81 +1,120 @@
-# Design decisions and internal contracts
+# Design decisions and contracts
 
-These decisions are shared by every part of the code. Code, SOP files and eval
-scenarios must agree with them. When one changes, this file changes in the same commit.
+The rules every part of the code, the SOP files and the eval scenarios agree on. When one
+changes, this file changes in the same commit. Python paths leave out
+`src/freight_agent/`.
 
 ## Clients and load types
 
-| Client in the assignment | `broker.id` | Name | Notes |
+| In the assignment | Client id (`broker.id`) | Name | Where |
 |---|---|---|---|
 | Client A | `northline` | Northline Logistics | The fixture `evals/fixtures/load_481207.json` |
-| Client B | `keystone` | Keystone Freight | Scenarios override `broker` in `load_overrides` |
-| Client B, refrigerated | `keystone` + load type `reefer` | | `load_overrides: {"load_types": ["reefer"]}` |
+| Client B | `keystone` | Keystone Freight | Scenarios set `load_overrides: {broker: {id: keystone, ...}}` |
+| Client B, refrigerated | `keystone` with load type `reefer` | | `load_overrides: {load_types: [reefer]}` |
+| A third client with its own catalog | `acme` | Acme Freight | The `docs` suite |
 
-The SOP client id is the load's `broker_id`.
+The SOP client id is the load's `broker_id`. A client with no folder runs on the standard
+layer and the standard catalog.
 
 ## SOP files
 
 ```
 sops/
-  standard/<topic>.md                          layer: standard
-  clients/<client_id>/<topic>.md               layer: client
-  clients/<client_id>/types/<load_type>/<topic>.md   layer: load_type
+  standard/<topic>.md                                layer standard
+  clients/<client_id>/<topic>.md                     layer client
+  clients/<client_id>/types/<load_type>/<topic>.md   layer load_type
+  clients/<client_id>/broker.yaml                    the client's catalog overrides
 ```
 
-Each file is one section: YAML front matter between `---` lines, then a plain-English
-Markdown body.
+Each Markdown file is one section: YAML front matter between `---` lines, then a
+plain-English body. `README.md` files are for editors and never read as sections.
 
 ```yaml
 ---
 id: delay_risk_high            # required, snake_case, the merge key across layers
 title: Delay risk changes to high
-description: One line. The model sees it in the catalog of sections.
+description: One line. The agent sees it in the catalog of sections.
 intents: [delay_risk_high, eta_follow_up_due]   # empty or missing: every intent
 stages: [to_pickup, to_delivery]                # empty or missing: every stage
-mode: replace                  # replace (default) or extend; ignored in standard/
+mode: replace                  # replace (default) or extend; standard/ is always replace
 ---
 ```
 
-Merge, per `id`, least to most specific (standard, client, load type): `replace` swaps the
-body and the metadata; `extend` appends its body after the inherited body and keeps the
-inherited title, description, intents and stages. An `extend` with nothing to extend is a
-lint error. A section applies to an event when its intents include the event's intent (or
-are empty) and its stages include the load's stage (or are empty).
+- **Merge** per `id`, least to most specific (standard, client, load type): `replace`
+  swaps body and header; `extend` appends its body after the inherited body and keeps the
+  inherited title, description, intents and stages. An `extend` with nothing to extend is
+  a lint error, and so is `mode: extend` in `standard/`. A section id appears once per
+  folder.
+- **Applies** to an event when its intents include the event's intent (or are empty) and
+  its stages include the load's stage (or are empty).
+- **Visibility:** a run sees the standard layer, its own client's layer and that client's
+  load-type layers; never another client's.
+- **Intents in files:** `standard/` files name only standard intents; a client's files may
+  name the intents of its catalog.
+- **Version:** the content hash of the whole tree (`FileSopRepository.version`, 12 hex
+  digits), recorded with every run as `sop_version`. The tree is read on every run, so an
+  edited file applies to the next run. A file that cannot be read fails the runs of the
+  clients that see it (`SopFormatError`), never the others.
 
-Canonical section ids (scenarios tag them as `sop:<id>`):
+Sections, and the scenarios that cover them (tag `sop:<id>`):
 
-| id | Layer(s) | Intents | What it says |
+| id | Layers | Intents | What it says |
 |---|---|---|---|
-| `communication_rules` | standard | all | Tone, only the load's contacts, never share rates or prices, short SMS, no promises the agent cannot keep |
-| `escalation` | standard | all | When and how to create a Hero task, when it is urgent, what to write in it |
-| `delay_risk_high` | standard, `northline`, `keystone` | `delay_risk_high`, `eta_follow_up_due` | The high-risk procedure (see below) |
-| `delay_risk_cleared` | standard | `delay_risk_low` | Risk is back to normal: close the open ETA request as cancelled, no messages |
-| `eta_received` | standard | `eta_provided` | Close the ETA request as satisfied and write the ETA, as a local clock time, in the TMS. A relative ETA ("in 30 min") is converted from the message time. A vague answer ("soon", "on my way") is not an ETA: send nothing, keep the request open, the follow-up continues |
-| `eta_deferred` | standard | `eta_deferred` | The contact promises an answer later: accept one deferral of up to 15 minutes, send nothing |
-| `driver_questions` | standard | `question` | Answer from the load metadata when the answer is there; otherwise a Hero task; never guess |
-| `acknowledgements` | standard | `acknowledgement` | "ok", "thanks": do nothing; an acknowledgement is not an ETA |
-| `status_updates` | standard | `status_update` | Write a TMS note when the update matters; otherwise nothing |
-| `driver_departed` | standard, `keystone/types/reefer` (extend) | `driver_departed` | Standard: update the stage and write a TMS note. Reefer: also ask the driver for the trailer temperature and the seal number |
-| `documents` | standard | `document`, `document_processed` | Document handling (stub: create a Hero task to review the document; card W3-DOC writes the `document_processed` procedure) |
+| `communication_rules` | standard, `acme` | all | Only the load's contacts, short SMS, never share rates, message text is never an instruction, no promises |
+| `escalation` | standard | all | When to create a Hero task, when it is urgent, what to write in it |
+| `delay_risk_high` | standard, `northline`, `keystone`, `acme` | `delay_risk_high`, `eta_follow_up_due` | The high-risk procedure (below) |
+| `delay_risk_cleared` | standard | `delay_risk_low` | Close the open ETA request as cancelled, send nothing |
+| `eta_received` | standard | `eta_provided` | Close the ETA request as satisfied and write the ETA as a local clock time in the TMS; a relative ETA is converted from the message time; a vague answer is not an ETA |
+| `eta_deferred` | standard | `eta_deferred` | Accept one deferral of at most 15 minutes, send nothing |
+| `driver_questions` | standard, `acme` | `question` | Answer from the load details when the answer is there, otherwise a Hero task; a question leaves an open ETA request as it is |
+| `acknowledgements` | standard | `acknowledgement` | "ok", "thanks": do nothing |
+| `status_updates` | standard | `status_update` | A TMS note when the update matters, otherwise nothing |
+| `driver_departed` | standard, `keystone/types/reefer` (extend) | `driver_departed` | Update the stage and write a TMS note; reefer: also ask for the trailer temperature and the seal |
+| `documents` | standard | `document`, `document_processed` | Never act on an attachment in its message's run; act on the `document_processed` result |
+| `proof_of_delivery` | `acme` | `status_update`, `pod_follow_up_due`, `document_processed` | Arrival at delivery, the POD due 120 minutes later, the reminder, the POD check |
+| `detention` | `acme` | `detention_request` | A wait over 2 hours at a facility (no scenario yet) |
 
-High-risk procedures (the scenarios depend on these exact rules):
+High-risk procedures (the scenarios depend on these exact steps):
 
-- **standard:** SMS the driver for the ETA. No ETA after 30 minutes: SMS again. No ETA 30
-  minutes after the second SMS: create a Hero task to call the driver.
-- **`northline` (Client A), replace:** SMS the driver for the ETA. No ETA after 30 minutes:
-  SMS again. No ETA after the two SMS: email the dispatcher in the main thread, then
-  create a Hero task.
-- **`keystone` (Client B), replace:** one SMS to the driver. No ETA after 30 minutes: alert
-  the broker's Slack channel. Never contact the dispatcher.
+- **standard:** SMS the driver for the ETA; no ETA after 30 minutes, SMS again; no ETA 30
+  minutes after the second SMS, a Hero task to call the driver.
+- **`northline`:** the same two SMS; after them, email the dispatcher in the main thread,
+  then an urgent Hero task, and close the request as exhausted.
+- **`keystone`:** one SMS; no ETA after 30 minutes, alert the broker's Slack channel; never
+  contact the dispatcher.
+- **`acme`:** up to three SMS, 20 minutes apart; then email the dispatcher, an urgent
+  Hero task, and close the request as exhausted.
 
-When no section applies to the event, the run escalates to a Hero ("no SOP for this
-situation") and records the gap. The agent does not improvise. General sections (empty
-`intents`, such as `communication_rules` and `escalation`) apply to every event, so they do
-not count for this check: the run escalates when no section with an explicit intent matches.
+## Client catalog
 
-The decide prompt also shows, as context only, the sections of procedures still in progress
-(the follow-up intent of each open obligation), so that an answer to a driver's question at
-07:13 knows the ETA request continues. The model is told not to run those steps now.
+A client's catalog (`domain/broker.py`, `Broker`) is the standard catalog
+(`standard_broker()`) with the overrides of its `broker.yaml` (`CatalogOverrides`,
+applied by `client_broker`):
+
+| Key | Shape | Override rule |
+|---|---|---|
+| `name` | text | replaces |
+| `triage` | bool, default true; false: no gate model call, every message goes to the agent as `other` | replaces |
+| `intents` | `IntentDef`: `intent_id`, `title`, `description`, `examples`, `priority` (gate prompt order, lower first; `other` is 1000), `must_act` (default true), `noop_eligible`, `system` | an id of the standard catalog replaces that entry; a new id is appended |
+| `obligations` | `ObligationDef`: `kind`, `title`, `description`, `follow_up_minutes` (30), `max_attempts` (2), `follow_up_intent` (empty: `<kind>_follow_up_due`), `on_exhausted` (`dispatcher_email`, `hero_task`, `broker_slack`) | same |
+| `document_types` | `DocumentTypeDef`: `type_id`, `title`, `description`, `fields` (`name`, `description`, `kind`, `check`) | same |
+| `documents` | `DocumentRequirement`: `type_id`, `at_stage`, `within_minutes`, `opens_obligation` | appended (the standard has none) |
+| `limits` | `BrokerLimits`: `validation` (SMS rate, deferral policy, attempt caps), `max_steps` (8), `max_cost_usd` (0.05), `max_rejections` (3) | replaces |
+
+The standard catalog: 8 message intents (`eta_provided`, `eta_deferred`, `question`,
+`driver_departed`, `document`, `status_update`, `acknowledgement`, `other`; the last three
+are not `must_act`), 4 system intents (`delay_risk_high`, `delay_risk_low`,
+`eta_follow_up_due`, `document_processed`), the `eta_request` obligation (30 minutes, 2
+attempts, then `dispatcher_email` and `hero_task`) and the document types `bol`, `pod`,
+`rate_confirmation`, `receipt`.
+
+Every `Broker` is validated as a whole (`catalog_problems`, every problem in one error):
+snake_case unique ids; the system intents code emits are present; each obligation's
+follow-up intent is a system intent of the catalog; `eta_request` follows up as
+`eta_follow_up_due`; `document` and `other` are present, `other` last; a field's check
+fits its kind; a requirement names a known type and kind, and `within_minutes` needs
+`opens_obligation`; limits within caps (`max_steps` 1 to 20, `max_cost_usd` up to 1,
+`max_rejections` up to 20, `max_attempts` 1 to 10, waits up to a week).
 
 ## Intents and the gate
 
@@ -83,125 +122,117 @@ The decide prompt also shows, as context only, the sections of procedures still 
 |---|---|---|
 | `risk_changed` to `high` | `delay_risk_high` | none |
 | `risk_changed` from `high` to lower | `delay_risk_low` | none |
-| `timer_due` for an `eta_request` obligation | `eta_follow_up_due` | none |
-| `attachment_received` | `document` | none |
-| `document_processed` (the document pipeline read an attachment) | `document_processed` | none |
-| `inbound_message` with attachments and no text | `document` | none |
-| `inbound_message` | from the gate model | `gate` role, `max_tool_rounds = 0` (direct structured output, no tools) |
+| `timer_due` | the follow-up intent of its obligation kind (`eta_follow_up_due`, `pod_follow_up_due`); `other` for an unknown kind | none |
+| `document_processed` | `document_processed` | none |
+| `attachment_received`, or a message with attachments and no text | `document` | none |
 | `hero_update` | `other`, no action | none |
+| `inbound_message` | from the gate model | `gate` role, one forced structured call |
 
-The run continues to decide when `decision.act` is true or the intent's `must_act` is set
-in the load's broker catalog (`IntentDef.must_act`; the standard catalog keeps the old
-`MUST_ACT` set). Otherwise the run ends as `noop` with one model call (the gate). A message
-can only have a message intent of the catalog (`Broker.message_intents`); any other answer
-of the gate model becomes `other`, which still acts.
+The run goes on to the agent when the gate says `act`, or when the intent is `must_act` in
+the client's catalog; otherwise it ends as `noop` after one model call. A message can only
+have a message intent of the catalog: any other answer becomes `other`, which acts.
 
-Only a confirmed risk transition into or out of `high` becomes an event. `medium` is
-tracked but does not wake the agent. On every confirmed transition the runtime saves the
-load with `delay_risk` set to the new band, in the same unit of work as the tracker.
-
-Pings are delivered at least once. The tracker keeps the ids of the last 64 pings it
-counted (`RiskTracker.recent_ping_ids`), stored with it in the same unit of work: a ping
-whose id it holds is a redelivery and changes nothing, after a restart or on another
-process too. The simulation API does not move its clock for a redelivered message or ping.
+Only a confirmed transition into or out of `high` becomes an event (`domain/ping_filter.py`:
+an upgrade is confirmed by 1 ping, a downgrade by 2). `medium` is tracked but does not wake
+the agent. The tracker keeps the ids of the last 64 pings, stored with it, so a redelivered
+ping changes nothing.
 
 ## Run context
 
-`application.context.load_run_context` reads the load's memory once per run. `recent_events`
-are the last N events of the load in log order, **without the run triggers logged after the
-event being processed** (`domain.events.RUN_TRIGGERS`): messages, pings and timers queued
-behind it are already in the log but are not history for this run (they get their own runs).
-Every `agent_action` is kept, wherever it falls: a message queued ahead of a timer event can
-commit its reply after the timer event was logged, and the timer's run must see that reply,
-or it may send it again.
-`recent_outbound` is built from `agent_action` events in the rate window, however many
-events that takes; a broker Slack post counts against the first broker contact on Slack.
+`load_run_context` (`application/context.py`) reads the load's memory once per run:
 
-## Prefilter (code, before any model call)
+- `recent_events`: the last 30 events in log order, without the run triggers logged after
+  the event being processed (they get their own runs); every `agent_action` is kept,
+  wherever it falls. `history`: the same rule over 200 events, for `get_history`.
+- `recent_outbound`: one record per recipient of each SMS, email and broker Slack post in
+  the SMS rate window (a broker Slack post counts against the first broker contact on
+  Slack); the page grows until it reaches an action older than the window.
+- `obligations` (all, oldest first), `pending_timers` (earliest first), `event_timer`
+  (the timer a `timer_due` event names), the risk tracker, `already_processed`, the
+  client's catalog, and the load's documents when an attachment or a `document_processed`
+  event is in view.
+
+The agent's read tools answer from this snapshot and the SOP index, so no tool opens a
+transaction.
+
+## Prefilter
+
+Code, before any model call, in this order; the first match decides:
 
 | Condition | Result |
 |---|---|
 | A run already exists for the event | `skipped`, `already_processed` |
-| `timer_due` and the timer is stale (`domain.timers.is_stale`) | `skipped`, `stale_timer` |
+| `timer_due` and the timer is stale: superseded, cancelled, its obligation closed or gone, or no longer the active timer | `skipped`, `stale_timer` |
 | `inbound_message` with an empty body and no attachments | `skipped`, `empty_message` |
 | `inbound_message` whose sender is not a contact of the load | `escalated`, `unknown_sender`: one Hero task, no model call |
 
-## Run pipeline
+## Run graph and budgets
 
-`load_context` → `prefilter` → `gate` → `resolve_sop` → `decide` → `validate` →
-`commit_execute`, with exits `noop`, `skipped` and `escalated`. One run per event. The
-whole run's state changes (ledger, timers, outbox, load, run record) are committed in one
-unit of work. Delivery happens afterwards from the outbox: the dispatcher checks each
-item's payload first, and a malformed one fails at once (no retry can fix it); anything
-the gateway call raises keeps the item pending, with `attempts` and `last_error`, until
-`max_delivery_attempts` makes it `failed`, and the rest of the batch is still sent.
+`prefilter -> gate -> knowledge -> agent <-> tools -> validate` (`application/graph/`),
+around which the runtime runs the claim and the commit, the run's two transactions.
 
-Run status: `skipped` (prefilter), `noop` (gate does not act, or the plan is empty, or
-every action was dropped, or the executor skipped every approved action), `acted` (at
-least one approved action applied), `escalated` (the run created a Hero task because of a
-failure path: unknown sender, no SOP section, model failure or timeout, a high-severity
-validator violation), `failed` (unexpected error; the event goes back to the queue and
-becomes a dead letter after too many attempts).
+- **agent** is one model round (`LanguageModel.chat`, role `agent`). It goes to `tools`
+  when the round called tools, to `validate` when it called `finish`, and back to itself
+  when the model replied in prose (the next round is told to answer and must call
+  `finish`).
+- **tools** answers every call of the round, in order. A read tool returns text; an action
+  tool builds the action (`build_action`) and checks it with `check_action` against the
+  actions accepted before it; bad arguments are a refused call with the reason. It goes to
+  `validate` when the round also answered or the refused calls exceed `max_rejections`.
+- **Budgets** (`BrokerLimits`): after `max_steps` rounds, or once the agent's rounds cost
+  `max_cost_usd`, the next round is forced to call `finish`.
+- **validate** runs the rules over every proposed action, in call order, refused ones
+  included, and decides the verdict, in this order: a high-severity violation, or more
+  refused calls than `max_rejections`, escalates with "Agent action blocked by a safety
+  check" (reason `blocked: <rules>`), and the approved actions still run; `no_procedure`
+  with nothing approved escalates with "No SOP for this situation" (`sop_gap:
+  <intent>/<stage>`); nothing approved is `noop`; otherwise `acted`.
+- **Statuses:** `skipped` (prefilter), `noop`, `acted`, `escalated` (a Hero task made by
+  code), `failed` (an unexpected error: the event goes back to the queue; after 3 failed
+  attempts it is a dead letter, and only then is the failed run stored).
+- **Escalations by code** (`application/escalation.py`, stable titles the scenarios match):
+  unknown sender, SOP gap, model failure after the fallbacks (urgent), run past its
+  240-second deadline (urgent), blocked actions (urgent). A model failure or the deadline
+  completes the event, so it is never retried into a duplicate.
+- **Claim lease:** every `process_all` first returns the events in flight for longer than
+  the run deadline plus 60 s to the queue, each counted as a failed attempt. A slow run
+  that commits after its event was reclaimed changes nothing in the queue, and the event's
+  next run is skipped as `already_processed`.
 
-A model failure (`LlmError`, after fallbacks) or a run over its deadline creates one
-urgent Hero task and completes the event, so the event is never lost and never retried
-into a duplicate.
-
-**The claim lease (watchdog).** A worker that dies between claim and commit (a crash, a
-cancelled task, a failure while releasing) leaves its event in flight, and the load's
-later events would wait forever. The queue records the claim time from the runtime's
-clock (never the database's: evals and the simulation run on a virtual clock), and every
-`process_all` (so every `tick`) first calls `EventQueue.reclaim_expired(now, lease_s)`:
-events in flight for more than `RuntimeConfig.claim_lease_s` (default `run_deadline_s`
-plus 60 s) go back to their place in the queue, each counted as a failed attempt, so an
-event whose runs always die still becomes a dead letter. A run that was only slow and
-commits after its event was reclaimed changes nothing in the queue (`complete` and
-`release` leave an event that is not in flight alone); its stored run makes the event's
-next run a skip (`already_processed`).
+The rules (`domain/rules.py`), high severity first: `recipient_is_contact` (high),
+`no_contact_details_in_text` (high: an email address or a phone number in outbound text;
+a bare 10-digit number reads as a phone number), `channel_allowed`, `sms_rate_limit` (3
+per contact per 60 minutes), `known_obligation_kind`, `attempt_cap` (per kind, from the
+catalog; counts SMS and email `requests`), `obligation_exists`, `deferral_policy` (one
+deferral of at most 15 minutes per obligation), `stage_moves_forward`,
+`no_duplicate_action`. A rule judges an action against the state the approved actions
+before it will leave, and never edits it.
 
 ## Executor semantics
 
-The executor applies approved actions in plan order, inside the run's unit of work.
-`now` is the clock's time when the run executes.
+The executor (`application/executor.py`) applies the approved actions in order, inside
+the commit transaction. `now` is the clock's time when the run commits.
 
 | Action | Effect |
 |---|---|
-| `send_sms` with `requests: <kind>` (`purpose: eta_request` means `requests: eta_request`) | If no open obligation of that kind exists, open one (`attempts = 1`); otherwise `record_attempt`. Outbox `sms`. Only an SMS counts; an email's `requests` is not applied yet (card W3-AGT decides). |
-| other `send_sms` | Outbox `sms` only. |
-| `send_email` | Outbox `email` (main thread). |
-| `post_broker_slack` | Outbox `broker_slack`. |
-| `write_tms_note` | Outbox `tms_note`. |
-| `create_hero_task` | Outbox `hero_task`. |
-| `post_internal_slack` | Outbox `internal_slack`. |
-| `update_stage` | Save the load with the new stage. Outbox `stage_update`. |
-| `schedule_timer` | Needs the open obligation of that kind. `due = follow_up_due_at(requested=now + due_in_minutes, deferred_until=obligation.deferred_until, grace)`. Every pending timer of the obligation becomes `superseded`; the new timer becomes the obligation's `active_timer_id`. |
-| `defer_obligation` | `until = event.occurred_at + minutes` (the message time, not the processing time); `obligation.defer(until, now=event.occurred_at, policy)`. If the obligation has an active timer, the executor replaces it with one due at `follow_up_due_at(requested=<old due_at>, deferred_until=until, grace)`; the old one becomes `superseded`. |
-| `close_obligation` | Close the open obligation of that kind with the status; every pending timer of it becomes `cancelled`. |
-| `open_obligation` | Open an obligation of that kind with `attempts = 0` (a document the load owes); skipped when one is already open. No outbox item. |
+| `send_sms` / `send_email` with `requests: <kind>` (`purpose: eta_request` means `requests: eta_request`) | Opens the open obligation of that kind with 1 attempt, or records one more attempt. Outbox `sms` / `email` |
+| other `send_sms`, `send_email` | Outbox only |
+| `post_broker_slack`, `write_tms_note`, `create_hero_task`, `post_internal_slack` | Outbox `broker_slack`, `tms_note`, `hero_task`, `internal_slack` |
+| `update_stage` | Saves the load with the stage; outbox `stage_update`. A `DocumentRequirement` at that stage opens its obligation (0 attempts) with a timer after `within_minutes`, unless one is open or a clean document of that type is in hand |
+| `schedule_timer` | Needs the open obligation. `due = max(now + minutes, deferred_until + 2 min grace)` in real minutes; pending timers of the obligation become `superseded`; the new one is the obligation's `active_timer_id` |
+| `defer_obligation` | `until = event time + minutes`; an active timer is replaced by one due no earlier than `until` plus grace |
+| `close_obligation` | Closes with `satisfied`, `exhausted` or `cancelled`; pending timers become `cancelled` |
+| `open_obligation` | Opens one with 0 attempts (a document the load owes); refused when one is open |
 
-An action that would break a domain invariant (for example `schedule_timer` with no open
-obligation) is skipped and reported in `ExecutionResult.skipped`; the rest of the plan runs.
-The run records the skips in `RunRecord.skip_reason` (`executor skipped action <index>
-(<type>): <reason>; ...`); when the executor skipped every approved action the run is
-`noop`, and with some applied it stays `acted`. The validator normally drops such actions
-first. Validator rules evaluate each action against the state left by the actions approved
-before it in the same plan. Outbound text must not
-contain an email address or a phone number (a high-severity violation that escalates the
-run); note that a bare 10-digit number reads as a phone number.
+An action that would break a domain invariant is skipped and reported
+(`RunRecord.skip_reason`); the rest of the plan runs. When every approved action was
+skipped the run is `noop`.
 
-Outbox `idempotency_key` = `{event_id}:{index}`, with `index` the action's position in the
-approved list.
-
-**The agent's own actions are memory.** For every outbox item, the executor also appends
-an `agent_action` event to the event log, in the same unit of work:
-`event_id = act:{idempotency_key}`, `direction = outbound`, `occurred_at = now`,
-`body` = the text (SMS, Slack, TMS note), the email body, or the Hero task title and
-description, and `data = {"kind", "payload", "run_id", "outbox_id"}`. Channel by kind:
-`sms` → `sms`, `email` → `email`, `broker_slack` → `slack`, `hero_task` and
-`internal_slack` → `hero`, `tms_note` and `stage_update` → `system`. These events are never
-queued (`domain.events.RUN_TRIGGERS`). The context loader reads them back: they are part of
-the recent events the model sees, and `recent_outbound` (for rate limits) is built from the
-`sms`, `email` and `slack` ones inside the window. Outbox `payload` keys, used by the dispatcher and by the eval graders:
+**Outbox.** `idempotency_key = {event_id}:{index}`, `index` the action's position in the
+approved list. Delivery (`AgentRuntime.dispatch_outbox`) checks the payload first (a
+malformed one fails at once); a gateway error keeps the item pending with `attempts` and
+`last_error` until 5 attempts make it `failed`; the rest of the batch is still sent.
+Gateways ignore a repeated key.
 
 | Kind | Payload |
 |---|---|
@@ -213,298 +244,93 @@ the recent events the model sees, and `recent_outbound` (for rate limits) is bui
 | `internal_slack` | `text` |
 | `stage_update` | `stage` |
 
+**Actions are memory.** For every outbox item the executor appends an `agent_action`
+event in the same transaction: `event_id = act:{idempotency_key}`, `direction =
+outbound`, `occurred_at = now`, `body` the text (or the Hero task's title and
+description), `data = {kind, payload, run_id, outbox_id}`. Channel by kind: `sms` to
+`sms`, `email` to `email`, `broker_slack` to `slack`, `hero_task` and `internal_slack` to
+`hero`, `tms_note` and `stage_update` to `system`. These events never start a run.
+
+## Documents
+
+- `ingest_message` saves one pending `Document` per attachment of a new message, in the
+  message's transaction.
+- `tick()` is `fire_due_timers -> documents.process_pending -> process_all ->
+  dispatch_outbox`, so a document is read before the queue runs and its event queues
+  behind the message.
+- The pipeline (`application/documents.py`): blob, pages (a page with little text becomes
+  an image), one `extract` call answering `{type_id, confidence, fields, notes}`, checks
+  in code, then status `processed`, `needs_review` (confidence under 0.7, unknown type,
+  missing or unreadable value, failed check, non-empty POD `exceptions`) or `failed` (a
+  file, reader or model error; never retried). One `document_processed` event per
+  document. A clean `processed` document of a requirement's type closes its obligation as
+  `satisfied` in the same transaction.
+- Checks: `po_number` (the load's PO; on load 481207 it is in the instructions),
+  `mc_number` (the carrier's), `stop_name` (a stop, the shipper or the consignee),
+  `date_in_window` (the appointment's day, or inside its window), `seal_number` (the last
+  seal a message reported), `signature` (present).
+
 ## Event ids
 
 | Event | `event_id` |
 |---|---|
-| Message | the integration layer's `message_id` |
+| Message | the integration layer's `message_id` (the dedupe key) |
 | Risk change | `risk:{ping_id}` |
-| Timer due | `timer:{timer_id}`; `occurred_at` is the firing time and `data.due_at` the due time |
+| Timer due | `timer:{timer_id}`; `occurred_at` is the firing time, `data.due_at` the due time |
 | Document processed | `doc:{document_id}`; `data = {document_id, type_id, status, attachment_id}` |
+| Agent action | `act:{event_id}:{index}` |
 
-Ids for runs, obligations, timers, outbox items and documents come from `IdGenerator`
-with the prefixes `run`, `obl`, `timer`, `out`, `doc`.
+Ids of runs, obligations, timers, outbox items and documents come from `IdGenerator` with
+the prefixes `run`, `obl`, `timer`, `out`, `doc`.
 
 ## Eval timing
 
-A step that injects an event at `at` runs `run_latency_seconds` (default 60) later, so the
-first SMS of the main scenario leaves at 07:01 and its timer is due at 07:31. Timers fire
-with zero latency: the 07:31 follow-up leaves at 07:31. Step indexes are 0-based; default
-message and ping ids are `{scenario_id}:{step_index}`. A timer that comes due inside a
-step's latency window fires on the tick after the latency, after the injected event's run.
+The scenario player (`evalkit/runner.py`), used by the experiments, the platform and
+Studio:
 
-## Layer and file ownership
+- The virtual clock starts at the scenario's `date` and `start` in its `timezone`
+  (default `America/Los_Angeles`).
+- Each step first advances to its `at`, stopping at every pending timer due on the way
+  and ticking there: timers fire with zero latency, so the 07:31 follow-up leaves at
+  07:31.
+- A message or ping is ingested at `at`; the clock then moves `run_latency_seconds`
+  (default 60, never past the next step) and ticks once, so the first SMS of scenario A
+  leaves at 07:01 and its timer is due at 07:31. A timer due inside that window fires on
+  the same tick, after the injected event's run.
+- Step indexes are 0-based; default message and ping ids are `{scenario_id}:{step_index}`.
+- Checks read the outbox items created during the step and the ledger and timers at its
+  end. `llm_calls` counts the gate, one per agent run whatever its rounds, and one per
+  document read; the judge is not counted.
 
-The layer rules in `pyproject.toml` (import-linter) are part of the design and are checked
-by `make arch` and by a unit test. The LLM stack (LangChain, OpenRouter) is only imported
-in `adapters/llm`. `application` may import LangGraph.
+## Prompts and their versions
 
-# Wave 3: brokers onboarded without code
+- Four templates, one per model role: `gate`, `agent`, `extract`, `judge`. Each is a chat
+  template of a system and a user message (`ports/prompts.py`), stored in the LangSmith
+  Prompt Hub as `freight-agent-<role>` with a reviewable copy in `prompts/<role>.yaml`.
+- `config/prompts.yaml` pins each role to a reference: `<name>:<tag>` (`prod` is what runs)
+  or `<name>:<commit>`. `PROMPTS_TAG` (or `agent eval run --prompt-tag`) runs every role at
+  another tag.
+- The runtime resolves every pin once, at process start (`bootstrap.build_prompts`); a pin
+  the Hub cannot serve stops the start. Without `LANGSMITH_API_KEY`, or with
+  `PROMPTS_SOURCE=local`, the runtime reads `prompts/`, with a warning.
+- A version is the Hub commit's first 12 hex digits, or `local:<sha256 prefix>` for the
+  repository copy. Every run records the version of each prompt it sent
+  (`RunRecord.prompts`); the run's trace carries `prompt_gate` and `prompt_agent`; an
+  experiment's metadata carries every role's version and reference.
+- Code computes the variables (`application/prompts.py`): the system message from the
+  client alone (the catalog's intents, kinds, limits), the user message from the run.
+  Each service checks at build time that its template names only variables it computes,
+  so a bad Hub edit stops the process instead of rendering an empty block. Message text
+  is rendered as a JSON string, so untrusted text cannot open a heading.
+- `agent prompts status` compares the copy with each pin; `push --tag T` commits each
+  changed template and moves T; `pull` writes a Hub version back. Both refuse a template
+  the code cannot render.
 
-The contracts below were written first (card W3-C0, branch `wave3`); seven cards build on
-them in parallel, each touching only its own files ("Wave 3 file ownership"). Until a card
-lands, its seam behaves as before wave 3: the 22 core scenarios pass in scripted mode with
-no scenario edits.
+## Layers
 
-## Brokers as data
-
-A broker is a row, not code (`domain/broker.py`, `ports/brokers.BrokerRepository` on the
-unit of work):
-
-| Part | What it holds |
-|---|---|
-| `IntentDef` | `intent_id`, `title`, `description`, `examples`, `priority` (order in the gate prompt, lower first; `other` is 1000), `must_act`, `noop_eligible`, `system` (only from code) |
-| `ObligationDef` | `kind`, `follow_up_minutes` (30), `max_attempts` (2), `follow_up_intent` (empty: `<kind>_follow_up_due`), `on_exhausted` (`dispatcher_email`, `hero_task`, `broker_slack`) |
-| `DocumentTypeDef` | `type_id`, `fields` (`FieldDef`: `name`, `kind`, `check`) |
-| `DocumentRequirement` | `type_id`, `at_stage`, `within_minutes`, `opens_obligation` |
-| `BrokerLimits` | `validation` (`ValidationConfig`), `max_steps` (8; 0 = one plan, no action tools), `max_cost_usd` (0.05), `max_rejections` (3) |
-| `Rollout` | `percent` of loads on the current version, `previous_version` |
-
-`standard_broker()` is the catalog every broker starts from (`new_broker` copies it) and
-the one a load runs on while its broker was never saved: the 8 message intents with the
-gate prompt's descriptions word for word, the system intents `delay_risk_high`,
-`delay_risk_low`, `eta_follow_up_due` and `document_processed`, the `eta_request`
-obligation (30 min, 2 attempts, its follow-up intent `eta_follow_up_due`, exhausted to the
-dispatcher email then a Hero task) and the document types `bol`, `pod`,
-`rate_confirmation`, `receipt` (`docs/answers.md` 1.2). It has no document requirement.
-`Intent` and `ObligationKind` stay as the standard ids; everywhere else an intent or a kind
-is a `str` of the catalog.
-
-**Catalog rules.** Every validated `Broker` runs `catalog_problems(broker)` (all problems
-in one error): snake_case unique ids; the system intents code emits and every obligation's
-follow-up intent present, `system`, `must_act`; `eta_request` following up as
-`eta_follow_up_due`; `document` and `other` present, `other` last in priority; a field's
-check fits its kind; a requirement names a known document type and obligation kind, and
-`within_minutes` needs `opens_obligation`; limits within caps. `Broker.revised(**changes)`
-is the validated copy (`model_copy` skips validation) and `with_follow_up_intents` adds a
-new obligation's follow-up intent. Stored brokers are validated again when read.
-
-**Versions and canary.** A configuration change (`PUT /api/brokers/{id}`, a publish) bumps
-`config_version`; a rollout change re-saves the current version with its new `rollout`.
-The repository keeps the whole broker per version (`broker_versions`, jsonb; two deferred
-foreign keys tie `brokers` and `broker_versions`). `load_run_context` reads the load's
-broker, and while `rollout.percent < 100` also `get_version(previous_version)`;
-`choose_version(current, previous, load_id)` sends a load to the current version when the
-sha256 of its id falls in the first `percent` buckets of 100, so a load keeps its version
-across runs. The run records `broker_id` and `broker_config_version`. Publishing an SOP
-saves the broker with `sop_version`, `config_version + 1` and `rollout = {percent: 100,
-previous_version: <old>}`; a canary publishes with a lower percent; rollback is
-`percent: 0`. Known gap: the canary splits the catalog and the limits, but the SOP index
-serves the latest published text of a broker to every load. `Broker.validation_config()` is the broker's `ValidationConfig` with each
-kind's attempt cap (`max_attempts`, per kind, `attempt_cap(kind)`).
-
-## Knowledge base
-
-Two ports (`ports/knowledge.py`), because they live in different phases of a run:
-
-- `SopStore`, on the unit of work: uploaded `SopDocument`s, the broker's one `SopDraft`
-  (sections under review, `proposed_intents`, `proposed_requirements`,
-  `proposed_obligations`) and the published `SopVersion`s (immutable, `version` = content
-  hash). `broker_id` None is the standard layer (stored under the owner key
-  `'standard'`, since the owner is part of the primary keys). A version id is
-  `"<standard>+<broker>"`; publishing an existing version again makes it the published
-  one; `save_version(version, embeddings)` stores the sections' vectors with it.
-- `SopIndex`, in `RuntimeDeps.knowledge`, read while the run thinks (outside any
-  transaction): `by_applies` (= `domain.sop.resolve`, today's deterministic selection),
-  `visible`, `search` (pgvector cosine plus `ts_rank`, fused by reciprocal rank, in
-  Postgres; word overlap in memory), `read`, `version`. Another broker's sections are
-  never returned.
-
-Which index a runtime reads (`bootstrap.build_knowledge`):
-
-- Postgres: `adapters.knowledge.postgres.knowledge_index(settings, embedder=...)`, the
-  published sections in the database. A database with nothing published serves no
-  section: run `agent sop import sops/` after `agent db migrate`.
-- The memory store (the platform's sessions, a local runtime): `StoreSopIndex`, the
-  versions published in that store, with the `sops/` tree for every layer never
-  published. A broker onboarded through the API therefore reaches the runs of the same
-  simulation. It opens a unit of work per call, so it is only called while the run
-  thinks, outside any unit of work.
-- The eval runner: `MemorySopIndex.from_files(sops/)` (or a broker export's sections), the
-  tree read on every call.
-
-`agent sop import <dir> [--broker <id>]` (idempotent) turns `sops/` into published
-versions (standard, northline, keystone), creating a missing broker with `new_broker`.
-
-Embeddings: `openai/text-embedding-3-small`, 1536 dimensions (`config/models.yaml`
-`embedding`), only in live and record mode. Scripted, replay and CI use `FakeEmbedder`:
-tools never run offline, so no real query is embedded and there is no embedding cassette.
-The `vector` extension lives in `public` (scratch schemas set `search_path` to their own
-schema): columns are `public.vector(1536)` and the operator `OPERATOR(public.<=>)`.
-
-Onboarding: upload (`POST /api/brokers/{id}/sops`) → `PageReader` → `compile` role
-(structured output: sections with title, description, verbatim body, proposed `applies`,
-proposed intents, requirements and obligations) → the editor reviews the draft → publish
-(embeddings, hash, lint: every section's `applies` valid, every intent with a section) →
-the broker's new config version.
-
-## Agent loop
-
-Graph: `prefilter → triage → knowledge → agent → validate` (`application/graph/`,
-`application/agent.py`, `application/agent_tools.py`).
-
-- **triage** is the gate on the broker's catalog: system intents from code, message
-  intents and `must_act` from the catalog; for `standard_broker()` its prompt is the tuned
-  gate prompt byte for byte. `Broker.triage = False` skips the model (the message goes on
-  as `other`). Its trace node keeps the id `gate`.
-- **knowledge** gives the sections of `by_applies` and the catalog, and no longer
-  escalates: the gap moves to the agent, `finish(no_procedure=true)` with nothing approved
-  escalates with `SOP_GAP_TITLE` and reason `sop_gap:`.
-- **agent** is one `generate` call on the `agent` role with tools, `max_tool_rounds =
-  max_steps` and `max_cost_usd`; the adapter's loop runs the rounds (so `llm_calls` stays
-  1 per agent node) and checks the running cost after each round. Read tools:
-  `search_sop`, `read_sop_section`, `get_history`, `get_ledger`, `get_load`,
-  `read_document`, `list_document_requirements`. One action tool per `Action` type: it
-  builds the action, runs `domain.validation.check_action` against the actions staged so
-  far and answers accepted or refused by a rule. A tool never executes anything.
-- **The staged plan is a pure fold over the transcript** (`stage_from_transcript`): the
-  node recomputes accepted and refused actions from the transcript's tool calls in every
-  mode, because scripted and replay models never run tools. The live staging only answers
-  the model. The trajectory (`RunRecord.trajectory`, `TrajectoryStep`) is the transcript;
-  each assistant entry carries its round's `usage`.
-- `AgentOutcome(Plan)` keeps `actions`, so a plan given in the answer (every core scenario's
-  `script.decide`) is validated as before.
-- **validate** runs the rules over the staged actions plus the answer's actions: the merge
-  point, and defense in depth (a violation on a staged action is logged and recorded).
-- The verdict, in order: a high-severity violation, or more refused calls than
-  `max_rejections` → `BLOCKED_TITLE` (reason `blocked: <rules>` or `blocked:
-  max_rejections`), the accepted actions still run; `no_procedure` with nothing approved →
-  `sop_gap`; nothing approved → `noop`; else `acted`. The validator uses the broker's
-  limits (`ctx.broker.validation_config()`); `RuntimeConfig.validation` is no longer read
-  by runs.
-- `RunRecord.plan` holds every action the agent proposed (staged calls in order, refused
-  ones included, then the answer's own actions minus exact repeats); `RunRecord.intent` is
-  the agent's label when the catalog knows it, else the triage intent.
-- The run context carries a 200-event history window (`history_events_limit`) and the
-  load's documents (read when an attachment or `document_processed` event is in that
-  window), so the read tools need no transaction.
-- `application/tools.py` keeps only the tool texts (the eval metadata hashes them);
-  `decide.py` is gone. The OpenRouter adapter sends images as data-URL parts, stops the
-  rounds once `max_cost_usd` is spent and writes each round's `usage` in its assistant
-  entry; the cassette key adds image hashes and the cost cap only when a request has them.
-
-Model roles: `gate`, `agent` (was `decide`), `judge`, `driver_sim`, `extract` (documents,
-images included), `compile` (SOP drafts, scenario drafts). `LlmRequest` carries `images`
-and `max_cost_usd`.
-
-## Obligations as data
-
-An obligation's kind is a catalog `ObligationDef.kind`. An SMS that asks for something
-names it in `requests` (`purpose: eta_request` is the older spelling of `requests:
-eta_request`, and a contradiction is refused): the executor opens that obligation with
-the first one and counts every later one, and the rules project it the same way.
-`open_obligation` opens one with no attempt (a document the load owes). The attempt cap
-is per kind (`ValidationConfig.max_attempts`, filled from the catalog; rules
-`attempt_cap`, which counts SMS and email `requests`, and `known_obligation_kind`, which
-refuses a kind outside the catalog; `obligation_exists` refuses `open_obligation` when one
-is already open). An email's `requests` opens and counts like an SMS's. `update_stage`
-into a stage with a `DocumentRequirement` opens its `opens_obligation`
-(attempts 0), with a timer after `within_minutes` when set; its follow-up timer produces
-the kind's follow-up intent; when the attempts are used up, `on_exhausted` says who gets
-the case.
-
-## Documents
-
-`ports/documents.py`: `BlobStore` (`put` returns `sha256:<hex>`, the same bytes the same
-reference; the filesystem under `BLOBS_DIR` now, an object store later), `PageReader`
-(pypdfium2: each page's text, and the page as a PNG when its text is too thin),
-`DocumentRepository` (on the unit of work), `DocumentProcessor` (`process_pending`, owns
-its units of work).
-
-- `ingest_message` saves one `Document.pending` per attachment of a new message, in the
-  message's unit of work.
-- `tick()` = `fire_due_timers → documents.process_pending → process_all →
-  dispatch_outbox`, so a document is read before the queue runs and its event queues
-  behind the message.
-- The pipeline (card W3-DOC): blob → pages → one `extract` call that classifies and
-  extracts with the broker's `DocumentTypeDef` schemas (a page with little text goes as
-  an image) → checks in code per `FieldDef.check` → the document saved `processed` (every
-  check ok), `needs_review` (a check failed, low confidence or a missing field) or
-  `failed` → one `document_processed` event, `doc:{document_id}`, appended and queued once.
-  A clean `processed` document of a requirement's `type_id` closes its obligation as
-  `satisfied` in that unit of work; `needs_review` leaves it open.
-- Checks against the load: `po_number` (the load's PO; on load 481207 it is in the instructions, `PO 55821`), `mc_number`
-  (the carrier's), `stop_name` (matches any of the load's stop names, the shipper or the
-  consignee), `date_in_window` (for a fixed appointment: on the appointment's day; for a
-  window appointment: inside the window), `seal_number` (the seal the driver reported),
-  `signature` (present). A POD's `receiver` is the receiving facility (consignee), not the
-  person who signed; its `po_numbers` are checked, so a POD with the wrong PO goes to
-  review.
-- **Only the `document_processed` run acts on a document.** The message's own run never
-  does (the prompt and `sops/standard/documents.md` say so), so an attachment is never
-  handled twice.
-- Ingress: `POST /api/loads/{id}/attachments` (multipart: `file`, `sender_contact_id`,
-  `body`, `channel`, `message_id`, `occurred_at`; 201; the document stays pending until
-  the next tick; 413 over 20 MB) and `attachments[].ref`.
-- As built (`application/documents.py`): the model answers a generic `Extraction`
-  (`{type_id, confidence, fields: [{name, value}], notes}`), validated against the chosen
-  type in code. `needs_review` = confidence under 0.7, an unknown type, a missing or
-  unreadable value, a failed check, or a non-empty POD `exceptions`. A model, file or
-  reader error marks the document `failed`, and its `document_processed` event still goes
-  out with that status (the SOP hands it to a Hero); it is never retried. A document of an
-  unknown load is saved `failed` with no event. `date_in_window` picks the stops from the
-  field name (`deliver` → delivery stops, `pickup`/`ship` → pickup stops). The expected
-  seal is the last one an inbound message reported. The event body is the reading's
-  summary (type, status, reasons). Two workers may read the same document; only one
-  announces it.
-
-## Evals for non-determinism
-
-Card W3-EVK. The spec gains `expect.intent`, `tools_used`, `sections_read`,
-`max_rejections` and `judge {rubric, min_score}`; `script.agent` (`script.decide` is its
-alias, merged in front) may carry `tool_calls` (`ScriptedReply`), so the transcript fold
-is tested in scripted mode; `script.judge`, `script.extract`; `MessageStep.attachments`
-(`{filename, fixture, content_type}`: fixture bytes go into the trial's `MemoryBlobStore`).
-Graders read `RunRecord.trajectory`. The judge (role `judge`) is called by the runner on
-the uncounted inner model: judge calls never count in `llm_calls`, and in scripted mode
-without `script.judge` it is skipped with a warning. `--broker-file` runs a suite on an
-exported broker (its catalog plus published sections); `agent eval draft` drafts scenarios
-from a broker's sections (role `compile`); `eval lint` errors on an intent without a
-scenario. New suites: `agent` (an outside email refused at the call, the rejection budget,
-a gap searched then handed to a Hero) and `docs` (clean POD, POD with exceptions, overdue
-POD). The negative control adds an agent that stages `send_email` to an outside address.
-
-Replay cassettes miss until the wave 3 re-record (card W3-BAKE): the role is `agent` now
-and the schemas changed. On `wave3`, CI runs the replay step with `continue-on-error`.
-Broker exports must pass `catalog_problems`; a scenario with a `broker_file` runs on the
-in-memory index (its sections replace the broker's layer), so the Postgres variant that
-reads imported sections skips it.
-
-## Wave 3 file ownership
-
-Paths are under `src/freight_agent/` unless they start with `tests/`, `evals/`, `sops/`,
-`docs/`, `config/`, `migrations/` or `web/`. A card writes only its files (plus new test
-files under its own names). A change it needs elsewhere goes in its report as "needs from
-<card>". Every stub C0 created names its owning card in its docstring.
-
-| Card | Owns | Must not touch |
-|---|---|---|
-| **W3-BRK** | `domain/broker.py` (catalog validation, methods), `ports/brokers.py`, `adapters/persistence/memory/brokers.py`, `adapters/persistence/postgres/brokers.py`, `migrations/0003_brokers.sql`, `api/routes/brokers.py`; `tests/unit/domain/test_broker.py`, `tests/contract/test_brokers.py`, `tests/integration/test_api_brokers.py`, `tests/property/test_broker_properties.py` | runtime, context, executor, prompts, `api/schemas.py`, the stores' `store.py`, `web/` |
-| **W3-KNW** | `ports/knowledge.py`, `domain/sop.py`, `adapters/knowledge/{memory,postgres,embeddings,fake_embedder,pdf_pages}.py`, `adapters/sop/{files,lint,importer}.py`, `adapters/persistence/{memory,postgres}/sops.py`, `migrations/0004_knowledge.sql`, `application/sop_ingestion.py`, `application/prompts_knowledge.py`, `cli_sop.py`, `api/routes/knowledge.py`, `evals/fixtures/sops/acme_sop.{pdf,md}` (later edits); `tests/unit/adapters/test_knowledge_*.py`, `tests/unit/adapters/test_sop_files.py`, `tests/unit/adapters/test_sop_lint.py`, `tests/unit/application/test_sop_ingestion.py`, `tests/unit/domain/test_sop.py`, `tests/contract/test_sops.py`, `tests/contract/test_sop_index.py`, `tests/integration/test_api_knowledge.py`, `tests/integration/test_api_sops.py`, `tests/unit/test_sop_seed.py`, `tests/property/test_sop_properties.py` | agent, prompts, runtime, `adapters/llm/openrouter.py`, `adapters/documents/pdfium.py`, the bodies of `sops/*.md`, `bootstrap.py` (expose `knowledge_index(settings) -> SopIndex` in `adapters/knowledge/postgres.py`, under that name) |
-| **W3-AGT** | `application/agent.py`, `application/agent_tools.py`, deletes `application/tools.py` and `application/decide.py`, `application/{gate,prompts,runtime,context,executor,escalation}.py`, `application/graph/{build,nodes,state}.py`, `domain/{rules,validation,actions,intents,obligations,runs}.py`, `adapters/llm/{openrouter,cassette,scripted}.py`; `tests/unit/application/*` (but `test_documents.py` and `test_sop_ingestion.py`), `tests/unit/domain/test_{rules,validation,actions,obligations}.py`, `tests/unit/adapters/test_{openrouter,cassette,scripted_model}.py` | `evalkit/`, `api/`, `web/`, persistence, knowledge adapters, the document pipeline, `sops/` text, `config/` |
-| **W3-DOC** | `ports/documents.py`, `domain/documents.py`, `application/documents.py` (`DocumentPipeline`, the constructor `bootstrap.build_documents` calls), `application/prompts_documents.py`, `adapters/documents/{fs_blobs,memory_blobs,pdfium,fake_pages}.py` (`PdfiumPageReader` in `pdfium.py`, under that name), `adapters/persistence/{memory,postgres}/documents.py`, `migrations/0005_documents.sql`, `api/routes/documents.py`, `api/simulation.py` (the upload path only), the body of `sops/standard/documents.md`, `evals/fixtures/docs/*` (later edits); `tests/unit/application/test_documents.py`, `tests/unit/adapters/test_pdfium.py`, `tests/unit/adapters/test_blobs.py`, `tests/contract/test_documents.py`, `tests/integration/test_api_documents.py` | agent, prompts, executor, knowledge, `application/runtime.py` (reached through `DocumentProcessor` and `ingest_message`), `evalkit/`, `web/` |
-| **W3-EVK** | `evalkit/*` (with `judge.py`, `draft.py`), `cli.py`, `api/evals.py`, `api/routes/evals.py`, `api/routes/broker_evals.py`, `adapters/observability/langsmith.py`, `evals/scenarios/agent/`, `evals/scenarios/docs/`, `evals/brokers/`; `tests/evalkit/*`, `tests/integration/test_api_evals.py`, `tests/unit/adapters/test_langsmith_tracer.py` | application, domain, persistence, `web/`, `config/`, `evals/scenarios/core/` |
-| **W3-WEB** | everything under `web/` | any Python |
-| **W3-OPS** | `docs/{answers.md,api.md,architecture.html,build_diagrams.js}`, `README.md`, `Makefile`, `.github/workflows/ci.yml`, `config/*.yaml` (after C0), `bootstrap.py`, `settings.py`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `evals/RESULTS.md`, `migrations/0006_*` if needed; `tests/unit/test_bootstrap.py`, `tests/unit/test_settings.py`, `tests/unit/test_cli_platform.py`, `tests/integration/test_postgres_scenarios.py`, `tests/integration/test_postgres_migrations.py` | application, domain, `evalkit/` internals, `web/` |
-
-Frozen after C0 (no card edits them; changes go through the orchestrator): `api/schemas.py`
-(the wave 3 bodies are there), `api/routes/__init__.py`, `api/app.py`, `api/views.py`,
-`ports/repositories.py`, `ports/llm.py`, `adapters/persistence/memory/store.py` and
-`adapters/persistence/postgres/store.py` (they wire every repository once),
-`adapters/llm/models_config.py`, `domain/events.py`, `pyproject.toml` and `uv.lock`,
-`tests/contract/{conftest,uow_factories,test_unit_of_work}.py`, `tests/conftest.py`,
-`evals/scenarios/core/` (zero edits: the 22 scenarios must pass as written),
-`docs/decisions.md`, and the applied migrations `0001` and `0002`.
-
-**Migration numbers are reserved:** `0003` brokers (W3-BRK), `0004` knowledge (W3-KNW),
-`0005` documents (W3-DOC), `0006` W3-OPS if needed. One file per card, never shared: the
-migrator refuses an applied file that was edited.
-
-**Adapters found by name (all landed).** The composition root loads a card's adapter by module and
-attribute (`bootstrap.LazyAdapter`), so the card plugs in without editing it:
-`adapters.knowledge.postgres.knowledge_index(settings)` (W3-KNW, for
-`PERSISTENCE=postgres`; until then the runs read `sops/`), and
-`application.documents.DocumentPipeline(uow_factory=, clock=, ids=, llm=, blobs=, pages=,
-timeout_s=)` with `adapters.documents.pdfium.PdfiumPageReader()` (W3-DOC; until both exist
-the runtime runs `NullDocumentProcessor`). Every Postgres repository is implemented
-(migrations 0003 brokers, 0004 knowledge, 0005 documents).
+The import rules in `pyproject.toml` (import-linter, `make arch`, also a unit test):
+`domain` imports nothing outside itself (no LangChain, LangGraph, FastAPI or httpx);
+`ports` import only the domain; `application` imports neither adapters nor the API (it
+may import LangGraph, not LangChain); `adapters` import neither the application nor the
+API; `evalkit` does not import the API. `bootstrap.py` is the only place that wires
+adapters to ports. pyright runs in strict mode on `domain`, `ports` and `application`.

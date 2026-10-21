@@ -74,9 +74,11 @@ What this shows: the guardrails held in every failure (no message to a stranger,
 request over the cap, every model outage reached a Hero), but a mixed-model loop is less
 reliable than the primary alone. Two changes follow from it, not made here: retry a 429
 on the same model with a short backoff before falling back, and give the agent role a
-fallback that passes the suite (Claude Haiku 5.5 did, below). The `p2` wording is a prompt
-or SOP fix: the Acme `proof_of_delivery` section can ask the Hero task to quote each
-failed check's expected and found values.
+fallback that passes the suite (Claude Haiku 5.5 did, below). The `p2` miss is the model
+summarizing: the agent's prompt shows `po_numbers: MISMATCH; expected "55821", found
+"55812"` and the Acme `proof_of_delivery` section asks for "the values found and what
+does not match", yet the task said only that the PO did not match. A prompt rule to copy
+each failed check into the task is the next thing to try.
 
 ### The same prompts at k = 1
 
