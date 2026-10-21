@@ -307,7 +307,9 @@ class ScenarioTarget:
     observations out. A new model per example (`model_factory`), so circuit breakers
     never carry one example's outage into the next. `config` sets the gate's engine, and
     `decisions` is the jev engine's model (one for the experiment: it has no breaker), and
-    `embeddings` index each trial's facility memory (one for the experiment)."""
+    `embeddings` index each trial's facility memory (one for the experiment).
+    `on_output`, when given, sees each example's scenario and outputs as soon as it has
+    played (`agent play` prints its transcript there)."""
 
     def __init__(
         self,
@@ -321,8 +323,10 @@ class ScenarioTarget:
         config: RuntimeConfig | None = None,
         decisions: DecisionModel | None = None,
         embeddings: Embeddings | None = None,
+        on_output: Callable[[Scenario, dict[str, Any]], None] | None = None,
     ) -> None:
         self._scenarios = scenarios
+        self._on_output = on_output
         self._embeddings = embeddings
         self._evals_dir = evals_dir
         self._knowledge = knowledge
@@ -352,7 +356,7 @@ class ScenarioTarget:
             embeddings=self._embeddings,
         )
         meter.spent_usd += played.cost_usd
-        return {
+        outputs: dict[str, Any] = {
             "scenario_id": scenario.id,
             "error": played.error,
             "cost_usd": played.cost_usd,
@@ -361,6 +365,9 @@ class ScenarioTarget:
             "rounds": len(played.usage),
             "steps": [o.compact() for o in played.observations],
         }
+        if self._on_output is not None:
+            self._on_output(scenario, outputs)
+        return outputs
 
 
 # --- evaluators -------------------------------------------------------------------------
@@ -521,8 +528,10 @@ async def run_experiment(
     k: int,
     agent: str | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
+    description: str | None = None,
 ) -> ExperimentRun:
-    """Sync the suite's dataset, then evaluate `chosen` with `aevaluate`."""
+    """Sync the suite's dataset, then evaluate `chosen` with `aevaluate`. `description`
+    is the experiment's (default: the `agent eval run` command)."""
     from langsmith import traceable
     from langsmith.evaluation import aevaluate
 
@@ -548,7 +557,7 @@ async def run_experiment(
         num_repetitions=k,
         metadata=metadata.for_langsmith(),
         experiment_prefix=f"{suite}-k{k}",
-        description=f"agent eval run --suite {suite} --k {k}",
+        description=description or f"agent eval run --suite {suite} --k {k}",
         max_concurrency=concurrency,
         client=client,
     )

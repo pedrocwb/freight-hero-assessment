@@ -15,6 +15,7 @@ from freight_agent.evalkit.suite import (
     REGRESSION,
     SuiteError,
     discover,
+    find,
     gating,
     select,
     suites,
@@ -211,3 +212,30 @@ def test_the_shipped_capability_scenarios_do_not_gate() -> None:
     measured = [s.id for s in discover(ROOT / "evals", "core") if not gating(s)]
 
     assert measured == ["c3_relative_eta", "d4_lumper_no_sop"]
+
+
+# --- find (agent play) ------------------------------------------------------------------
+
+
+def test_find_searches_every_suite_by_id_in_the_order_asked(evals: Path) -> None:
+    write_scenario(evals, "a1", suite="core")
+    write_scenario(evals, "m1", suite="memory", tags="[regression, sop:x]")
+
+    assert [s.id for s in find(evals, ids=["m1", "a1"])] == ["m1", "a1"]
+    assert [s.id for s in find(evals, tags=["sop:x"])] == ["m1"]
+    assert [s.id for s in find(evals, suite="core")] == ["a1"]
+    with pytest.raises(SuiteError, match="no scenario 'm1' in suite 'core'"):
+        find(evals, ids=["m1"], suite="core")
+
+
+def test_find_refuses_an_empty_choice_and_an_id_in_two_suites(evals: Path) -> None:
+    write_scenario(evals, "same", suite="core")
+    write_scenario(evals, "same", suite="memory")
+
+    with pytest.raises(SuiteError, match="say which scenarios to play"):
+        find(evals)
+    with pytest.raises(SuiteError, match="more than one suite: add --suite"):
+        find(evals, ids=["same"])
+    assert [s.suite for s in find(evals, ids=["same"], suite="memory")] == ["memory"]
+    with pytest.raises(SuiteError, match="has the tag nope"):
+        find(evals, ids=["same"], suite="core", tags=["nope"])
