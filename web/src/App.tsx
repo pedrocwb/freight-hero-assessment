@@ -1,19 +1,19 @@
 import clsx from "clsx";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 
-import { langsmithProject, modelReady } from "./api";
-import { ClockRail } from "./components/ClockRail";
+import { modelReady } from "./api";
 import { Toasts } from "./components/ui";
+import { clockTime, zoneAbbreviation } from "./lib/time";
 import { href, parseHash, type Route, type ScreenId } from "./lib/route";
-import { LoadInspector } from "./screens/LoadInspector";
+import { Conversation } from "./screens/Conversation";
 import { Scenarios } from "./screens/Scenarios";
 import { SopViewer } from "./screens/SopViewer";
 import { SimProvider, useSim } from "./state/sim";
 import { ToastProvider } from "./state/toasts";
 
 const SCREENS: { id: ScreenId; label: string }[] = [
+  { id: "load", label: "Conversation" },
   { id: "scenarios", label: "Scenarios" },
-  { id: "inspector", label: "Load inspector" },
   { id: "sops", label: "SOPs" },
 ];
 
@@ -27,84 +27,26 @@ function useRoute(): Route {
   return route;
 }
 
-function StreamBadge() {
-  const { stream } = useSim();
-  const label = stream === "live" ? "Live" : stream === "polling" ? "Polling every 5 s" : "Connecting";
-  const title =
-    stream === "polling"
-      ? "The event stream is down, so panels refresh every 5 seconds"
-      : "Panels refresh as the agent works";
+/** The simulation's clock, in the load's local time; a dot when the live stream is down. */
+function Clock() {
+  const { state, timezone, stream } = useSim();
+  const now = state?.now;
   return (
-    <span className={clsx("stream", `stream--${stream}`)} title={title}>
-      <span className="stream-dot" aria-hidden="true" />
-      {label}
-    </span>
-  );
-}
-
-/** Whether the agent can run (live on OpenRouter), and where its traces go. */
-function ModelBadge() {
-  const { state } = useSim();
-  if (!state) return null;
-  const project = langsmithProject(state);
-  return (
-    <>
-      {modelReady(state) ? (
-        <span className="mode" title="Every run calls the models on OpenRouter and costs money">
-          Model: <strong>live</strong>
-        </span>
-      ) : (
-        <span className="mode mode--off" title="Set OPENROUTER_API_KEY and restart the API">
-          Model: <strong>no API key</strong>
-        </span>
-      )}
-      {project ? (
-        <a href={project} target="_blank" rel="noreferrer">
-          LangSmith project
-        </a>
-      ) : null}
-    </>
-  );
-}
-
-function LoadPicker({ screen }: { screen: ScreenId }) {
-  const { loads, selectedLoadId, selectLoad } = useSim();
-  return (
-    <label className="load-picker">
-      <span className="load-picker-label">Load</span>
-      <select
-        className="input"
-        value={selectedLoadId ?? ""}
-        onChange={(e) => {
-          selectLoad(e.target.value || null);
-          // A link's load and run no longer apply once another load is picked.
-          if (screen === "inspector") window.location.hash = href("inspector");
-        }}
-        disabled={!loads.length}
-      >
-        {!loads.length ? <option value="">No loads yet</option> : null}
-        {loads.map((l) => (
-          <option key={l.load_id} value={l.load_id}>
-            {l.load_id}, {l.broker_name}
-          </option>
-        ))}
-      </select>
-    </label>
+    <p className="clock" title={stream === "polling" ? "The live stream is down: the page refreshes every 5 s" : "Simulation time at the load's stop"}>
+      <time dateTime={now}>{now ? clockTime(now, timezone) : "--:--"}</time>
+      <span className="clock-zone">{now ? zoneAbbreviation(now, timezone) : ""}</span>
+      {stream === "polling" ? <span className="clock-off" aria-label="Live updates are off" /> : null}
+    </p>
   );
 }
 
 function Shell() {
   const sim = useSim();
   const { screen, params } = useRoute();
-  const runs = sim.snapshot.data?.runs.length ?? 0;
-  const badges: Partial<Record<ScreenId, ReactNode>> = {
-    scenarios: sim.playing ? <span className="count count--live">playing</span> : null,
-    inspector: runs ? <span className="count">{runs}</span> : null,
-  };
   const current = SCREENS.find((s) => s.id === screen) ?? SCREENS[0]!;
 
   useEffect(() => {
-    document.title = `${current.label}, load agent platform`;
+    document.title = `${current.label}, load agent`;
   }, [current.label]);
 
   return (
@@ -113,46 +55,39 @@ function Shell() {
         Skip to content
       </a>
       <header className="topbar">
-        <div className="brand">
+        <a className="brand" href={href("load")} aria-label="Load agent, conversation">
           <span className="brand-mark" aria-hidden="true" />
-          <span className="brand-name">Load agent platform</span>
-        </div>
-        <LoadPicker screen={screen} />
-        <div className="topbar-meta">
-          <ModelBadge />
-          <StreamBadge />
-        </div>
+          <span className="brand-name">Load agent</span>
+        </a>
+        <nav className="nav" aria-label="Screens">
+          {SCREENS.map((s) => (
+            <a
+              key={s.id}
+              href={href(s.id)}
+              className={clsx("nav-link", s.id === screen && "nav-link--current")}
+              aria-current={s.id === screen ? "page" : undefined}
+            >
+              {s.label}
+              {s.id === "scenarios" && sim.playing ? <span className="nav-dot" aria-label="playing" /> : null}
+            </a>
+          ))}
+        </nav>
+        <Clock />
       </header>
 
-      <aside className="rail">
-        <ClockRail />
-        <nav className="nav" aria-label="Screens">
-          <ul className="nav-list">
-            {SCREENS.map((s) => (
-              <li key={s.id}>
-                <a
-                  href={href(s.id)}
-                  className={clsx("nav-link", s.id === screen && "nav-link--current")}
-                  aria-current={s.id === screen ? "page" : undefined}
-                >
-                  <span>{s.label}</span>
-                  {badges[s.id] ?? null}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-      </aside>
-
-      <main className="main" id="main" tabIndex={-1}>
+      <main className={clsx("main", screen === "load" && "main--chat")} id="main" tabIndex={-1}>
         {sim.stateError && !sim.state ? (
-          <div className="banner banner--critical" role="alert">
-            <strong>The API is not answering.</strong> {sim.stateError}. Start it on port 8000 (see
-            web/README.md); this page retries every 5 seconds.
-          </div>
+          <p className="banner banner--alert" role="alert">
+            The API is not answering: {sim.stateError}. Start it with <code>uv run agent serve</code>; this page retries every 5 seconds.
+          </p>
         ) : null}
-        {screen === "scenarios" && <Scenarios params={params} />}
-        {screen === "inspector" && <LoadInspector params={params} />}
+        {sim.state && !modelReady(sim.state) ? (
+          <p className="banner banner--warn" role="status">
+            No model key: set <code>OPENROUTER_API_KEY</code> and restart the API, or every run escalates to a Hero.
+          </p>
+        ) : null}
+        {screen === "load" && <Conversation params={params} />}
+        {screen === "scenarios" && <Scenarios />}
         {screen === "sops" && <SopViewer />}
       </main>
       <Toasts />

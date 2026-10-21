@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from "react";
 import { api, type RunRecord } from "../api";
 import { useColorScheme } from "../hooks/useColorScheme";
 import { useResource } from "../hooks/useResource";
-import { DARK_PALETTE, describePath, highlightMermaid, LIGHT_PALETTE } from "../lib/graph";
+import { DARK_PALETTE, highlightMermaid, LIGHT_PALETTE } from "../lib/graph";
 
 type Mermaid = (typeof import("mermaid"))["default"];
 
@@ -55,16 +55,6 @@ export function RunGraph({ run }: { run: Pick<RunRecord, "nodes" | "finished_at"
 
   return (
     <figure className="run-graph">
-      <figcaption className="run-graph-path">
-        {nodes.length ? (
-          <>
-            <span className="visually-hidden">Path: </span>
-            {describePath(nodes)}
-          </>
-        ) : (
-          <span className="muted">The run lists no graph node.</span>
-        )}
-      </figcaption>
       {graph.error ? (
         <p className="hint">The run graph is not available: {graph.error}</p>
       ) : error ? (

@@ -1,16 +1,10 @@
 /**
  * The scenarios (`GET /api/scenarios`) and the one that plays or played last
  * (`GET /api/scenarios/run`, the stream's `scenario` event): grouping, filtering, and the
- * steps of a scenario with the run's progress on them.
+ * run's progress.
  */
 
-import type {
-  Scenario,
-  ScenarioCheck,
-  ScenarioRun,
-  ScenarioStepKind,
-  ScenarioStepStatus,
-} from "../api";
+import type { Scenario, ScenarioRun } from "../api";
 
 export interface SuiteGroup {
   suite: string;
@@ -40,45 +34,9 @@ export function filterScenarios(scenarios: readonly Scenario[], query: string): 
   });
 }
 
-export interface StepView {
-  index: number;
-  at: string;
-  note: string;
-  /** Null for a step the run reports that the scenario does not list. */
-  kind: ScenarioStepKind | null;
-  status: ScenarioStepStatus;
-  checks: ScenarioCheck[];
-  runIds: string[];
-}
-
 /** The run, when it is of this scenario. */
 export function runOf(scenarioId: string, run: ScenarioRun | null | undefined): ScenarioRun | null {
   return run && run.scenario_id === scenarioId ? run : null;
-}
-
-/**
- * The scenario's steps with the run's progress: status, checks and the runs each step
- * caused. Without a run of this scenario every step is pending.
- */
-export function stepViews(scenario: Scenario, run: ScenarioRun | null): StepView[] {
-  const progress = new Map((runOf(scenario.id, run)?.steps ?? []).map((step) => [step.index, step]));
-  const views: StepView[] = scenario.steps.map((step) => {
-    const done = progress.get(step.index);
-    progress.delete(step.index);
-    return {
-      index: step.index,
-      at: step.at,
-      note: step.note,
-      kind: step.kind,
-      status: done?.status ?? "pending",
-      checks: done?.checks ?? [],
-      runIds: done?.run_ids ?? [],
-    };
-  });
-  for (const step of progress.values()) {
-    views.push({ index: step.index, at: step.at, note: step.note, kind: null, status: step.status, checks: step.checks, runIds: step.run_ids });
-  }
-  return views.sort((a, b) => a.index - b.index);
 }
 
 export interface RunTally {
