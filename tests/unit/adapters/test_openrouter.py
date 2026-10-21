@@ -31,6 +31,7 @@ from langchain_openrouter import ChatOpenRouter
 from pydantic import Field, SecretStr
 
 from freight_agent.adapters.llm.models_config import (
+    FallbackConfig,
     ModelPricing,
     ModelsConfig,
     ProviderRouting,
@@ -775,7 +776,9 @@ def test_the_default_factory_maps_the_role_settings_onto_chat_openrouter() -> No
 def test_models_for_role_builds_one_model_per_entry_of_the_chain() -> None:
     config = ModelsConfig(
         roles={
-            role: RoleConfig(model="acme/small", fallbacks=("acme/tiny",), max_tokens=64)
+            role: RoleConfig(
+                model="acme/small", fallbacks=(FallbackConfig(model="acme/tiny"),), max_tokens=64
+            )
             for role in ModelRole
         },
         pricing={

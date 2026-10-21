@@ -134,7 +134,7 @@ def test_collect_metadata_records_the_code_the_sops_the_models_and_the_prompts(
     assert (found.git_sha, found.git_dirty, found.sop_version) == ("abc1234", True, "sop-v1")
     assert git.calls[0][0] == tmp_path
     config = load_models_config(MODELS)
-    assert found.models == {role.value: [c.model, *c.fallbacks] for role, c in config.roles.items()}
+    assert found.models == {role.value: list(c.models) for role, c in config.roles.items()}
     assert found.models["gate"][0] == "openai/gpt-4.1-nano"
     assert found.prompts == PROMPTS.versions()
     assert found.python is not None

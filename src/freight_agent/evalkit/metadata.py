@@ -119,7 +119,4 @@ def _models(path: Path) -> dict[str, list[str]]:
         config = load_models_config(path)
     except (OSError, ValueError):
         return {}
-    return {
-        role.value: [role_config.model, *role_config.fallbacks]
-        for role, role_config in config.roles.items()
-    }
+    return {role.value: list(role_config.models) for role, role_config in config.roles.items()}
