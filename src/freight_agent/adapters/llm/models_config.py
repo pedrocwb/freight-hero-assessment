@@ -11,6 +11,9 @@ Prices are USD per 1M tokens, copied from the public OpenRouter catalog. They ar
 estimates for budgets and reports: the billed price depends on the endpoint OpenRouter
 routes to, which is why a role names its preferred provider first.
 
+The `embeddings` block names the embedding model of each use (`memory`: the facility
+memory's semantic search), served by `adapters/memory/embeddings.py`.
+
 The `decisions` block names the decision model a role can run on instead of its chat
 model (the gate, with `GATE_ENGINE=jev`), served by `adapters/decisions/openrouter.py`.
 
@@ -151,17 +154,32 @@ class DecisionRoleConfig(_Config):
     backoff_s: float = Field(default=0.5, ge=0)  # before the 2nd send, doubled after
 
 
+class EmbeddingConfig(_Config):
+    """An embedding model, the `embeddings` block: what turns a text into the vector a
+    store's index searches by (`adapters/memory/embeddings.py`). One model and no
+    fallback: vectors of two models are not comparable, so a store keeps one."""
+
+    model: str = Field(min_length=1)  # e.g. openai/text-embedding-3-small
+    dims: int = Field(ge=1)  # the model's vector length, which the index is built for
+    timeout_s: float = Field(default=20.0, gt=0)  # one call
+
+
 class ModelsConfig(_Config):
     roles: dict[ModelRole, RoleConfig]
     pricing: dict[str, ModelPricing]
     # Roles that can also run on a decision model, chosen by a setting (GATE_ENGINE).
     decisions: dict[ModelRole, DecisionRoleConfig] = {}
+    # Embedding models by use: `memory`, the facility memory's semantic search.
+    embeddings: dict[str, EmbeddingConfig] = {}
 
     @model_validator(mode="after")
     def _decisions_priced(self) -> "ModelsConfig":
         unpriced = sorted({d.model for d in self.decisions.values()} - self.pricing.keys())
         if unpriced:
             raise ValueError(f"decision models with no pricing entry: {', '.join(unpriced)}")
+        unpriced = sorted({e.model for e in self.embeddings.values()} - self.pricing.keys())
+        if unpriced:
+            raise ValueError(f"embedding models with no pricing entry: {', '.join(unpriced)}")
         return self
 
     @model_validator(mode="after")
