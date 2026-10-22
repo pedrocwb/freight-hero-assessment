@@ -13,12 +13,11 @@ import httpx
 import pytest
 
 from freight_agent.api.app import create_app
-from tests.fakes import FakeModel
-from tests.integration.test_api_harness import api_settings
+from freight_agent.settings import Settings
 
 pytestmark = pytest.mark.unit
 
-INDEX = "<!doctype html><title>Load agent simulator</title><div id=root></div>"
+INDEX = "<!doctype html><title>Load agent workspace</title><div id=root></div>"
 SCRIPT = "console.log('the platform UI');"
 SECRET = "outside the bundle"
 
@@ -45,7 +44,8 @@ def dist(tmp_path: Path) -> Path:
 @asynccontextmanager
 async def client_for(web_dist: Path | None = None) -> AsyncIterator[httpx.AsyncClient]:
     """`web_dist=None` leaves the folder to the app: WEB_DIST, else web/dist."""
-    app = create_app(api_settings(), llm=FakeModel(), web_dist=web_dist)
+    settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+    app = create_app(settings, web_dist=web_dist)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -111,14 +111,14 @@ async def test_the_page_cannot_be_posted_to(dist: Path) -> None:
 # --- /api stays untouched ---------------------------------------------------------------
 
 API_PROBES = [
-    ("GET", "/api/sim/state"),
-    ("GET", "/api/fixtures"),
+    ("GET", "/api/health"),
+    ("GET", "/api/health/"),
     ("GET", "/api"),
     ("GET", "/api/"),
     ("GET", "/api/nothing-here"),
     ("GET", "/api/loads/"),
     ("POST", "/api/nothing-here"),
-    ("POST", "/api/sim/state"),
+    ("POST", "/api/health"),
     ("DELETE", "/api/loads"),
 ]
 
@@ -145,7 +145,7 @@ async def test_the_api_docs_still_answer(dist: Path) -> None:
         schema = await client.get("/openapi.json")
 
     assert schema.status_code == 200
-    assert "/api/sim/state" in schema.json()["paths"]
+    assert "/api/health" in schema.json()["paths"]
 
 
 # --- without a bundle -------------------------------------------------------------------
@@ -160,7 +160,7 @@ async def test_without_a_bundle_only_the_api_answers(tmp_path: Path, make: str) 
     async with client_for(web_dist=folder) as client:
         root = await client.get("/")
         deep = await client.get("/loads/481207")
-        state = await client.get("/api/sim/state")
+        state = await client.get("/api/health")
 
     assert (root.status_code, deep.status_code) == (404, 404)
     assert root.json() == {"detail": "Not Found"}

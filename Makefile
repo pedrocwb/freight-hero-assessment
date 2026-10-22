@@ -61,7 +61,7 @@ sop-lint:
 	uv run agent sop lint
 
 # The Postgres tests: every contract suite on Postgres, the migrations, the platform's
-# restart and the assignment's scenario on both stores, as CI's integration job runs them.
+# broker profiles and the assignment's scenario on both stores, as CI's integration job runs them.
 # Needs a database: `docker compose up -d postgres`. Each test works in a schema (or a
 # database) of its own and drops it, so this database may hold data. Without a database
 # these tests skip, which keeps `make test` and `make ci` offline.

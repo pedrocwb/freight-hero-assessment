@@ -1,7 +1,7 @@
 """Scenario specification: the contract between scenario authors and the player.
 
 Every scenario is played live, on the models of `config/models.yaml`: in a LangSmith
-experiment (`evalkit.experiment`) or on the platform (`POST /api/scenarios/{id}/run`).
+experiment (`evalkit.experiment`), the CLI player or LangGraph Studio.
 Player semantics (implemented in `evalkit.runner`):
 
 1. The virtual clock starts at `date` + `start` in `timezone`.

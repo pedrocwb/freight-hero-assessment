@@ -7,7 +7,7 @@ import uvicorn
 
 from freight_agent.api.app import create_app
 
-# An open event stream never ends on its own: give it this long to close on Ctrl+C.
+# Bound shutdown while proxy requests finish.
 GRACEFUL_SHUTDOWN_S = 3
 
 

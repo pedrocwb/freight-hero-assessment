@@ -1,19 +1,7 @@
-"""The platform API: FastAPI over one in-process simulation (`docs/api.md`).
-
-`create_app` is the only entry point. It builds the simulation from the settings through
-the composition root, so the API runs the same `AgentRuntime` as the CLI and the evals,
-on a virtual clock with recording gateways, on the live model. Tests pass `llm` to play
-the agent's rounds.
-
-When the web UI has been built (`pnpm build` in `web/`, or the Docker image), the same app
-serves it, so one process on one port is the whole platform. Without a build the app is
-the API alone, and the UI runs on the Vite dev server.
-"""
+"""Serve the broker workspace UI and forward live operations to Temporal ingress."""
 
 import logging
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -25,11 +13,7 @@ from starlette.responses import Response
 from starlette.routing import Match, Mount
 from starlette.types import Scope
 
-from freight_agent.api.errors import install_error_handlers
-from freight_agent.api.routes import ROUTERS
-from freight_agent.api.scenarios import ScenarioRunner
-from freight_agent.api.simulation import DEFAULT_HEARTBEAT_S, SimulationService
-from freight_agent.interfaces.llm import LanguageModel
+from freight_agent.api.routes.durable import router
 from freight_agent.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -46,46 +30,26 @@ ASSETS_DIR = "assets"
 def create_app(
     settings: Settings | None = None,
     *,
-    llm: LanguageModel | None = None,
-    heartbeat_s: float = DEFAULT_HEARTBEAT_S,
     web_dist: Path | None = None,
 ) -> FastAPI:
-    """The API with a fresh simulation at the default start (`POST /api/sim/reset` moves it).
+    """UI and fixed-upstream proxy; no local database, model or virtual clock.
 
-    `llm` replaces the model of every simulation the app builds.
-    `web_dist` is the built UI to serve; None means `settings.web_dist` (`WEB_DIST`, from
-    the environment or `.env`). A folder with no `index.html` serves nothing.
+    `web_dist` overrides WEB_DIST. A folder without index.html serves only the API.
     """
     settings = Settings() if settings is None else settings
-    service = SimulationService(settings, llm=llm)
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # On a durable store the platform goes on with the loads it holds.
-        await service.resume()
-        try:
-            yield
-        finally:
-            await service.close()
 
     app = FastAPI(
         title="Freight agent platform",
-        description="Drive a load through time, play its contacts and the Hero team, and "
-        "inspect every agent run.",
+        description="Live broker operations backed by Temporal workflows.",
         version="0.1.0",
-        lifespan=lifespan,
     )
-    app.state.service = service
     app.state.durable_api_url = settings.durable_api_url
-    app.state.scenarios = ScenarioRunner(app.state.service)
-    app.state.heartbeat_s = heartbeat_s
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(CORS_ORIGINS),
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    install_error_handlers(app)
 
     @app.exception_handler(Exception)
     async def _unexpected(request: Request, exc: Exception) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
@@ -102,8 +66,12 @@ def create_app(
         detail = f"internal error {error_id}: the server log has the details"
         return JSONResponse(status_code=500, content={"detail": detail, "error_id": error_id})
 
-    for router in ROUTERS:
-        app.include_router(router, prefix=API_PREFIX)
+    @app.get("/api/health")
+    async def health() -> dict[str, str]:
+        # Liveness only. /api/durable/health checks the separate ingress service.
+        return {"status": "ok", "mode": "workspace-proxy"}
+
+    app.include_router(router, prefix=API_PREFIX)
     serve_web_ui(app, settings.web_dist if web_dist is None else web_dist)
     return app
 

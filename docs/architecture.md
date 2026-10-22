@@ -62,7 +62,7 @@ one Temporal workflow per load, a worker and a notification relay, with a real c
 their own Postgres database. The workspace seeds Northline, Keystone, Aurora and Acme,
 persists editable broker SOP profiles, pins a snapshot for each execution, and lets an
 operator send contact messages, inject location pings and stop an execution. The CLI eval
-player, Studio and legacy simulation API retain their virtual-clock execution path.
+player and Studio retain their virtual-clock execution path.
 External SMS, email, Slack, Hero and TMS providers are still recording gateways; live
 operation means real model calls and durable scheduling, not delivery to real contacts.
 
@@ -206,8 +206,8 @@ flowchart TD
 
 The graph is `application/graph/build.py`. This is a bounded ReAct-style tool loop:
 model rounds consume tool results; action tools only stage proposals. The executor and
-outbox apply approved actions after validation. `GET /api/graph` exposes the graph for
-compatibility tooling, and LangGraph Studio nests it in its scenario graph. The current
+outbox apply approved actions after validation. LangGraph Studio nests the graph in its
+scenario graph. The current
 live workspace shows run decisions and tool trajectories rather than that graph viewer.
 
 ## 5. Memory
@@ -363,7 +363,7 @@ flowchart TB
   Postgres, LangGraph's Postgres store in the load memory's database, with a pgvector index
   (`adapters/memory/postgres.py`); otherwise an in-memory store with the same index.
 - A job is queued after the delivering run's commit. If the process crashes in between, the
-  platform or durable relay queues the job again when it starts on Postgres
+  durable relay queues the job again when it starts on Postgres
   (`AgentRuntime.queue_missed_extractions`).
 
 ## 6. Load 481207, 07:00 to 08:01
@@ -441,7 +441,7 @@ flowchart TB
 The document SOP directs the message's run to defer attachment handling to the
 `document_processed` event. Persistence makes that event idempotent; a database failure
 can retry processing. A file/model failure is recorded as `failed` and announced to the
-agent for escalation. The legacy virtual-clock runtime runs the same pipeline in `tick()`. Code: `application/documents.py`, `domain/documents.py`,
+agent for escalation. The eval/Studio virtual-clock runtime runs the same pipeline in `tick()`. Code: `application/documents.py`, `domain/documents.py`,
 `adapters/documents/pdfium.py`.
 
 ## 8. SOP layers and selection
@@ -455,7 +455,7 @@ flowchart TB
   freeze["freeze_profile<br/>Render placeholders + hash catalog and sections"]
   snapshot[("Load.sop_snapshot<br/>Immutable policy for this execution")]
   live["pinned_index<br/>Graph and document Activities"]
-  offline["File-backed SOP index<br/>CLI evals, Studio, compatibility runtime"]
+  offline["File-backed SOP index<br/>CLI evals and Studio"]
 
   files -->|Seed only when profile is absent| profiles
   editor -->|Validate + compare-and-swap revision| profiles

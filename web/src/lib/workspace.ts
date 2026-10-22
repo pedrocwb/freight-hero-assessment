@@ -1,4 +1,4 @@
-import type { Stage } from "../api";
+import type { Stage } from "../domain";
 
 export interface BrokerInfo {
   id: string;

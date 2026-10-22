@@ -105,7 +105,7 @@ in an Activity, and broker-configured SOP waits measured from confirmed outbound
 requests (30 minutes in the seeded Northline and Keystone catalogs).
 Run `docker compose -f compose.temporal.yml up --build` for the isolated local stack
 (API on 8001, Temporal UI on 8233). The platform UI connects to this stack through
-`/api/durable`; the eval CLI, Studio and compatibility simulator API use virtual time.
+`/api/durable`; the eval CLI and Studio use virtual time.
 
 See [the Temporal guide](docs/temporal.md) for ingress examples, restart/retry behavior,
 provider idempotency requirements and production limits. `make temporal-test` validates

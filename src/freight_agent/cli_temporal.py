@@ -31,7 +31,7 @@ def serve(
     host: Annotated[str, typer.Option()] = "127.0.0.1",
     port: Annotated[int, typer.Option()] = 8001,
 ) -> None:
-    """Serve real-clock ingress. Use a separate DB from the simulation UI."""
+    """Serve real-clock workspace and integration ingress on Postgres."""
     import uvicorn
 
     uvicorn.run("freight_agent.orchestration.api:create_app", factory=True, host=host, port=port)

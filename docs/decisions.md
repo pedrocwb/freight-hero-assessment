@@ -276,7 +276,7 @@ requirements and timers unrelated to an outgoing request retain their normal sem
 **Outbox.** The idempotency key is `{event_id}:{index}`, where index is the action's place
 in the approved list. Delivery checks the payload first (a malformed one fails at once). A
 gateway error keeps the item pending, with its attempts and last error, until 5 attempts
-make it `failed`; the legacy batch continues with other items. In Temporal, delivery is
+make it `failed`; the eval batch continues with other items. In Temporal, delivery is
 serialized per load and a failed item makes `load_snapshot` fail non-retryably, requiring
 operator intervention. Recording gateways ignore repeated keys within their process. A real provider adapter
 must persistently deduplicate or reconcile an ambiguous send; Temporal retry alone does
@@ -336,9 +336,9 @@ start a run.
   source load and date, and its text as a JSON string. `recall_facility {query, stop}`
   searches by meaning, in one stop's facility or across the client's facilities.
 - **Write:** a run whose commit moves the load to `delivered` queues a job after the commit;
-  if that fails, the run still stands. On start on a durable store, the platform queues
+  if that fails, the run still stands. On start on a durable store, the durable relay queues
   every delivered load that has no job (why: [answers.md 3.1](answers.md#31-how-does-the-agent-know-its-past-actions-and-the-past-messages-of-the-load)),
-  and `agent memory extract --load` runs one by hand. Each tick ends by running up to 5
+  and `agent memory extract --load` runs one by hand. The relay processes pending jobs; eval ticks run up to 5
   pending jobs. One `memory` call per job reads the load's inbound messages and Hero
   updates, each with its event id and the stops it may be about, plus the current notes of
   those facilities, and answers a list of add, update and delete operations.
@@ -360,8 +360,7 @@ start a run.
   on Postgres the offline hash is 1536 wide too, and an embedder of another width stops the
   start. On `memory`: an in-memory store with the same index. Evals and Studio always get a
   fresh in-memory one per play.
-- **Lifecycle:** eval and Studio plays use a fresh facility memory. Legacy simulator reset
-  clears its own memory. The live worker and relay share durable Postgres memory; starting
+- **Lifecycle:** eval and Studio plays use a fresh facility memory. The live worker and relay share durable Postgres memory; starting
   a live scenario does not reset other loads. Memory-suite fixtures receive an isolated
   facility address per live execution, preventing their seeded notes from contaminating
   other test loads.
@@ -381,8 +380,7 @@ Ids of runs, obligations, timers, outbox items and documents have the prefixes `
 
 ## Eval timing
 
-The scenario player (`evalkit/runner.py`) is used by experiments, CLI plays, Studio and the
-legacy simulation API. The broker workspace uses Temporal and wall-clock time instead:
+The scenario player (`evalkit/runner.py`) is used by experiments, CLI plays and Studio. The broker workspace uses Temporal and wall-clock time instead:
 
 - The virtual clock starts at the scenario's `date` and `start`, in its `timezone` (default
   `America/Los_Angeles`).
@@ -464,9 +462,8 @@ reuse inputs, not these automated graders.
 ## Storage
 
 - **Choice.** `PERSISTENCE=memory` (default) or `postgres` with `DATABASE_URL`, read only by
-  the composition roots. The legacy platform API and simulation run on it; Docker Compose
-  sets `postgres`. Temporal requires Postgres and a real clock, with a separate database in
-  `compose.temporal.yml`. The main API proxies the broker workspace to durable ingress.
+  the composition roots. Temporal requires Postgres and a real clock, configured in
+  `compose.temporal.yml`. The main API is a stateless broker-workspace proxy to ingress.
   Evals and Studio build a fresh in-memory store per play, whatever the setting.
 - **Schema.** `migrations/NNNN_name.sql`, applied in order by `agent db migrate`, each in its
   own transaction and recorded in `schema_migrations`. An applied file that changed is
@@ -481,9 +478,7 @@ reuse inputs, not these automated graders.
   `FOR UPDATE SKIP LOCKED` (each worker skips rows another holds), so several workers could
   share them. A partial unique index allows one event in flight per load. The claim time is
   the runtime's clock, for the claim lease.
-- **Lifecycle.** Legacy simulator reset empties its domain tables and facility memory, and
-  its startup restores the virtual clock from stored times. Broker profiles are outside
-  that reset list. The live workspace instead appends independent loads in the durable
+- **Lifecycle.** The live workspace appends independent loads in the durable
   database and never resets it on scenario start. Temporal resumes waits and the relay
   repairs notifications and extraction jobs. Attachment files go to `BLOBS_DIR` on
   Postgres, in memory otherwise.

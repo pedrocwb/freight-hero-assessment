@@ -1,4 +1,4 @@
-"""Real-clock ingress for durable loads. The existing UI remains a virtual-clock simulator."""
+"""Real-clock broker workspace and integration ingress for durable loads."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,8 +13,6 @@ from freight_agent.application.contracts import InboundMessage, LocationPing
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Channel, Load
 from freight_agent.orchestration.contracts import LoadKey
-from freight_agent.orchestration.demo import start_extreme_demo
-from freight_agent.orchestration.policy import DemoPolicy
 from freight_agent.orchestration.profiles import (
     BROKERS,
     BrokerProfile,
@@ -198,24 +196,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/workspace/brokers/{broker_id}/loads/{load_id}/pings", status_code=202)
     async def live_ping(broker_id: str, load_id: str, body: LocationPing, request: Request):
         return await ping(broker_id, load_id, body, request)
-
-    @app.post("/demos/aurora/{load_id}", status_code=202)
-    async def extreme_demo(load_id: str, request: Request, body: DemoPolicy | None = None) -> dict:
-        import re
-
-        if not re.fullmatch(r"aurora-[a-z0-9-]{1,64}", load_id):
-            raise HTTPException(422, "invalid demo load id")
-        if not settings.model_ready:
-            raise HTTPException(
-                503, "Configure OPENROUTER_API_KEY and restart the durable services"
-            )
-        return await start_extreme_demo(
-            request.app.state.ingress, settings.evals_dir, load_id, body
-        )
-
-    @app.get("/demos/aurora-policy")
-    async def demo_policy() -> DemoPolicy:
-        return DemoPolicy()
 
     @app.post("/brokers/{broker_id}/loads/{load_id}/stop", status_code=202)
     async def stop(broker_id: str, load_id: str, request: Request) -> dict:

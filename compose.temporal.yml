@@ -1,5 +1,5 @@
 # Standalone local stack: docker compose -f compose.temporal.yml up --build
-# Separate DB/volumes/ports from the virtual-clock UI in docker-compose.yml.
+# Owns all live data; docker-compose.yml serves the stateless UI/proxy.
 # start-dev persists to SQLite here; production needs a supported Temporal cluster.
 name: freight-durable
 

@@ -37,9 +37,8 @@ docker compose up -d --build app
 ```
 
 Open `http://127.0.0.1:8000`. The first command starts the durable Postgres, migrations,
-Temporal, worker, relay and ingress. The second serves the built UI and proxy, plus the
-separate legacy simulation database. `docker compose up -d --build` also starts the
-optional LangGraph Studio server on port 2024. Starting only the main Compose file does
+Temporal, worker, relay and ingress. The second serves only the built UI and proxy. Start the optional LangGraph Studio
+server with `docker compose --profile studio up -d --build studio` on port 2024. Starting only the main Compose file does
 not start the durable services.
 
 | Local endpoint | Purpose |
@@ -48,7 +47,7 @@ not start the durable services.
 | `127.0.0.1:8001` | Durable API; `/docs` and `/health` |
 | `127.0.0.1:7233` / `127.0.0.1:8233` | Temporal service / Temporal UI |
 | `127.0.0.1:5433` | Durable Postgres: operations and broker profiles |
-| `127.0.0.1:5432` | Legacy simulation Postgres |
+| `127.0.0.1:5432` | Optional integration-test Postgres (`docker compose up -d postgres`) |
 
 The main app's Compose proxy uses `http://host.docker.internal:8001`; an `extra_hosts`
 mapping also supports that name on Linux. The durable stack keeps Temporal's development
@@ -71,19 +70,18 @@ Run each of these long-lived commands in its own terminal, from the repository r
 PERSISTENCE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5433/agent uv run agent temporal serve
 PERSISTENCE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5433/agent uv run agent temporal worker
 PERSISTENCE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5433/agent uv run agent temporal relay
-PERSISTENCE=memory DURABLE_API_URL=http://127.0.0.1:8001 uv run agent serve
+DURABLE_API_URL=http://127.0.0.1:8001 uv run agent serve
 ```
 
 The Temporal address defaults to `localhost:7233`, namespace to `default`, task queue to
-`freight-loads`, and relay interval to ten seconds. Use one relay per database. Keep the
-platform server's legacy simulator on memory or its own database, as above; its reset
-endpoint must never target the durable database. If Compose workers/ingress/relay are
+`freight-loads`, and relay interval to ten seconds. Use one relay per database. The
+platform server is a stateless UI/proxy and does not access a database. If Compose workers/ingress/relay are
 already running, stop those services before replacing them with host processes.
 
 Finally run `cd web && pnpm dev` in another terminal and open `http://localhost:5173`.
 Vite forwards `/api` to port 8000; the platform then forwards `/api/durable` to port 8001.
 Set `API_URL` for a different Vite upstream, or `DURABLE_API_URL` for a different ingress.
-The current UI requires the durable stack even when the platform's own store is memory.
+The UI requires the durable stack for operations; `/api/health` checks only the proxy.
 
 ## More test cases
 
@@ -107,10 +105,9 @@ there is no time-skip control in the live workspace. See [live workspace](live-w
 
 These examples assume the default SOPs. Saved broker configuration changes the behavior
 of new operations. Scenario steps in the UI are a manual script; the UI does not run the
-eval assertions. The legacy API still supports recording and saving scenarios through
-`POST /api/scenarios`; the current UI does not expose **Save as scenario**. Files saved
-through that API inside Docker need copying out before a rebuild, for example:
-`docker compose cp app:/app/evals/scenarios/core/<id>.yaml evals/scenarios/core/`.
+eval assertions. Add version-controlled YAML under `evals/scenarios/<suite>/` for new
+automated cases and run the CLI evals. The retired recording-to-scenario HTTP writer is
+no longer available.
 
 ### From the terminal
 
@@ -142,7 +139,7 @@ Temporal operation, and does not read edited workspace profiles.
 
 | Works with no key | Needs `OPENROUTER_API_KEY` | Needs `LANGSMITH_API_KEY` |
 |---|---|---|
-| `make test`, `make ci`, `make temporal-test`, `uv run agent eval list`, `uv run agent sop lint`, `pnpm test` in `web/`. APIs can start without model keys; workspace starts return 503 without OpenRouter | Every run that calls a model: live workspace operations, legacy simulation inputs, Studio plays, `agent play`, evals | `agent eval run`, `agent play` without `--no-upload`, `agent prompts ...`, the Prompt Hub pins, tracing (with `LANGSMITH_TRACING=true`) |
+| `make test`, `make ci`, `make temporal-test`, `uv run agent eval list`, `uv run agent sop lint`, `pnpm test` in `web/`. APIs can start without model keys; workspace starts return 503 without OpenRouter | Every run that calls a model: live workspace operations, Studio plays, `agent play`, evals | `agent eval run`, `agent play` without `--no-upload`, `agent prompts ...`, the Prompt Hub pins, tracing (with `LANGSMITH_TRACING=true`) |
 
 ## Commands
 
@@ -160,7 +157,7 @@ Temporal operation, and does not read edited workspace profiles.
 | `uv run agent db migrate` | Applies pending SQL migrations to `DATABASE_URL`, then sets up the facility memory store/index | no live model calls |
 | `uv run agent memory list --client C` / `--load L`, `extract --load L` | The facility notes of a client or of a load's stops; run a load's extraction now | extraction/embeddings may call models |
 | `uv run agent prompts status` / `push --tag T` / `pull` | Compare `prompts/` with the Hub pins; publish changed templates and move tag T; write a Hub version back | free |
-| `uv run agent serve` | UI/proxy and legacy platform API on port 8000 (`/docs` for OpenAPI) | legacy runs spend on the model |
+| `uv run agent serve` | UI/proxy on port 8000 (`/docs` for OpenAPI) | no model calls in the proxy |
 | `uv run agent temporal serve` / `worker` / `relay` | Durable ingress, workflow/Activity worker, notification repair and background memory extraction | worker/extraction model usage |
 | `make temporal-up` | Starts `compose.temporal.yml` with image build | live operations spend on the model |
 | `cd web && pnpm dev` | The UI on http://localhost:5173, passing `/api` on to port 8000 | |
@@ -174,40 +171,27 @@ are measured but do not fail the run. Cost caps stop further scenario execution;
 memory embedding costs are reported separately. Live evals are absent from automatic CI;
 `.github/workflows/evals-live.yml` runs them by manual dispatch. Automatic CI runs the
 `make ci` checks plus `make temporal-test`, Postgres integration and an image build. The
-Docker build type-checks the frontend; the workflow does not separately run Vitest.
+Docker build runs Vitest, then type-checks and bundles the frontend.
 
 ## Storage
 
-For the legacy simulator, `PERSISTENCE` chooses where each load's state lives (events,
-ledger, timers, outbox, runs, queue, documents). `memory`, the default, is lost when the
-process stops. `postgres` keeps it at `DATABASE_URL`. Temporal entry points require
-`PERSISTENCE=postgres`; use their separate database on port 5433. To run only the legacy
-simulation on Postgres from the host:
+All live load state (events, ledger, timers, outbox, runs, queue, documents and broker
+profiles) lives in the durable Postgres on port 5433. Temporal entry points require
+`PERSISTENCE=postgres`. The UI/proxy has no persistence dependency. CLI evals and Studio
+use fresh in-memory worlds; the optional Postgres on port 5432 is for integration tests.
 
-```bash
-docker compose up -d postgres            # Postgres 17 with pgvector on 127.0.0.1:5432
-export PERSISTENCE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent
-uv run agent db migrate                  # creates the tables; a rerun applies only new files
-uv run agent serve
-```
-
-A legacy simulation reset (including scenario playback's reset) empties its domain data
-and facility notes. Broker profiles are excluded from the domain-table reset, but durable
-loads are not protected if you incorrectly share the same database. The evals and Studio
-always play each scenario in a fresh in-memory world.
-
-Both Compose stacks run their own `migrate` service before starting applications. The
-current SQL sequence is `0001_load_memory.sql`, `0002_vector_extension.sql`,
+The durable stack runs its `migrate` service before the worker, relay and ingress.
+The current SQL sequence is `0001_load_memory.sql`, `0002_vector_extension.sql`,
 `0003_temporal.sql` and `0004_broker_profiles.sql`. Rerunning migrations applies only
 pending files. Broker profile edits live in `broker_profiles`; a load's frozen SOP lives
-in its metadata. SQL migrations do not rewrite saved profiles or pinned SOP snapshots.
+in its metadata. Removing the HTTP simulator does not delete any tables or old volumes.
+SQL migrations do not rewrite saved profiles or pinned SOP snapshots.
 
-**Facility memory** follows the same setting. On Postgres the notes are in the same database
+**Facility memory** lives alongside durable loads. On Postgres the notes are in the same database
 (LangGraph's Postgres store with a pgvector index; texts embedded with
 `openai/text-embedding-3-small` in `config/models.yaml`, or an offline hash without the
-OpenRouter key). `MEMORY_EMBEDDINGS=fake` forces offline embeddings. The legacy facility
-memory API and `agent memory` inspect these notes; the current live UI does not include
-the old Load facts memory drawer.
+OpenRouter key). `MEMORY_EMBEDDINGS=fake` forces offline embeddings. Use `agent memory` to inspect these notes; run records retain the facts used in context.
+The live UI has no facility-memory drawer.
 
 ## Prompts with your own LangSmith workspace
 
@@ -255,7 +239,7 @@ src/freight_agent/
   adapters/      memory and Postgres stores, OpenRouter models and Decisions API, SOP files and lint,
                  Prompt Hub, PDF pages, facility memory store, LangSmith, recording gateways
   evalkit/       scenario format, player, graders, judge, LangSmith experiments, transcripts
-  api/           FastAPI UI/proxy and legacy simulation, ingress, scenarios, SOPs, documents, stream
+  api/           Stateless UI server and fixed-upstream proxy to durable ingress
   orchestration/ Temporal workflow/Activities, durable ingress, broker profiles, live scenario inputs
   bootstrap.py   the only place that wires adapters to interfaces
   cli.py         the `agent` command (with cli_sop.py, cli_prompts.py, cli_memory.py, cli_temporal.py)
