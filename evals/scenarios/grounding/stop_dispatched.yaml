@@ -1,0 +1,25 @@
+id: stop_dispatched
+title: A dispatched load is heading to pickup
+suite: grounding
+tags: [regression, stop-grounding, sop:driver_questions]
+description: Before pickup, the next arrival is at the pickup, not the final receiver.
+load: fixtures/load_481207.json
+load_overrides:
+  stage: dispatched
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: What is the name and city of the stop I should head to now?
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: reply, regex: "(?i)(Riverbend|Stockton)", count: 1}
+      timers: {pending: 0}
+      run_status: [acted]
+      intent: question
+    forbid:
+      - {kind: sms, regex: "(?i)(Valley|Reno)"}
+      - {kind: stage_update}

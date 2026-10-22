@@ -84,8 +84,8 @@ def test_a_folder_without_scenario_files_is_not_a_suite(evals: Path) -> None:
 def test_the_shipped_suites_and_their_sizes() -> None:
     evals = ROOT / "evals"
 
-    assert suites(evals) == ["agent", "core", "docs", "memory"]
-    assert [len(discover(evals, name)) for name in suites(evals)] == [1, 22, 3, 3]
+    assert suites(evals) == ["agent", "core", "docs", "grounding", "memory"]
+    assert [len(discover(evals, name)) for name in suites(evals)] == [1, 22, 3, 7, 3]
 
 
 def test_an_unknown_suite_names_the_suites_that_exist(evals: Path) -> None:

@@ -1,0 +1,43 @@
+id: stop_to_delivery
+title: ETA and escalation target at to_delivery
+suite: grounding
+tags: [regression, stop-grounding, sop:delay_risk_high, sop:driver_questions]
+description: >
+  Ground the operational stop in the load stage. A correct route in the context
+  is not enough: outbound text must identify the facility relevant to this stage.
+load: fixtures/load_481207.json
+load_overrides:
+  broker: {id: keystone, name: Keystone Freight}
+  stage: to_delivery
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    ping: {delay_risk: high}
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: eta_request, regex: "(?i)(Valley|Reno)", count: 1}
+      obligations: {eta_request: {status: open, attempts: 1}}
+      timers: {pending: 1, due_at: "07:31"}
+      run_status: [acted]
+    forbid:
+      - {kind: sms, regex: "(?i)(Riverbend|Stockton)"}
+  - at: "07:31"
+    note: No response. The Slack escalation must identify the same operational stop.
+    expect:
+      actions:
+        - {kind: broker_slack, contains: ["481207"], regex: "(?i)(Valley|Reno)", count: 1}
+      obligations: {eta_request: {status: exhausted, attempts: 1}}
+      timers: {pending: 0}
+      run_status: [acted]
+      judge:
+        min_score: 1.0
+        rubric: >
+          The load is at stage to_delivery. The missing ETA being escalated is for
+          Valley DC in Reno (delivery). The Slack alert must unambiguously identify that facility
+          as the ETA target, not merely list it as part of the route.
+          Any claim that the other stop is the ETA target fails this rubric.
+    forbid:
+      - {kind: broker_slack, regex: "(?i)(Riverbend|Stockton)"}
+      - {kind: sms}
+      - {kind: email, to: dsp_4410}

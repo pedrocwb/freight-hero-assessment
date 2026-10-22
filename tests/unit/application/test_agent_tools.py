@@ -315,7 +315,8 @@ async def test_get_load_gives_the_load_or_one_part(load: Load) -> None:
     contacts = await call(ctx, "get_load", part="contacts")
 
     assert "PO 55821 required at gate" in whole and "## Contacts" in whole
-    assert stops.startswith("## Stops\n- stop 1 (current), pickup: Riverbend plant")
+    assert stops.startswith("## Stops\nOperational stop (resolved from load state): stop 1, pickup")
+    assert "- stop 1 (current), pickup: Riverbend plant" in stops
     assert "## Contacts" not in stops
     assert contacts.startswith("## Contacts") and "- drv_20931: driver; channels: sms" in contacts
 

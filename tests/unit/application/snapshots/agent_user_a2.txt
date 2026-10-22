@@ -9,6 +9,10 @@ commodity: Canned tomato sauce, 38,000 lb, dry van
 load types: none
 stage: to_pickup
 delay risk: high
+Operational stop (resolved from load state): stop 1, pickup: Riverbend plant, Stockton, CA.
+Position at stage to_pickup: heading to this stop.
+For ETA requests, follow-ups and delay-risk escalations, the SOP's 'next stop' or 'destination' means this operational stop, NOT the following stop in the itinerary. Name this facility when asking for or escalating its missing ETA.
+A departure moves to the following itinerary stop only when the load changes stage. Before/at pickup refers to pickup; to_delivery/at_delivery refers to delivery. An explicitly selected stop sequence identifies the stop within that leg.
 stops:
 - stop 1 (current), pickup: Riverbend plant, Stockton, CA. Appointment: window 2026-10-13 06:00 to 14:00 PDT.
 - stop 2, delivery: Valley DC, Reno, NV. Appointment: fixed 2026-10-14 09:30 PDT.
@@ -69,6 +73,11 @@ channel: sms
 from: drv_20931 (driver)
 text: "What's the PO number?"
 attachments: none
+
+## Stop grounding for this decision (from load state)
+stage=to_pickup; operational stop=pickup: Riverbend plant, Stockton, CA.
+The name and city above are known load facts: answer questions about them directly, without a Hero lookup.
+When requesting an ETA or escalating its absence, explicitly include this facility's name in the message/task. Resolve generic SOP examples ('pickup', 'next stop', 'destination') using this stop and stage.
 
 ## Gate
 intent: question

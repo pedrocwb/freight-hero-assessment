@@ -57,7 +57,7 @@ cd web && pnpm install && pnpm dev    # the UI on http://localhost:5173
 
 ## 4. Run the evals
 
-The evals are YAML scenarios in `evals/scenarios/` (`core`, `agent`, `docs`, `memory`). Each
+The evals are YAML scenarios in `evals/scenarios/` (`core`, `agent`, `docs`, `memory`, `grounding`). Each
 one plays a load step by step on the real models and checks what the agent did, including
 the steps where the right action is to do nothing.
 
@@ -72,6 +72,9 @@ In Docker, prefix the commands with `docker compose exec app` instead of `uv run
 example `docker compose exec app agent play a_client_a_high_risk --no-upload`.
 
 Results we measured are in [evals/RESULTS.md](evals/RESULTS.md).
+
+The [stop-grounding eval](docs/stop-grounding.md) checks the facility used at each
+load stage, including SMS requests, Slack escalations and pickup departure.
 
 ## Read more
 

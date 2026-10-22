@@ -19,8 +19,10 @@ BROKERS = {
     "acme": ("Acme Logistics", "Documentos e procedimentos adicionais"),
 }
 
-ETA_BODY = """When delay risk becomes high, ask the driver for the ETA at the next stop by
-SMS with requests="eta_request". If a request is already open, keep its timer and
+ETA_BODY = """When delay risk becomes high, ask the driver for the ETA at the operational
+stop resolved in the load context (pickup before pickup, delivery on the delivery leg),
+naming that facility in the SMS with requests="eta_request".
+If a request is already open, keep its timer and
 do not send another request immediately.
 
 On eta_follow_up_due, consult the obligation ledger. While attempts is below
@@ -29,7 +31,7 @@ SMS, including the last one, wait {{eta_request.follow_up_minutes}} minutes.
 Delivery confirmation starts the timer; never send several requests at once.
 
 After {{eta_request.max_attempts}} unanswered requests and the final wait, escalate
-in this order: {{eta_request.on_exhausted}}. Include load, destination and missing ETA.
+in this order: {{eta_request.on_exhausted}}. Include load, operational stop and missing ETA.
 Use no other escalation channel. Close eta_request as exhausted.
 An ETA satisfies the obligation. A question or acknowledgement does not: answer
 questions from the load metadata while preserving the ETA request and its timer.

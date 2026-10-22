@@ -5,8 +5,9 @@ PY ?= /opt/homebrew/bin/python3.13
 
 # The scenario suites `make eval` runs, in this order: core (the assignment and the SOP
 # procedures), agent (the tool loop's outcomes), docs (the document pipeline) and memory
-# (the facility memory). A suite runs once its folder exists under evals/scenarios/.
-SUITES ?= core agent docs memory
+# (the facility memory), grounding (the operational stop at each load stage).
+# A suite runs once its folder exists under evals/scenarios/.
+SUITES ?= core agent docs memory grounding
 EVAL_SUITES := $(notdir $(wildcard $(addprefix evals/scenarios/,$(SUITES))))
 # Repetitions per scenario, and the most one suite's experiment may spend (USD).
 EVAL_K ?= 1

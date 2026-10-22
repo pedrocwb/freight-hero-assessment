@@ -44,7 +44,7 @@ from freight_agent.domain.broker import Broker, IntentDef
 from freight_agent.domain.documents import Document, DocumentStatus
 from freight_agent.domain.events import Attachment, Event, EventType
 from freight_agent.domain.intents import GateDecision, Intent
-from freight_agent.domain.load import AppointmentKind, Load, Stop
+from freight_agent.domain.load import AppointmentKind, Load, Stage, Stop
 from freight_agent.domain.memory import FacilityFact, stop_by_key
 from freight_agent.domain.obligations import Obligation, ObligationKind
 from freight_agent.domain.outbox import OutboxKind
@@ -293,7 +293,7 @@ def agent_user_variables(
         "timers": "\n".join(_or_none([_timer_line(view, t) for t in ctx.pending_timers])),
         "transcript": "\n".join(_transcript_lines(view)),
         "now": view.now_line(),
-        "event": "\n".join(_event_lines(view)),
+        "event": "\n".join([*_event_lines(view), "", *_stop_grounding_reminder(ctx.load)]),
         "gate_intent": gate.intent,
         "gate_reason": _quote(gate.reason),
     }
@@ -381,7 +381,7 @@ def render_load(ctx: RunContext, part: str = "all") -> str:
     if part == "stops":
         current = ctx.load.current_stop().sequence
         stops = [_stop_line(stop, stop.sequence == current) for stop in ctx.load.stops]
-        return "## Stops\n" + "\n".join(stops)
+        return "## Stops\n" + "\n".join([*_operational_stop_lines(ctx.load), *stops])
     return _load_block(view) + "\n\n" + _contacts_block(ctx)
 
 
@@ -510,6 +510,7 @@ def _load_lines(view: _View) -> list[str]:
         f"load types: {', '.join(load.load_types) or 'none'}",
         f"stage: {load.stage.value}",
         f"delay risk: {load.delay_risk.value}",
+        *_operational_stop_lines(load),
         "stops:",
         *(_stop_line(stop, stop.sequence == current) for stop in load.stops),
     ]
@@ -519,6 +520,61 @@ def _load_lines(view: _View) -> list[str]:
     else:
         lines.append("instructions: none")
     return lines
+
+
+def _operational_stop_lines(load: Load) -> list[str]:
+    """Ground the SOP's ETA target in state, not the model's reading of 'next'.
+
+    Keep this in the load variable and the get_load tool so both local and pinned
+    Hub templates receive it, including runs with older immutable SOP snapshots.
+    """
+    stop = load.current_stop()
+    relation = {
+        Stage.DISPATCHED: "heading to",
+        Stage.TO_PICKUP: "heading to",
+        Stage.AT_PICKUP: "at",
+        Stage.TO_DELIVERY: "heading to",
+        Stage.AT_DELIVERY: "at",
+        Stage.DELIVERED: "completed at",
+    }[load.stage]
+    lines = [
+        f"Operational stop (resolved from load state): stop {stop.sequence}, "
+        f"{stop.type.value}: {stop.name}, {stop.address}.",
+        f"Position at stage {load.stage.value}: {relation} this stop.",
+    ]
+    if load.stage == Stage.DELIVERED:
+        lines.append("The load is delivered: there is no pending arrival or next ETA target.")
+    else:
+        lines.append(
+            "For ETA requests, follow-ups and delay-risk escalations, the SOP's 'next stop' "
+            "or 'destination' means this operational stop, NOT the following stop in the "
+            "itinerary. Name this facility when asking for or escalating its missing ETA."
+        )
+        if load.stage in {Stage.AT_PICKUP, Stage.AT_DELIVERY}:
+            lines.append(
+                "Arrival here has already happened; do not describe it as a future arrival."
+            )
+    lines.append(
+        "A departure moves to the following itinerary stop only when the load changes stage. "
+        "Before/at pickup refers to pickup; to_delivery/at_delivery refers to delivery. "
+        "An explicitly selected stop sequence identifies the stop within that leg."
+    )
+    return lines
+
+
+def _stop_grounding_reminder(load: Load) -> list[str]:
+    """Keep the resolved fact beside the event, after the SOP and old transcript."""
+    stop = load.current_stop()
+    return [
+        "## Stop grounding for this decision (from load state)",
+        f"stage={load.stage.value}; operational stop={stop.type.value}: "
+        f"{stop.name}, {stop.address}.",
+        "The name and city above are known load facts: answer questions about them "
+        "directly, without a Hero lookup.",
+        "When requesting an ETA or escalating its absence, explicitly include this "
+        "facility's name in the message/task. Resolve generic SOP examples ('pickup', "
+        "'next stop', 'destination') using this stop and stage.",
+    ]
 
 
 def _stop_line(stop: Stop, current: bool) -> str:

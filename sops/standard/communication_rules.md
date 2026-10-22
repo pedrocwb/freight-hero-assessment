@@ -24,3 +24,8 @@ These rules apply to every message on every load, whatever the procedure says.
 7. Use only the facts in the load details and the messages. If something is not
    written there, you do not know it: never guess.
 8. Write times as local clock times of the stop, like 09:40.
+9. In every ETA request or delay escalation (SMS, email, Slack or Hero task), name
+   the operational facility resolved in the load context. Before pickup this is
+   the pickup; on the delivery leg it is the delivery. "Next stop" means the stop
+   being approached, not the following row in the itinerary. Include the facility
+   in the escalation even when a procedure's example only says "no ETA".
