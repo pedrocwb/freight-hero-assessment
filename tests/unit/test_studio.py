@@ -30,7 +30,7 @@ from freight_agent.studio import (
     free_form,
 )
 from tests.fakes import FakeModel
-from tests.integration.test_api_harness import (
+from tests.studio_fixtures import (
     ASK_AGAIN,
     ASK_ETA,
     CALL_DRIVER,
@@ -41,8 +41,8 @@ from tests.integration.test_api_harness import (
     FOLLOW_UP_IN_30,
     PO_REPLY,
     QUESTION,
-    api_settings,
     plan,
+    studio_settings,
 )
 
 pytestmark = pytest.mark.unit
@@ -72,7 +72,7 @@ def studio(model: FakeModel, settings: Settings | None = None, worlds: Worlds | 
     def fake(clock: VirtualClock) -> LanguageModel:
         return model
 
-    graph = build_studio_graph(settings or api_settings(), model=fake, worlds=worlds)
+    graph = build_studio_graph(settings or studio_settings(), model=fake, worlds=worlds)
     return graph.copy(update={"checkpointer": InMemorySaver()})
 
 
@@ -294,7 +294,7 @@ async def test_an_input_that_cannot_play_stops_at_setup(value: Any, error: str) 
 
 
 async def test_without_the_key_the_live_model_stops_the_play_at_setup() -> None:
-    graph: Any = build_studio_graph(api_settings())
+    graph: Any = build_studio_graph(studio_settings())
     graph = graph.copy(update={"checkpointer": InMemorySaver()})
 
     with pytest.raises(StudioError, match="OPENROUTER_API_KEY is not set"):

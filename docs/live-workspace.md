@@ -53,7 +53,7 @@ can delay its processing. The UI countdown is a display, not the scheduler.
 
 `broker_profiles` stores the broker catalog, layered SOP sections and revision in the
 durable Postgres database. The first access seeds files from `sops/`. Saved profiles
-survive API/worker restarts and are independent of the simulator database and browser.
+survive API/worker restarts and are independent of the UI/proxy process and browser.
 Editing the seed files does not overwrite an already saved broker profile; use the
 workspace editor/API to update that profile.
 Conversely, `make eval` reads the file-backed SOPs; it does not automatically test a
@@ -109,8 +109,8 @@ for host-run services, retry behavior and delivery guarantees.
 
 Workspace API routes are under `/workspace/brokers` on the durable ingress and
 `/api/durable/workspace/brokers` through the frontend bridge. Configuration writes and
-operator inputs belong here; the older simulator endpoints remain for compatibility
-and automated tests, but the UI no longer invokes them.
+operator inputs belong here. The older virtual-clock HTTP simulator was removed;
+the CLI evals and Studio retain virtual-clock playback.
 
 Paths below are relative to `/workspace/brokers/{broker_id}`:
 
@@ -126,7 +126,7 @@ Paths below are relative to `/workspace/brokers/{broker_id}`:
 | POST | `/loads/{load_id}/steps/{index}` | Submit a sample input; wait-only steps are rejected |
 | POST | `/loads/{load_id}/stop` | Request a durable stop |
 
-The lower-level `/loads`, `/brokers/{broker_id}/loads/{load_id}` and `/demos/aurora`
-routes remain available for integrations and older demos. They are not the broker
+The lower-level `/loads` and `/brokers/{broker_id}/loads/{load_id}`
+routes remain available for integrations. They are not the broker
 profile editor used by the current UI. See <http://localhost:8001/docs> after startup
 for request schemas; these local endpoints have no caller authentication.

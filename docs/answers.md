@@ -30,7 +30,7 @@ the code.
   deduplicate repeated send attempts.
 - **Catalog**: a client's intents, obligation kinds, document types and limits
   (`broker.yaml`, on top of a standard one).
-- **Tick**: one pass of the legacy simulation/eval work loop: fire due timers, read new
+- **Tick**: one pass of the eval/Studio work loop: fire due timers, read new
   documents, run queued events, deliver the outbox. Live operations use Temporal Activities
   and durable waits instead of browser-driven ticks.
 - **pass^k**: a scenario passes only if all k repetitions pass (k = 3 here).
@@ -370,7 +370,7 @@ guarantee that the facility's instructions have remained unchanged.
   searches such vectors), which `recall_facility` searches. Tests, evals and Studio use
   LangGraph's in-memory store; one contract suite runs on both.
 - **A lost extraction is found again.** The job is queued after the run's commit, so a crash
-  in between would miss it. When the platform or durable relay starts on Postgres, it queues every delivered
+  in between would miss it. When the durable relay starts on Postgres, it queues every delivered
   load with no job (`AgentRuntime.queue_missed_extractions`). This is simpler than putting
   the job in the run's transaction (no new table, no change to the unit of work), and a crash
   makes startup a recovery point. A load has at most one job; failed extraction attempts
@@ -472,7 +472,7 @@ event is skipped as stale (`g1_deferral_stale_timer`).
 `agent temporal relay`). The browser can close and the timer remains durable. A worker
 outage delays execution but does not erase the deadline. Due work runs after recovery;
 this is not an exact-time delivery guarantee during an outage or backlog. The live UI
-cannot advance time. CLI evals, Studio and the legacy simulator still use virtual ticks.
+cannot advance time. CLI evals and Studio still use virtual ticks.
 
 The operator can stop a live load. Stop waits for the current Activity to settle, then
 cancels pending timers, open obligations and unsent outbox items while preserving the

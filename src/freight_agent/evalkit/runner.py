@@ -3,13 +3,11 @@ changed. It does not grade: graders judge the observations separately, so the tw
 built and tested on their own. The timing rules are the ones in the `evalkit.spec`
 docstring.
 
-One player, three places:
+One player for evals and Studio:
 
 - a LangSmith experiment (`evalkit.experiment`) plays each example on a fresh trial
   runtime (`play_scenario`): the product runtime on a memory store, with a virtual
   clock, recording gateways, deterministic ids and the document pipeline;
-- the platform (`api.scenarios`) plays a scenario inside its simulation, after a reset,
-  step by step (`ScenarioPlayer`), so its load and runs show in the UI as they happen;
 - LangGraph Studio (`freight_agent.studio`) plays a step one tick at a time
   (`begin`, `next_tick`, `observe`), so that each run is a node of its graph.
 

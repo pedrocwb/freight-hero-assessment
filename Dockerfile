@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
-# The whole simulation platform in one image: the API on port 8000 serves the built web UI.
+# The UI/proxy and durable entry points in one image; port 8000 serves the built web UI.
 #
-#   docker compose up --build             # the app, with a volume for its blobs
+#   docker compose up --build app         # stateless UI/proxy
 #   docker build -t freight-agent .       # the image alone
 #
 # No key and no .env go into the image (.dockerignore keeps them out of the context). Every
@@ -20,8 +20,8 @@ WORKDIR /web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ ./
-# Type-checks, then writes dist/: index.html and the hashed files under assets/.
-RUN pnpm build
+# Tests and type-checks, then writes dist/: index.html and the hashed assets.
+RUN pnpm test && pnpm build
 
 # --- stage 2: the API and the agent -------------------------------------------------------
 FROM python:3.13-slim AS app
@@ -60,15 +60,11 @@ COPY prompts ./prompts
 COPY migrations ./migrations
 COPY --from=web /web/dist ./web/dist
 
-# A non-root user. The code and the venv stay owned by root, so the app cannot change
-# them; it may only write blobs, the uploaded attachments (BLOBS_DIR, a volume in
-# docker-compose.yml), and the scenarios the UI saves ("Save as scenario": the suite
-# folders, and the files their steps sent under fixtures/recorded). A saved scenario lives
-# in the container: `docker compose cp` copies it out before a rebuild replaces it.
+# A non-root user. Code, SOPs and eval fixtures remain read-only. Durable services
+# write document bytes to BLOBS_DIR (the shared volume in compose.temporal.yml).
 RUN useradd --system --user-group --no-log-init --create-home --uid 10001 app \
-    && mkdir -p blobs evals/fixtures/recorded \
-    && chown app:app blobs evals/fixtures/recorded \
-    && chown -R app:app evals/scenarios
+    && mkdir -p blobs \
+    && chown app:app blobs
 USER app
 
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -77,10 +73,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 EXPOSE 8000
 
-# Liveness: /api/sim/state answers 200 while the app serves. No curl in the slim image, so
+# Liveness: /api/health answers 200 while the app serves. No curl in the slim image, so
 # the venv's Python asks.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/sim/state', timeout=4)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
 
 # The `agent` CLI of the venv, so `docker compose run --rm app eval list` works too.
 ENTRYPOINT ["agent"]

@@ -29,12 +29,7 @@ export function BrokerWorkspace({
   const [starting, setStarting] = useState("");
   const [search, setSearch] = useState("");
   const [reload, setReload] = useState(0);
-  const view =
-    route.screen === "load"
-      ? route.params.get("load")
-        ? "durable"
-        : "scenarios"
-      : route.screen;
+  const view = route.screen;
   useEffect(() => {
     const controller = new AbortController();
     const options = { signal: controller.signal };

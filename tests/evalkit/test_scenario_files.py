@@ -44,7 +44,7 @@ def test_no_scenario_file_carries_a_model_script(path: Path) -> None:
 
 
 def test_the_four_suites_have_scenarios() -> None:
-    """No exact count: the platform saves new scenarios into a suite, and each one is
+    """No exact count: contributors add scenarios into a suite, and each one is
     checked by the tests above like the others."""
     assert {"agent", "core", "docs", "memory"} <= {p.parent.name for p in FILES}
 

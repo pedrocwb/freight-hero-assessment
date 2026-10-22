@@ -612,7 +612,7 @@ def serve(
     host: str = typer.Option("127.0.0.1", help="Interface to listen on."),
     port: int = typer.Option(8000, help="Port of the platform API (the web UI proxies to it)."),
 ) -> None:
-    """Serve the simulation platform's API (the web UI in web/ talks to it)."""
+    """Serve the live workspace UI and its bridge to Temporal ingress."""
     from freight_agent.api.__main__ import main as serve_api
 
     serve_api(["--host", host, "--port", str(port)])

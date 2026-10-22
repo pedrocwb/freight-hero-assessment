@@ -8,8 +8,7 @@ and inspect the agent's decisions, actions and real-time follow-ups. Each operat
 in a Temporal workflow and continues when the page closes.
 
 React 18, TypeScript and Vite. No UI kit and no runtime CDN or web font: one stylesheet
-with CSS variables. The older simulator components still include the Mermaid graph
-inspector; the current application mounts `BrokerWorkspace` instead of `SimProvider`.
+with CSS variables. The application mounts `BrokerWorkspace`; all operations use Temporal.
 
 ## Run it
 
@@ -37,8 +36,7 @@ pnpm dev            # http://localhost:5173, /api is proxied to http://localhost
 
 `API_URL=http://localhost:8765 pnpm dev` proxies to a platform API on another port. The
 browser calls `/api/durable/*`; the platform's fixed `DURABLE_API_URL` forwards those
-requests to ingress. Running `uv run agent serve` alone serves the UI/legacy simulation
-API but does not start the Temporal services.
+requests to ingress. Running `uv run agent serve` alone serves the UI/proxy but does not start the Temporal services.
 
 | Command | What it does |
 |---|---|
@@ -63,9 +61,8 @@ the browser's one-second clock only updates the displayed countdown. Displayed a
 times use the browser's local timezone and the `pt-BR` locale.
 
 The workspace does not automatically grade a scenario's `expect`/`forbid` assertions.
-Use `agent play` or `agent eval run` to evaluate those checks. The old simulator's reset,
-time skip, arbitrary file upload and recording-to-scenario controls are not mounted in
-the current UI; their backend routes remain documented in [API](../docs/api.md).
+Use `agent play` or `agent eval run` to evaluate those checks. Virtual-clock simulation
+and recording-to-scenario HTTP routes have been retired; see [API](../docs/api.md).
 
 ## Routes and state
 
@@ -86,7 +83,7 @@ current workspace does not restore the old run-specific explanation panel.
 `BrokerWorkspace` fetches the broker catalog, profile, scenarios and health when the
 broker changes or the operator reloads. It polls the broker's load list five seconds
 after each completed request. `Durable` polls its snapshot two seconds after each
-completed request and refreshes it after a write. Neither view uses `/api/stream`.
+completed request and refreshes it after a write.
 Aborted requests are discarded on navigation.
 
 An interrupted start retains its load ID in session storage, scoped to broker, scenario
@@ -107,13 +104,7 @@ instead of overwriting another window's changes.
 - `src/lib/workspace.ts`: profile/scenario types, paths, labels, effective-section merge
   and template rendering for the editor preview. The backend remains authoritative.
 - `src/lib/route.ts`: hash parsing/link helpers. Shared domain wire types remain in
-  `src/api.ts`.
-
-Legacy modules remain for their contracts, tests and reusable helpers:
-`src/screens/Conversation.tsx`, `Scenarios.tsx`, `SopViewer.tsx`, `src/state/sim.tsx`,
-`src/hooks/useEventStream.ts`, `src/lib/bus.ts` and `src/hooks/useResource.ts`.
-The legacy `createApi(fetch)` client in `src/api.ts` supports injectable fetch for tests;
-its SSE/resource refresh model is separate from live workspace polling.
+  `src/domain.ts`.
 
 Workspace errors appear inline. `durableRequest` extracts string or validation-list
 `detail` values from failed API responses. A failed operation poll preserves the last

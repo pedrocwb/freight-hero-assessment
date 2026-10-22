@@ -5,12 +5,12 @@
 per broker/load. Its workflow ID is `load/<broker_id>/<load_id>` (URL-escaped components).
 Postgres keeps the business state; Temporal keeps the orchestration history and waits.
 The broker workspace UI uses these real-clock services for every scenario. The eval
-CLI, Studio and compatibility simulator API retain their virtual-clock behavior.
+CLI and Studio retain their virtual-clock behavior.
 
 ## Local service topology
 
-The two Compose projects use separate application databases. The diagram shows the local
-demo deployment; `worker` executes both Workflow tasks and Activities. Temporal's own
+The UI/proxy is stateless; live data belongs to the durable stack. The diagram shows the
+local demo deployment; `worker` executes both Workflow tasks and Activities. Temporal's own
 SQLite volume stores orchestration history, independently of the business Postgres data.
 
 ```mermaid
@@ -18,8 +18,6 @@ flowchart TB
   browser["Browser<br/>Broker workspace"]
   subgraph platform["Main Compose project"]
     app["app :8000<br/>UI + /api/durable bridge"]
-    legacy[("Postgres :5432<br/>Compatibility simulator")]
-    app -->|Legacy simulator API| legacy
   end
   subgraph durable["compose.temporal.yml"]
     subgraph services["Application processes"]
@@ -43,7 +41,7 @@ flowchart TB
 ```
 
 The main API uses `host.docker.internal:8001` in Docker to reach the durable ingress.
-The ports above are host ports; both Postgres containers listen on 5432 internally.
+The ports above are host ports; durable Postgres listens on 5432 internally.
 The API and relay notify Temporal after business commits. Model calls and channel sends
 are Activity work; the relay separately runs the facility-memory extraction pipeline.
 The detailed [workflow loop](architecture.md#10-durable-execution-and-production-at-10x)
@@ -150,8 +148,7 @@ Provider message IDs are namespaced by broker/load/channel kind at ingress.
 ## Run locally
 
 Use the standalone compose file for the durable backend and the main compose file
-for the UI/API bridge. They keep separate databases; simulator reset/advance endpoints
-must never operate on the durable database. Configure the model key and prompt source
+for the stateless UI/API bridge. Configure the model key and prompt source
 as described in the [root setup](../README.md#2-set-up) first.
 
 ```sh
@@ -194,10 +191,10 @@ uv run agent temporal relay
 uv run agent temporal serve
 ```
 
-For a host-run UI API, start `PERSISTENCE=memory uv run agent serve` in another terminal
+For a host-run UI API, start `uv run agent serve` in another terminal
 and run the web development server as described in [development setup](development.md).
-That API's compatibility simulator stays in memory; live operations use the durable
-ingress and its Postgres database.
+The UI API does not create a runtime or connect to Postgres; live operations use the
+durable ingress and its database.
 `DURABLE_API_URL` defaults to `http://127.0.0.1:8001`; the containerized UI API uses
 `http://host.docker.internal:8001` to reach the separate stack.
 
@@ -333,22 +330,15 @@ wall-clock execution during an outage. `timer_due.data.due_at` and the event's
 `occurred_at` expose lateness. Monitor worker availability, timer lag, queue age and
 failed workflows.
 
-### Compatibility endpoints
+### Integration endpoints
 
-The current UI uses `/workspace/brokers/...` through the `/api/durable` bridge.
-The following older surfaces remain available:
+The UI uses `/workspace/brokers/...` through the `/api/durable` bridge. Integrations can
+use `POST /loads` with `{"metadata": ...}` and `/brokers/{broker_id}/loads/{load_id}`
+for snapshots, messages, pings and stop controls. Raw registration does not rebase fixture
+dates or pin a saved workspace profile; these loads use the worker's file-backed SOPs.
 
-- `POST /loads` accepts `{"metadata": ...}`; `/brokers/{broker_id}/loads/{load_id}`
-  exposes snapshots, messages, pings and stop controls. Raw registration does not
-  rebase fixture dates or pin a saved workspace profile. Loads registered this way
-  use the worker's file-backed SOPs.
-- `GET /demos/aurora-policy` and `POST /demos/aurora/{load_id}` use `DemoPolicy` with
-  the older `{{max_attempts}}` and `{{interval_minutes}}` placeholders. These are
-  compatibility demo routes, not the current broker editor.
-- `/api/sim` belongs to the separate platform API on port 8000. It retains the
-  virtual-clock simulator for compatibility and tests; workspace operations never
-  use its reset/advance controls.
-
+The original `/demos/aurora*` and virtual-clock `/api/sim*` routes were removed.
+Start Aurora through its broker workspace. Existing load snapshots remain supported.
 Request schemas are available at <http://localhost:8001/docs> after startup.
 
 ## Failure handling and verification

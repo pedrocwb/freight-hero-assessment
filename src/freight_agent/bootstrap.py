@@ -1,6 +1,6 @@
 """The composition root: the only place that wires adapters to interfaces.
 
-The API, the worker, the CLI and the eval harness all build the agent here, from one
+Durable ingress, the worker, the CLI and the eval harness build the agent here, from one
 `Settings`, so they run the same `AgentRuntime` and differ only in the adapters chosen.
 Nothing else imports adapters into the core, and `application`, `domain` and `interfaces`
 never import this module (the import-linter contracts forbid it).
@@ -61,7 +61,7 @@ from langchain_core.embeddings import Embeddings
 from pydantic import SecretStr
 
 from freight_agent.adapters.channels.fakes.recording import RecordingGateways
-from freight_agent.adapters.clock import SystemClock, UuidIdGenerator, VirtualClock
+from freight_agent.adapters.clock import SystemClock, UuidIdGenerator
 from freight_agent.adapters.decisions.openrouter import OpenRouterDecisions
 from freight_agent.adapters.decisions.unavailable import UnavailableDecisions
 from freight_agent.adapters.documents.fs_blobs import FsBlobStore
@@ -556,13 +556,3 @@ def build_runtime(
             memory=memory,
         )
     )
-
-
-@dataclass(frozen=True)
-class Simulation:
-    """A runtime on a hand-moved clock whose deliveries are recorded, for the platform:
-    it moves `clock` and reads what the agent sent from `gateways.log`."""
-
-    runtime: AgentRuntime
-    clock: VirtualClock
-    gateways: RecordingGateways

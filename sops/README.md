@@ -211,9 +211,8 @@ also warns when no test scenario covers a topic. Fix every error before you go o
 
 To inspect a workspace profile, open its SOP editor and effective-text preview.
 To inspect what an existing live execution used, open that operation's saved SOP
-snapshot and run details. For file-backed resolution/search, the legacy
-`/api/sops/preview` and `/api/sops/search` API routes remain available; they do not
-read the workspace profile database.
+snapshot and run details. Use `agent sop lint`, `agent play` or Studio to inspect
+file-backed SOP behavior; those tools do not read the workspace profile database.
 
 ## The safe way to change an SOP
 

@@ -5,7 +5,7 @@ import type {
   OutboxItem,
   RunRecord,
   Timer,
-} from "../api";
+} from "../domain";
 import type { BrokerProfile, LiveScenario } from "./workspace";
 
 export interface DurableSnapshot {

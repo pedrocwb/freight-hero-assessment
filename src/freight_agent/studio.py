@@ -24,7 +24,7 @@ as a one-step scenario at 07:00 on the assignment's day (America/Los_Angeles):
      "body": "What's the PO number?"}}
     {"load": "load_481207", "ping": {"delay_risk": "high"}}
 
-Each node moves a fresh world, the way the scenario player of the evals and the platform
+Each node moves a fresh world, the way the eval scenario player
 moves it (`evalkit.runner.ScenarioPlayer`), with one tick of the runtime split into its
 three parts so that each run is a node visit of its own:
 
@@ -327,8 +327,7 @@ class _Nodes:
         self._worlds = worlds
 
     def _open(self, scenario: Scenario, last: int) -> World:
-        """A fresh world for `scenario`, built as the platform builds its simulation
-        (`api.simulation.open_session`), from the composition root's builders."""
+        """A fresh virtual world for `scenario`, using the composition root's builders."""
         settings = self._settings
         try:
             load = read_load(settings.evals_dir, scenario)
