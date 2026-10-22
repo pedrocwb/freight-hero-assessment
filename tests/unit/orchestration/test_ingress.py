@@ -2,9 +2,11 @@
 
 from contextlib import asynccontextmanager
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from temporalio.client import Client
 from tests.unit.application.test_runtime_harness import DRIVER, World, at
 
@@ -15,6 +17,7 @@ from freight_agent.domain.load import Channel, Load, Stage
 from freight_agent.orchestration import api
 from freight_agent.orchestration.contracts import LoadKey
 from freight_agent.orchestration.service import TemporalIngress
+from freight_agent.settings import Settings
 
 pytestmark = pytest.mark.unit
 
@@ -104,7 +107,17 @@ def test_durable_api_accepts_and_exposes_committed_input(load: Load, load_metada
         yield service
 
     monkeypatch.setattr(api, "services", wired)
-    with TestClient(api.create_app()) as client:
+    # The profile repository is a separate startup dependency, unused by these routes.
+    # Keep this unit test independent of a developer's .env and any Postgres server.
+    profile_store = Mock(spec=api.PostgresUnitOfWorkFactory, close=AsyncMock())
+    monkeypatch.setattr(api, "PostgresUnitOfWorkFactory", Mock(return_value=profile_store))
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database_url=SecretStr("postgresql://unused/test"),
+        openrouter_api_key=None,
+        langsmith_api_key=None,
+    )
+    with TestClient(api.create_app(settings)) as client:
         assert client.get("/health").json()["mode"] == "temporal"
         registration = client.post("/loads", json={"metadata": load_metadata})
         assert registration.status_code == 201, registration.text
@@ -117,3 +130,5 @@ def test_durable_api_accepts_and_exposes_committed_input(load: Load, load_metada
         assert state.status_code == 200 and len(state.json()["events"]) == 1
         assert client.get(f"/brokers/wrong/loads/{load.load_id}").status_code == 409
         assert client.post("/loads", json={"metadata": {}}).status_code == 422
+    profile_store.assert_not_called()
+    profile_store.close.assert_awaited_once()
