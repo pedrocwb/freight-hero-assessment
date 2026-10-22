@@ -8,6 +8,33 @@ access to it. To reproduce a figure on your own keys, run the command next to it
 [docs/development.md](../docs/development.md#commands)). pass^k means a scenario passes only if all k repetitions
 pass.
 
+## Stop grounding — 2026-10-21
+
+Code commit `3030f17`, configured production prompts, Jev gate. The new suite checks
+the facility used at each of the six load stages and after pickup departure on the
+same load. It checks SMS and Slack text, rejects the other stop or an omitted
+facility, and uses the judge for the meaning of the reference.
+
+| Experiment | Result | Reported model cost |
+|---|---|---|
+| [Grounding, k = 3](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/ce7918cf-ff14-4b92-9766-d6bf4f960c24/compare?selectedSessions=c5a45f9f-6fb9-465e-a8be-a03998b16382) | 7/7 scenarios passed all 3 repetitions (21/21 plays) | $0.0294 |
+| [Core compatibility, k = 1](https://smith.langchain.com/o/6ebea7ef-3343-4561-943b-9653a7ed572f/datasets/1323a82c-f83a-4404-8872-65a907007dd8/compare?selectedSessions=830d0960-234e-4a1a-a712-1c98fe22266d) | 3/3: Northline high risk, Keystone high risk, Keystone reefer departure | $0.0063 |
+
+Two additional real-clock Temporal runs used the saved Keystone SOP with a private
+one-minute wait: `keystone-stop-to_pickup-b0010c0a` and
+`keystone-stop-to_delivery-97cd3885`. Both the request and the later Slack alert
+named Riverbend/Stockton for pickup and Valley DC/Reno for delivery. Temporal history
+contained timer-started and timer-fired events; deadlines were 60 seconds after
+the recorded SMS acceptance. These channels use the platform's recording gateways.
+The test runs were stopped afterward without changing the saved broker profile.
+
+The fix grounds the stop in prompt variables and the load read tool, repeats the
+fact beside the decision event, and makes facility naming explicit in the SOP.
+Negative controls reject the original wrong-stop alert. See
+[stop grounding](../docs/stop-grounding.md) for the stage mapping and reproduction.
+
+## Earlier measurements
+
 What was measured:
 
 - **Gate:** `typesafe/jev-1.14`, TypeSafe's decision model (a model that answers fixed
