@@ -41,6 +41,7 @@ def test_demo_start_uses_one_load_and_one_risk_event(load: Load, monkeypatch, re
             "_env_file": None,
             "openrouter_api_key": SecretStr("test") if ready else None,
             "evals_dir": ROOT / "evals",
+            "database_url": SecretStr("postgresql://unused/unused"),
         }
     )
     with TestClient(api.create_app(settings)) as client:

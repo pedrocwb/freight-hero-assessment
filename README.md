@@ -1,5 +1,8 @@
 # Freight load agent
 
+> **Live UI:** broker workspaces, editable SOPs and all scenarios on Temporal. See [Live broker workspaces](docs/live-workspace.md) for setup and behavior.
+
+
 An agent that follows a truckload's events (driver SMS, email, location pings with a delay
 risk, its own follow-up timers, documents) and acts as each client's SOP says. This page is
 how to run the agent and the evals on your computer. The design and the answers to the

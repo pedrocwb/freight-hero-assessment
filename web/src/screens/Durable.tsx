@@ -1,271 +1,590 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-
-import { conversation, durableRequest, progress, remaining, type DemoPolicy, type DurableHealth, type DurableSnapshot } from "../lib/durable";
+import {
+  conversation,
+  durableRequest,
+  progress,
+  remaining,
+  type DurableSnapshot,
+} from "../lib/durable";
 import { href } from "../lib/route";
+import {
+  effectiveSops,
+  operationPath,
+  stageNames,
+  targetNames,
+} from "../lib/workspace";
 
-const time = (value: string) => new Date(value).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
-const labels: Record<string, string> = { sms: "SMS para o motorista", hero_task: "Tarefa para o hero", email: "E-mail", tms_note: "Nota da carga" };
+const time = (value: string) => new Date(value).toLocaleTimeString("pt-BR");
+const labels: Record<string, string> = {
+  sms: "SMS",
+  hero_task: "Tarefa para o hero",
+  email: "E-mail",
+  broker_slack: "Slack do broker",
+  tms_note: "Nota da carga",
+  stage_update: "Mudança de etapa",
+};
+const riskNames: Record<string, string> = {
+  high: "alto",
+  medium: "médio",
+  low: "baixo",
+};
+const obligationNames: Record<string, string> = {
+  open: "Em aberto",
+  satisfied: "Atendida",
+  cancelled: "Cancelada",
+  exhausted: "Tentativas esgotadas",
+};
+const roles: Record<string, string> = {
+  driver: "Motorista",
+  dispatcher: "Dispatcher",
+  broker: "Broker",
+  hero: "Hero",
+};
 
-export function Durable({ params }: { params: URLSearchParams }) {
+export function Durable({
+  params,
+  brokerId = "aurora",
+}: {
+  params: URLSearchParams;
+  brokerId?: string;
+}) {
   const loadId = params.get("load") || "";
-  const [health, setHealth] = useState<DurableHealth | null>(null);
+  const path = operationPath(brokerId, loadId);
   const [snapshot, setSnapshot] = useState<DurableSnapshot | null>(null);
   const [error, setError] = useState("");
-  const [starting, setStarting] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [notice, setNotice] = useState("");
   const [now, setNow] = useState(Date.now());
   const [updated, setUpdated] = useState(0);
-  const [lastLoad, setLastLoad] = useState(() => localStorage.getItem("aurora-last-load"));
   const [message, setMessage] = useState("");
-  const [sending, setSending] = useState(false);
-  const [sendStatus, setSendStatus] = useState("");
-  const [sendError, setSendError] = useState("");
-  const pendingMessage = useRef<{ body: string; message_id: string } | null>(null);
-  const [policy, setPolicy] = useState<DemoPolicy | null>(null);
-  const [policyError, setPolicyError] = useState("");
-  const [stopBusy, setStopBusy] = useState(false);
-  const [stopError, setStopError] = useState("");
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void durableRequest<DemoPolicy>("/sop", { signal: controller.signal }).then((defaults) => {
-      if (controller.signal.aborted) return;
-      try {
-        const saved = JSON.parse(localStorage.getItem("aurora-sop-draft") || "null");
-        setPolicy(saved && typeof saved.body === "string" && Number.isInteger(saved.max_attempts) && Number.isInteger(saved.interval_minutes) ? saved : defaults);
-      } catch { setPolicy(defaults); }
-    }).catch(() => { if (!controller.signal.aborted) setPolicyError("Não foi possível carregar o SOP. Recarregue a página."); });
-    return () => controller.abort();
-  }, []);
-
-  function editPolicy(change: Partial<DemoPolicy>) {
-    if (!policy) return;
-    const next = { ...policy, ...change };
-    setPolicy(next);
-    localStorage.setItem("aurora-sop-draft", JSON.stringify(next));
-  }
-
-  async function stopExecution() {
-    setStopBusy(true);
-    setStopError("");
-    try {
-      await durableRequest(`/loads/${encodeURIComponent(loadId)}/stop`, { method: "POST" });
-      setSnapshot(await durableRequest<DurableSnapshot>(`/loads/${encodeURIComponent(loadId)}`));
-    } catch (cause) {
-      setStopError(cause instanceof Error ? cause.message : "Não foi possível parar. Tente novamente.");
-    } finally { setStopBusy(false); }
-  }
-
-  useEffect(() => {
-    setMessage("");
-    setSendStatus("");
-    setSendError("");
-    pendingMessage.current = null;
-  }, [loadId]);
-
-  const loadedId = snapshot?.load.load_id;
-  useEffect(() => {
-    if (loadedId) {
-      localStorage.setItem("aurora-last-load", loadedId);
-      setLastLoad(loadedId);
-    }
-  }, [loadedId]);
-
+  const [sender, setSender] = useState("");
+  const [channel, setChannel] = useState("sms");
+  const [busy, setBusy] = useState("");
+  const [risk, setRisk] = useState("high");
+  const pendingMessage = useRef<{
+    body: string;
+    message_id: string;
+    sender_contact_id: string;
+    channel: string;
+  } | null>(null);
+  const pendingPing = useRef<{
+    ping_id: string;
+    delay_risk: string;
+    occurred_at: string;
+  } | null>(null);
   useEffect(() => {
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(clock);
   }, []);
-
   useEffect(() => {
     const controller = new AbortController();
     let timer: number;
-    setSnapshot(null);
-    setError("");
-    setUpdated(0);
-    const poll = async () => {
+    async function poll() {
       try {
-        const [status, state] = await Promise.all([
-          durableRequest<DurableHealth>("/health", { signal: controller.signal }),
-          loadId ? durableRequest<DurableSnapshot>(`/loads/${encodeURIComponent(loadId)}`, { signal: controller.signal }) : Promise.resolve(null),
-        ]);
-        if (controller.signal.aborted) return;
-        setHealth(status);
-        setSnapshot(state);
-        setUpdated(Date.now());
-        setError("");
-      } catch (cause) {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "A conexão foi interrompida.");
+        const result = await durableRequest<DurableSnapshot>(path, {
+          signal: controller.signal,
+        });
+        if (!controller.signal.aborted) {
+          setSnapshot(result);
+          setError("");
+          setUpdated(Date.now());
+        }
+      } catch (e) {
+        if (!controller.signal.aborted)
+          setError(e instanceof Error ? e.message : "Conexão interrompida.");
       } finally {
         if (!controller.signal.aborted) timer = window.setTimeout(poll, 2000);
       }
-    };
+    }
     void poll();
-    return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [loadId]);
-
-  async function start() {
-    if (!policy) return;
-    setStarting(true);
-    setError("");
-    // Retain the ID on an uncertain response: retrying cannot start another load.
-    let saved: { load_id: string; policy: DemoPolicy } | null = null;
-    try { saved = JSON.parse(sessionStorage.getItem("aurora-start-request") || "null"); } catch { /* replace invalid draft */ }
-    const pending = saved && JSON.stringify(saved.policy) === JSON.stringify(policy) ? saved : { load_id: `aurora-${crypto.randomUUID()}`, policy };
-    sessionStorage.setItem("aurora-start-request", JSON.stringify(pending));
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [path]);
+  const contacts = snapshot?.load.contacts || [];
+  const contact =
+    contacts.find((c) => c.id === sender) ||
+    contacts.find((c) => c.role === "driver") ||
+    contacts[0];
+  const actualChannel = contact?.channels.includes(channel as never)
+    ? channel
+    : contact?.channels[0] || "sms";
+  async function act(suffix: string, body?: unknown) {
+    setBusy(suffix);
+    setActionError("");
+    setNotice("");
     try {
-      const result = await durableRequest<{ load_id: string }>(`/demos/aurora/${pending.load_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pending.policy) });
-      sessionStorage.removeItem("aurora-start-request");
-      localStorage.setItem("aurora-last-load", result.load_id);
-      window.location.hash = href("durable", { load: result.load_id });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Não foi possível iniciar a carga.");
-    } finally {
-      setStarting(false);
-    }
-  }
-
-  async function sendMessage(event: FormEvent) {
-    event.preventDefault();
-    const body = message.trim();
-    if (!body || sending || !loadId) return;
-    setSending(true);
-    setSendStatus("");
-    setSendError("");
-    if (pendingMessage.current?.body !== body) {
-      pendingMessage.current = { body, message_id: crypto.randomUUID() };
-    }
-    try {
-      const result = await durableRequest<{ accepted: boolean; duplicate: boolean }>(`/loads/${encodeURIComponent(loadId)}/messages`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pendingMessage.current),
+      await durableRequest(`${path}/${suffix}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(body ? { body: JSON.stringify(body) } : {}),
       });
-      if (!result.accepted && !result.duplicate) throw new Error("A mensagem não foi aceita. Tente novamente.");
-      pendingMessage.current = null;
-      setMessage("");
-      setSendStatus("Mensagem recebida pelo agente.");
-    } catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : "Não foi possível enviar. Tente novamente.");
+      setSnapshot(await durableRequest<DurableSnapshot>(path));
+      setNotice(
+        suffix === "stop"
+          ? "Parada solicitada. Aguarde a confirmação."
+          : "Entrada recebida. Acompanhe a decisão do agente abaixo.",
+      );
+      return true;
+    } catch (e) {
+      setActionError(
+        e instanceof Error ? e.message : "Não foi possível enviar.",
+      );
+      return false;
     } finally {
-      setSending(false);
+      setBusy("");
     }
   }
-
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    if (!contact || !message.trim()) return;
+    const body = message.trim();
+    if (
+      pendingMessage.current?.body !== body ||
+      pendingMessage.current?.sender_contact_id !== contact.id ||
+      pendingMessage.current?.channel !== actualChannel
+    )
+      pendingMessage.current = {
+        body,
+        message_id: crypto.randomUUID(),
+        sender_contact_id: contact.id,
+        channel: actualChannel,
+      };
+    if (await act("messages", pendingMessage.current)) {
+      setMessage("");
+      pendingMessage.current = null;
+    }
+  }
+  async function ping() {
+    if (pendingPing.current?.delay_risk !== risk)
+      pendingPing.current = {
+        ping_id: crypto.randomUUID(),
+        delay_risk: risk,
+        occurred_at: new Date().toISOString(),
+      };
+    if (
+      await act("pings", {
+        ...pendingPing.current,
+        load_id: loadId,
+        lat: 37.9577,
+        lon: -121.2908,
+      })
+    )
+      pendingPing.current = null;
+  }
   const state = snapshot ? progress(snapshot) : null;
   const halted = !!snapshot?.load.automation_stopped_at;
   const stopping = !!snapshot?.load.automation_stop_requested_at && !halted;
-  const maxAttempts = state?.maxAttempts ?? policy?.max_attempts ?? 10;
-  const intervalMinutes = state?.intervalMinutes ?? policy?.interval_minutes ?? 1;
-  const validPolicy = policy && policy.body.trim().length >= 20 && policy.body.length <= 12000 && Number.isInteger(policy.max_attempts) && policy.max_attempts >= 1 && policy.max_attempts <= 10 && Number.isInteger(policy.interval_minutes) && policy.interval_minutes >= 1 && policy.interval_minutes <= 60;
-  const stopped = state?.obligation && ["satisfied", "cancelled"].includes(state.obligation.status);
-  const status = error ? "Conexão interrompida" : halted ? "Execução parada" : stopping ? "Parando execução…" : state?.failed ? "A execução precisa de atenção" : state?.complete ? "Escalado para um hero" : stopped ? "Acompanhamento encerrado" : state?.timer ? "Aguardando o motorista" : loadId ? "Agente processando" : "Pronto para iniciar";
-  const deliveries = [...(snapshot?.outbox || [])].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const disabled = !snapshot || !!busy || !!error || halted || stopping;
+  const frozen = snapshot?.load.sop_snapshot;
+  const scenario = frozen?.scenario;
+  const eta = frozen?.broker?.obligations.find((o) => o.kind === "eta_request");
+  const status = error
+    ? "Conexão interrompida"
+    : halted
+      ? "Execução parada"
+      : stopping
+        ? "Parando execução…"
+        : state?.failed
+          ? "Precisa de atenção"
+          : snapshot?.processing
+            ? "Entrada em processamento"
+            : state?.complete
+              ? "Escalada concluída"
+              : state?.timer
+                ? "Aguardando retorno"
+                : state?.obligation?.status === "satisfied"
+                  ? "Previsão recebida"
+                  : "Monitorando a carga";
   const rows = snapshot ? conversation(snapshot) : [];
-  const driverReplied = rows.some((row) => row.kind === "driver");
-
+  const sections = frozen?.sections
+    ? effectiveSops(frozen.sections, snapshot?.load.load_types?.[0])
+    : [];
   return (
     <section className="durable" aria-label="Operação ao vivo">
       <div className="durable-heading">
         <div>
-          <h1>Aurora Transportes</h1>
-          <p className="muted">Alimentos Serra Verde · Curitiba → São Paulo · 18 toneladas</p>
+          <a className="text-link" href={href("durable", { broker: brokerId })}>
+            ← Todas as operações
+          </a>
+          <h2>{scenario?.title || "Operação ao vivo"}</h2>
+          <p className="muted">
+            {snapshot?.load.shipper} · {snapshot?.load.commodity}
+          </p>
         </div>
         <div className="durable-controls">
-          {loadId && <button className="button" onClick={() => void stopExecution()} disabled={!snapshot || stopBusy || stopping || halted || !!error}>{stopping || stopBusy ? "Parando…" : "Parar execução"}</button>}
-          <button className="button button--primary" onClick={() => void start()} disabled={starting || !validPolicy || !health?.model_ready || !!error}>
-            {starting ? "Iniciando…" : loadId ? "Executar novo SOP" : "Iniciar cenário"}
+          <button
+            className="button"
+            onClick={() => void act("stop")}
+            disabled={disabled}
+          >
+            {stopping || busy === "stop" ? "Parando…" : "Parar execução"}
           </button>
+          <a
+            className="button button--primary"
+            href={href("scenarios", { broker: brokerId })}
+          >
+            Novo cenário
+          </a>
         </div>
       </div>
-
-      <p className="durable-mode">IA ao vivo · Relógio real · SMS e tarefas registrados em ambiente de teste</p>
-      {stopError && <p className="banner banner--alert" role="alert">{stopError}</p>}
-      {policyError && <p className="banner banner--alert" role="alert">{policyError}</p>}
-      <details className="durable-editor">
-        <summary>Editar SOP para nova execução</summary>
-        <p>Este rascunho vale para uma nova carga. A execução atual mantém o SOP com que começou.</p>
-        {policy && <fieldset disabled={starting}>
-          <div className="durable-policy-fields">
-            <label>Tentativas de SMS<input type="number" min={1} max={10} value={policy.max_attempts} onChange={(e) => editPolicy({ max_attempts: Number(e.target.value) })} /></label>
-            <label>Intervalo em minutos<input type="number" min={1} max={60} value={policy.interval_minutes} onChange={(e) => editPolicy({ interval_minutes: Number(e.target.value) })} /></label>
-          </div>
-          <label htmlFor="sop-body">SOP de risco alto e acompanhamento</label>
-          <textarea id="sop-body" rows={12} maxLength={12000} value={policy.body} onChange={(e) => editPolicy({ body: e.target.value })} />
-          <small>Use {"{{max_attempts}}"} e {"{{interval_minutes}}"} no texto para acompanhar os valores acima. Limites: 1–10 tentativas e 1–60 minutos. As outras seções do SOP são preservadas.</small>
-          {!validPolicy && <p role="alert">Confira os limites e escreva pelo menos 20 caracteres no SOP.</p>}
-        </fieldset>}
-      </details>
-      {error && <p className="banner banner--alert" role="alert">{error} Os dados abaixo são da última atualização; a tela tenta reconectar automaticamente.</p>}
-      {health && !health.model_ready && <p className="banner banner--warn">A IA ainda não está configurada no serviço da operação ao vivo.</p>}
-      {!loadId && lastLoad && <a href={href("durable", { load: lastLoad })}>Retomar a última execução</a>}
-
+      <p className="durable-mode">
+        IA ao vivo · Temporal · Relógio real · Comunicações registradas em
+        ambiente de teste
+      </p>
+      {error && (
+        <p className="banner banner--alert" role="alert">
+          {error} Exibindo a última atualização; reconectando automaticamente.
+        </p>
+      )}
+      {actionError && (
+        <p className="banner banner--alert" role="alert">
+          {actionError}
+        </p>
+      )}
+      {notice && (
+        <p className="banner" role="status">
+          {notice}
+        </p>
+      )}
       <div className="durable-status" role="status">
-        <div><span className="durable-status-dot" /><strong>{status}</strong>
-          <p>{halted ? "Parada confirmada. Timers e ações pendentes foram cancelados; o histórico foi preservado." : stopping ? "Aguardando a etapa em andamento terminar. Nenhum novo contato será iniciado após a confirmação da parada." : state?.complete ? "O limite de tentativas foi atingido. O hero deve ligar para confirmar a chegada." : stopped ? "A obrigação foi encerrada e os próximos pedidos foram cancelados." : driverReplied ? "O motorista respondeu. O agente avalia a mensagem conforme o SOP." : "Risco alto de atraso na entrega. O motorista não responde aos pedidos de previsão."}</p>
+        <div>
+          <span className="durable-status-dot" />
+          <strong>{status}</strong>
+          <p>
+            {halted
+              ? "Timers e ações pendentes cancelados. O histórico foi preservado."
+              : stopping
+                ? "Aguardando a etapa em andamento terminar antes de confirmar a parada."
+                : state?.complete
+                  ? "Os contatos previstos no SOP foram registrados e a obrigação foi encerrada."
+                  : `${stageNames[snapshot?.load.stage || ""] || "Carregando…"} · Risco ${riskNames[snapshot?.load.delay_risk || ""] || "—"}`}
+          </p>
         </div>
         <div className="durable-countdown">
-          <span>{state?.timer ? (state.sms.length === maxAttempts ? "Escalada em" : "Próximo contato em") : "Contatos confirmados"}</span>
-          <strong>{state?.timer && !error ? remaining(state.timer.due_at, now) : `${state?.sms.length || 0}/${maxAttempts}`}</strong>
-          {state?.timer && <small>{time(state.timer.due_at)} · horário de Brasília{Date.parse(state.timer.due_at) <= now ? " · aguardando processamento" : ""}</small>}
+          <span>{state?.timer ? "Próximo timer em" : "Pedidos de ETA"}</span>
+          <strong>
+            {state?.timer && !error
+              ? remaining(state.timer.due_at, now)
+              : `${state?.sms.length || 0}/${state?.maxAttempts || "—"}`}
+          </strong>
+          {state?.timer && (
+            <small>
+              {time(state.timer.due_at)}
+              {Date.parse(state.timer.due_at) <= now
+                ? " · aguardando processamento"
+                : " · horário local"}
+            </small>
+          )}
         </div>
       </div>
-
-      <ol className="durable-attempts" aria-label="Tentativas de contato">
-        {Array.from({ length: maxAttempts }, (_, i) => {
-          const sms = state?.sms[i];
-          return <li key={i} className={sms ? "is-sent" : ""}>
-            <span>SMS {i + 1}</span><strong>{sms ? "Registrado" : halted || stopped ? "Cancelado" : "Aguardando"}</strong>
-            <time>{sms?.accepted_at ? time(sms.accepted_at) : "—"}</time>
-          </li>;
-        })}
-      </ol>
-
+      {state?.obligation && (
+        <ol className="durable-attempts" aria-label="Tentativas de contato">
+          {Array.from({ length: state.maxAttempts }, (_, i) => (
+            <li key={i} className={state.sms[i] ? "is-sent" : ""}>
+              <span>Pedido {i + 1}</span>
+              <strong>
+                {state.sms[i]
+                  ? "Registrado"
+                  : halted || state.obligation?.status !== "open"
+                    ? "Encerrado"
+                    : "Aguardando"}
+              </strong>
+              <time>
+                {state.sms[i]?.accepted_at
+                  ? time(state.sms[i]!.accepted_at!)
+                  : "—"}
+              </time>
+            </li>
+          ))}
+        </ol>
+      )}
       <div className="durable-columns">
-        <section className="durable-thread" aria-labelledby="durable-conversation">
-          <h2 id="durable-conversation">Contatos e escalada</h2>
-          <form className="durable-composer" onSubmit={(event) => void sendMessage(event)}>
-            <label htmlFor="driver-message">Mensagem do motorista</label>
-            <textarea id="driver-message" rows={3} maxLength={2000} value={message}
-              placeholder="Ex.: Chego ao CD em 20 minutos."
-              onChange={(event) => setMessage(event.target.value)} disabled={!snapshot || sending || stopping || halted}
-              aria-describedby="driver-message-hint" />
-            <div><small id="driver-message-hint">Simula um SMS recebido nesta carga. Uma previsão de chegada pode encerrar os pedidos.</small>
-              <button className="button button--primary" type="submit" disabled={!snapshot || !message.trim() || sending || !!error || stopping || halted}>{sending ? "Enviando…" : "Enviar como motorista"}</button>
+        <section className="durable-thread" aria-labelledby="live-conversation">
+          <h2 id="live-conversation">Entradas e ações do agente</h2>
+          <form className="durable-composer" onSubmit={(e) => void send(e)}>
+            <div className="input-sender">
+              <label>
+                Enviar como
+                <select
+                  value={contact?.id || ""}
+                  disabled={disabled}
+                  onChange={(e) => setSender(e.target.value)}
+                >
+                  {contacts.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {roles[c.role] || c.role} · {c.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Canal
+                <select
+                  disabled={disabled}
+                  value={actualChannel}
+                  onChange={(e) => setChannel(e.target.value)}
+                >
+                  {contact?.channels
+                    .filter((c) => c !== "system")
+                    .map((c) => (
+                      <option key={c} value={c}>
+                        {c.toUpperCase()}
+                      </option>
+                    ))}
+                </select>
+              </label>
             </div>
-            {sendStatus && <p role="status">{sendStatus}</p>}
-            {sendError && <p className="banner banner--alert" role="alert">{sendError}</p>}
+            <label htmlFor="driver-message">Mensagem recebida</label>
+            <textarea
+              id="driver-message"
+              rows={3}
+              maxLength={2000}
+              value={message}
+              placeholder="Ex.: Chego em 20 minutos. / Qual é o número do PO?"
+              onChange={(e) => setMessage(e.target.value)}
+              disabled={disabled}
+            />
+            <div>
+              <small>
+                A entrada é processada pelo agente desta carga, com o SOP fixado
+                no início.
+              </small>
+              <button
+                className="button button--primary"
+                disabled={disabled || !message.trim()}
+              >
+                {busy === "messages" ? "Enviando…" : "Enviar mensagem"}
+              </button>
+            </div>
           </form>
-          {rows.length === 0 && <p className="durable-empty">{loadId ? "O agente está preparando o primeiro contato." : "Inicie o cenário para acompanhar o primeiro pedido de previsão de chegada."}</p>}
+          <details className="live-ping">
+            <summary>Enviar location ping</summary>
+            <div>
+              <label>
+                Risco de atraso
+                <select value={risk} onChange={(e) => setRisk(e.target.value)}>
+                  <option value="high">Alto</option>
+                  <option value="medium">Médio</option>
+                  <option value="low">Baixo</option>
+                </select>
+              </label>
+              <button
+                className="button"
+                disabled={disabled}
+                onClick={() => void ping()}
+              >
+                Enviar ping
+              </button>
+            </div>
+            <small>
+              O filtro de localização pode exigir confirmações antes de reduzir
+              o risco.
+            </small>
+          </details>
+          {rows.length === 0 && (
+            <p className="durable-empty">
+              O ping inicial foi enviado. Use as entradas do roteiro ou envie
+              uma mensagem para acompanhar o agente.
+            </p>
+          )}
           {rows.map((row) => {
-            if (row.kind === "driver") return <article className="durable-entry durable-entry--driver" key={row.key}>
-              <div className="durable-entry-meta"><strong>Motorista</strong><span>SMS recebido · {time(row.at)}</span></div>
-              <p>{row.event.body}</p>
-            </article>;
+            if (row.kind === "driver") {
+              const person = contacts.find(
+                (c) => c.id === row.event.sender_contact_id,
+              );
+              return (
+                <article
+                  className="durable-entry durable-entry--driver"
+                  key={row.key}
+                >
+                  <div className="durable-entry-meta">
+                    <strong>
+                      {person
+                        ? roles[person.role] || person.role
+                        : "Mensagem recebida"}
+                    </strong>
+                    <span>
+                      {row.event.channel?.toUpperCase()} · {time(row.at)}
+                    </span>
+                  </div>
+                  <p>{row.event.body}</p>
+                  {row.event.attachments?.map((a) => (
+                    <small key={a.attachment_id}>Anexo: {a.filename}</small>
+                  ))}
+                </article>
+              );
+            }
             const item = row.item;
-            const i = deliveries.findIndex((d) => d.outbox_id === item.outbox_id);
             const run = snapshot?.runs.find((r) => r.run_id === item.run_id);
             return (
-            <article className={`durable-entry ${item.kind === "hero_task" ? "durable-entry--hero" : ""}`} key={item.outbox_id}>
-              <div className="durable-entry-meta"><strong>{labels[item.kind] || item.kind}</strong><span>{item.status === "sent" ? "Registrado" : item.status === "failed" ? "Falhou" : item.status === "cancelled" ? "Cancelado" : "Pendente"} · {time(item.accepted_at || item.created_at)}</span></div>
-              {item.kind === "sms" && item.payload.purpose === "eta_request" && <small>Tentativa {deliveries.slice(0, i + 1).filter((d) => d.kind === "sms" && d.payload.purpose === "eta_request").length} de {maxAttempts}</small>}
-              {typeof item.payload.title === "string" && <h3>{item.payload.title}</h3>}
-              <p>{String(item.payload.text || item.payload.description || item.payload.body || "")}</p>
-              {run && <details>
-                <summary>Ver decisão do agente</summary>
-                <p>{run.plan?.rationale}</p>
-                <ul>{run.trajectory.map((step, j) => <li key={j}><code>{step.tool}</code> {step.accepted === false ? "· recusado" : ""}</li>)}</ul>
-                <p>Modelo: {[...new Set(run.usage.map((u) => u.model))].join(", ") || "—"}</p>
-                {run.trace_url?.startsWith("https://") && <a href={run.trace_url} target="_blank" rel="noreferrer">Abrir execução no LangSmith</a>}
-              </details>}
-            </article>
-          ); })}
+              <article
+                className={`durable-entry ${item.kind === "hero_task" ? "durable-entry--hero" : ""}`}
+                key={row.key}
+              >
+                <div className="durable-entry-meta">
+                  <strong>{labels[item.kind] || item.kind}</strong>
+                  <span>
+                    {item.status === "sent"
+                      ? "Registrado"
+                      : item.status === "failed"
+                        ? "Falhou"
+                        : item.status === "cancelled"
+                          ? "Cancelado"
+                          : "Pendente"}{" "}
+                    · {time(row.at)}
+                  </span>
+                </div>
+                {typeof item.payload.title === "string" && (
+                  <h3>{item.payload.title}</h3>
+                )}
+                <p>
+                  {String(
+                    item.payload.text ||
+                      item.payload.description ||
+                      item.payload.body ||
+                      stageNames[String(item.payload.stage)] ||
+                      item.payload.stage ||
+                      "",
+                  )}
+                </p>
+                {run && (
+                  <details>
+                    <summary>Ver decisão do agente</summary>
+                    <p>{run.plan?.rationale}</p>
+                    <ul>
+                      {run.trajectory.map((step, i) => (
+                        <li key={i}>
+                          <code>{step.tool}</code>
+                          {step.accepted === false ? " · recusado" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                    {run.trace_url?.startsWith("https://") && (
+                      <a href={run.trace_url} target="_blank" rel="noreferrer">
+                        Abrir no LangSmith
+                      </a>
+                    )}
+                  </details>
+                )}
+              </article>
+            );
+          })}
+          {!!snapshot?.runs.length && (
+            <details className="live-run-list">
+              <summary>Todas as decisões ({snapshot.runs.length})</summary>
+              {snapshot.runs.map((run) => (
+                <article key={run.run_id}>
+                  <strong>
+                    {run.status} · {time(run.started_at)}
+                  </strong>
+                  <p>
+                    {run.plan?.rationale || run.error || "Sem ação externa."}
+                  </p>
+                  <small>{run.trajectory.map((t) => t.tool).join(" → ")}</small>
+                </article>
+              ))}
+            </details>
+          )}
         </section>
-
         <aside className="durable-policy">
-          <h2>SOP desta execução</h2>
-          <p>Até <strong>{maxAttempts} SMS</strong>, com espera de <strong>{intervalMinutes} minuto(s)</strong> após cada confirmação. O texto do SOP define as decisões e a escalada.</p>
-          <p>O intervalo começa na confirmação de cada SMS. O processamento da IA pode acrescentar alguns segundos.</p>
-          <p>Fechar esta página não interrompe a carga. Reabra o mesmo link para acompanhar.</p>
-          {snapshot?.load.sop_snapshot && <details><summary>SOP usado nesta execução · {snapshot.load.sop_snapshot.version}</summary><pre className="durable-sop-text">{snapshot.load.sop_snapshot.policy.body.replaceAll("{{max_attempts}}", String(maxAttempts)).replaceAll("{{interval_minutes}}", String(intervalMinutes))}</pre></details>}
-          {loadId && <dl><dt>Carga</dt><dd>{loadId}</dd><dt>Execuções do agente</dt><dd>{snapshot?.runs.length || 0}</dd><dt>Timers disparados</dt><dd>{snapshot?.timers.filter((t) => t.status === "fired").length || 0}</dd><dt>Última atualização</dt><dd>{updated ? time(new Date(updated).toISOString()) : "—"}</dd></dl>}
-          {state?.failed && <p className="banner banner--alert">Há uma falha registrada. Confira a decisão do agente e o histórico antes de iniciar outra execução.</p>}
+          <h2>Roteiro e contexto</h2>
+          {scenario && (
+            <>
+              <p>
+                As mensagens abaixo são entradas manuais do cenário. As esperas
+                são cumpridas pelos timers reais do SOP; os horários originais
+                são apenas referência. Os horários de ETA e as datas dos
+                comprovantes de exemplo são adaptados para esta carga.
+              </p>
+              <ol className="live-script">
+                {scenario.steps.map((step, i) => (
+                  <li key={i}>
+                    <small>
+                      Etapa {i + 1} · {step.at}
+                    </small>
+                    <p>{step.note}</p>
+                    {step.message && (
+                      <blockquote>
+                        {step.message.body}
+                        {step.message.attachments.map((a) => (
+                          <small key={a.filename}>{a.filename}</small>
+                        ))}
+                      </blockquote>
+                    )}
+                    {i === 0 && step.ping ? (
+                      <span className="live-badge">Ping inicial enviado</span>
+                    ) : step.message || step.ping ? (
+                      <button
+                        className="button"
+                        disabled={disabled}
+                        onClick={() => void act(`steps/${i}`)}
+                      >
+                        Enviar esta entrada
+                      </button>
+                    ) : (
+                      <small>Aguardar o timer do SOP</small>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+          <h3>Obrigações</h3>
+          {snapshot?.obligations.length ? (
+            snapshot.obligations.map((o) => (
+              <p key={o.obligation_id}>
+                <strong>
+                  {o.kind === "eta_request" ? "Previsão de chegada" : o.kind}
+                </strong>
+                <br />
+                {obligationNames[o.status] || o.status} · {o.attempts}{" "}
+                tentativa(s)
+              </p>
+            ))
+          ) : (
+            <p>Nenhuma obrigação aberta.</p>
+          )}
+          <h3>SOP desta carga</h3>
+          <p>
+            Versão {frozen?.version || "—"} · revisão{" "}
+            {frozen?.profile_revision || "anterior"}
+          </p>
+          <p>
+            ETA: até {state?.maxAttempts} pedido(s), a cada{" "}
+            {state?.intervalMinutes} minuto(s).{" "}
+            {eta?.on_exhausted.map((t) => targetNames[t]).join(" → ")}
+          </p>
+          <details>
+            <summary>Consultar SOP usado</summary>
+            {sections.length ? (
+              sections.map((s) => (
+                <details key={s.section_id}>
+                  <summary>{s.title}</summary>
+                  <pre className="durable-sop-text">{s.body}</pre>
+                </details>
+              ))
+            ) : (
+              <pre className="durable-sop-text">{frozen?.policy?.body}</pre>
+            )}
+          </details>
+          <dl>
+            <dt>Carga</dt>
+            <dd>{loadId}</dd>
+            <dt>Execuções do agente</dt>
+            <dd>{snapshot?.runs.length || 0}</dd>
+            <dt>Timers disparados</dt>
+            <dd>
+              {snapshot?.timers.filter((t) => t.status === "fired").length || 0}
+            </dd>
+            <dt>Última atualização</dt>
+            <dd>{updated ? time(new Date(updated).toISOString()) : "—"}</dd>
+          </dl>
+          <p>
+            Fechar a página não interrompe a execução. Para encerrar, use “Parar
+            execução”.
+          </p>
         </aside>
       </div>
     </section>

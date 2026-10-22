@@ -5,6 +5,7 @@ from dataclasses import replace
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from freight_agent.application.documents import DocumentPipeline
 from freight_agent.application.runtime import AgentRuntime, RuntimeDeps
 from freight_agent.domain.documents import DocumentStatus
 from freight_agent.domain.load import Stage
@@ -109,7 +110,13 @@ class LoadActivities:
     @activity.defn(name="process_load_documents")
     async def documents(self, key: LoadKey) -> None:
         await self._check(key)
-        events = await self.deps.documents.process_pending(limit=1, load_id=key.load_id)
+        pipeline = self.deps.documents
+        async with self.deps.uow_factory() as uow:
+            load = await uow.loads.get(key.load_id)
+            frozen = load.sop_snapshot if load else None
+        if frozen and isinstance(pipeline, DocumentPipeline):
+            pipeline = pipeline.with_knowledge(pinned_index(frozen))
+        events = await pipeline.process_pending(limit=1, load_id=key.load_id)
         if events:
             return
         # A persistence failure leaves the document pending. Retry with backoff instead

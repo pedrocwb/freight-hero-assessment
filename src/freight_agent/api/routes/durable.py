@@ -15,6 +15,17 @@ router = APIRouter(prefix="/durable", tags=["durable"])
 DemoId = Annotated[str, Path(pattern=r"^aurora-[a-z0-9-]{1,64}$")]
 
 
+@router.api_route("/workspace/{path:path}", methods=["GET", "POST", "PUT"])
+async def workspace(path: str, request: Request) -> JSONResponse:
+    import re
+
+    if not re.fullmatch(r"brokers(?:/[a-zA-Z0-9_-]+)*", path):
+        raise HTTPException(422, "Caminho inválido.")
+    raw = await request.body()
+    payload = await request.json() if raw else None
+    return await forward(request, request.method, f"/workspace/{path}", payload)
+
+
 class DriverMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

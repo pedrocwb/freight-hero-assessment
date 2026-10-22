@@ -138,6 +138,20 @@ class DocumentPipeline:
         self._knowledge = knowledge
         self._timeout_s = timeout_s
 
+    def with_knowledge(self, knowledge: SopIndex) -> "DocumentPipeline":
+        """A per-load catalog without changing the shared worker pipeline."""
+        return DocumentPipeline(
+            uow_factory=self._uow_factory,
+            clock=self._clock,
+            ids=self._ids,
+            llm=self._llm,
+            blobs=self._blobs,
+            pages=self._pages,
+            knowledge=knowledge,
+            prompt=self._prompt,
+            timeout_s=self._timeout_s,
+        )
+
     async def process_pending(self, limit: int = 10, *, load_id: str | None = None) -> list[Event]:
         """Read up to `limit` pending documents; return the events announced."""
         async with self._uow_factory() as uow:

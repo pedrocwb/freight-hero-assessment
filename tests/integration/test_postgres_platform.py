@@ -59,6 +59,7 @@ def database() -> Iterator[str]:
             "0001_load_memory.sql",
             "0002_vector_extension.sql",
             "0003_temporal.sql",
+            "0004_broker_profiles.sql",
         ]
         asyncio.run(setup_store(url, 1536))
         yield url
