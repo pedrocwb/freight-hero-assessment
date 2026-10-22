@@ -9,66 +9,51 @@ only designed. The answers to the assignment's questions are in [`answers.md`](a
 1. [System context](#1-system-context): who sends events, who receives actions, which
    services the agent calls.
 2. [Code layers](#2-code-layers): which part of the code may import which.
-3. [One run](#3-one-run-claim-think-commit-deliver): the three steps of a run, and the outbox.
+3. [One run](#3-one-run-claim-think-commit-deliver): claim, think, commit and delivery in Activities.
 4. [The run graph](#4-the-run-graph): the LangGraph graph, its limits and its exits.
-5. [Memory](#5-memory): what is stored per load, and the facility memory across loads.
+5. [Memory](#5-memory): business state, grounded context and facility memory across loads.
 6. [Load 481207, 07:00 to 08:01](#6-load-481207-0700-to-0801): the assignment's situation,
    run by run.
 7. [Documents](#7-documents): an attachment from upload to the agent's action.
-8. [SOP layers and selection](#8-sop-layers-and-selection): how a run gets its procedure.
+8. [SOP layers and selection](#8-sop-layers-and-selection): profile lifecycle and runtime selection.
 9. [Evals and prompt versions](#9-evals-and-prompt-versions): scenarios, datasets,
    experiments, and prompts in the Hub.
 10. [Durable execution and production at 10x](#10-durable-execution-and-production-at-10x):
     the implemented Temporal loop and the remaining production work.
 11. [Code map](#11-code-map): the main abstractions and directory responsibilities.
 
+The live path is the default in these diagrams. The assignment timeline in section 6
+and the eval player in section 9 explicitly use virtual time. Arrows are labeled where
+the distinction between calls, data and recovery matters. Operational stop means the
+pickup/delivery facility; stopping execution means an operator halts automation.
+
 ## 1. System context
 
 ```mermaid
-flowchart LR
-  subgraph inbound["Inbound"]
-    driverIn["Driver: SMS, photos"]
-    dispatcherIn["Carrier dispatcher: email"]
-    brokerIn["Broker staff: email, Slack"]
-    tracking["Tracking feed: location pings with delay risk"]
-  end
+flowchart TB
+  operator["Operator<br/>Simulates driver, dispatcher and broker"]
+  ui["React broker workspace<br/>Scenarios, SOP editor, live operations"]
+  proxy["Platform API :8000<br/>/api/durable bridge"]
+  ingress["Durable ingress :8001<br/>Profiles, start, messages, pings, stop"]
+  db[("Application Postgres<br/>Profiles, loads, FIFO, ledger, outbox")]
+  temporal["Temporal server<br/>History, task queue, durable waits"]
+  worker["Worker<br/>LoadWorkflow + Activities + LangGraph"]
+  relay["Relay<br/>Notification recovery + facility extraction"]
+  gateways["Recording gateways<br/>SMS, email, Slack, Hero, TMS"]
+  models["OpenRouter<br/>Gate, agent, extract, memory roles"]
+  traces["LangSmith, when configured<br/>Traces and Prompt Hub"]
 
-  ingress["Ingress: messages, pings, attachments"]
-
-  subgraph service["Agent service (this repository)"]
-    runtime["Runtime: a queue per load, run graph, executor, outbox"]
-    memory[("Load memory: events, ledger, timers, documents, runs")]
-    sops[("SOP files, broker profiles and pinned catalogs")]
-  end
-
-  gateways["Gateways: record what they would send"]
-
-  subgraph outbound["Outbound"]
-    driverOut["Driver: SMS"]
-    dispatcherOut["Dispatcher: email in the main thread"]
-    brokerOut["Broker: Slack channel"]
-    hero["Hero team: tasks, internal Slack"]
-    tms["TMS: notes, stage"]
-  end
-
-  openrouter["OpenRouter: gate, agent, extract, memory and judge models"]
-  langsmith["LangSmith: traces, Prompt Hub, datasets, experiments"]
-
-  driverIn --> ingress
-  dispatcherIn --> ingress
-  brokerIn --> ingress
-  tracking --> ingress
-  ingress --> runtime
-  runtime <--> memory
-  sops --> runtime
-  runtime --> gateways
-  gateways --> driverOut
-  gateways --> dispatcherOut
-  gateways --> brokerOut
-  gateways --> hero
-  gateways --> tms
-  runtime <--> openrouter
-  runtime -. "traces; prompts at start" .-> langsmith
+  operator --> ui --> proxy --> ingress
+  ingress -->|Commit business data| db
+  ingress -->|Signal with Start| temporal
+  relay -->|Read pending work| db
+  relay -->|Repair notification| temporal
+  temporal <-->|Poll tasks / report results| worker
+  worker <--> db
+  worker --> gateways
+  worker --> models
+  relay -->|Memory model| models
+  worker -.-> traces
 ```
 
 Built: the runtime; load and facility memory in memory or Postgres (`PERSISTENCE`);
@@ -81,25 +66,35 @@ player, Studio and legacy simulation API retain their virtual-clock execution pa
 External SMS, email, Slack, Hero and TMS providers are still recording gateways; live
 operation means real model calls and durable scheduling, not delivery to real contacts.
 
+The worker executes Workflow and Activity code; the Temporal server stores orchestration
+history and dispatches tasks. The UI polls the durable API for business snapshots through
+the bridge. Physical services, ports and storage volumes are shown in
+[the Temporal deployment diagram](temporal.md#local-service-topology).
+
 ## 2. Code layers
 
 ```mermaid
 flowchart TB
-  entry["Entry points: api/, cli.py, studio.py, evalkit/, orchestration/"]
-  boot["bootstrap.py and orchestration/: composition roots"]
-  app["application/: prefilter, gate, agent and tools, run graph, executor, runtime, documents, facility memory"]
-  interfaces["interfaces/: storage, SOP index, models, prompts, gateways, clock, tracer"]
-  domain["domain/: load, events, obligations, timers, rules, SOP merge, catalog, documents"]
-  adapters["adapters/: memory and Postgres stores, OpenRouter, SOP files, Prompt Hub, PDF reader, LangSmith, gateways"]
+  entry["Entry points<br/>API, CLI, Studio, evalkit"]
+  core["bootstrap.py<br/>Core runtime composition"]
+  durable["orchestration/<br/>Temporal services and workspace composition"]
+  app["application/<br/>Runtime, LangGraph, executor, documents, memory"]
+  ports["interfaces/<br/>Persistence, knowledge, models, gateways, clock"]
+  adapters["adapters/<br/>Postgres, OpenRouter, SOP indexes, recording channels"]
+  domain["domain/<br/>Load, obligations, timers, catalog and rules"]
 
-  entry --> boot
-  boot --> app
-  boot --> adapters
-  app --> interfaces
+  entry --> core
+  entry --> durable
+  durable --> core
+  durable --> app
+  durable --> adapters
+  core --> app
+  core --> adapters
+  app --> ports
   app --> domain
-  interfaces --> domain
-  adapters --> interfaces
+  adapters --> ports
   adapters --> domain
+  ports --> domain
 ```
 
 These are the core dependency directions. import-linter checks them (`make arch`, five
@@ -121,25 +116,33 @@ LangChain integrations are kept outside the domain and application. pyright runs
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Q as Event queue (one per load)
-  participant R as Runtime
-  participant S as Store
-  participant G as Run graph
-  participant M as Models (OpenRouter)
-  participant O as Outbox sender
-  participant W as Gateways
+  participant W as LoadWorkflow
+  participant A as Graph Activity / Runtime
+  participant P as Application Postgres
+  participant G as LangGraph
+  participant M as Model provider
+  participant D as Delivery Activity
+  participant C as Recording gateway
 
-  R->>S: transaction 1: claim the oldest event of a load with nothing in flight
-  S-->>R: event and context (load, ledger, timers, last 30 events, documents, catalog)
-  R->>G: think, outside any transaction, within 240 s
-  G->>M: gate call (messages only), then agent rounds
-  M-->>G: intent, tool calls, finish
-  G-->>R: status and approved actions
-  R->>S: transaction 2: verify claim token; apply state, outbox, run record, event done
-  O->>S: read pending outbox items
-  O->>W: send with idempotency key event_id:index
-  W-->>O: accepted_at receipt, or error (up to 5 attempts)
-  O->>S: mark sent; arm durable follow-up from accepted_at
+  W->>A: run_load_graph(load key, event ID)
+  A->>P: TX1: claim FIFO head with token, read context
+  P-->>A: Event, claim token, load memory and pinned catalog
+  A->>G: Think outside the transaction (240 s deadline)
+  loop Bounded model and tool rounds
+    G->>M: Context and tool schemas
+    M-->>G: Tool calls or finish
+    Note over G: Reads return data, action tools stage proposals
+  end
+  G-->>A: Verdict and validated actions
+  A->>P: TX2: verify claim, commit state, run, outbox and event completion
+  A-->>W: Activity complete
+  W->>D: deliver_load_item(load key, outbox ID)
+  D->>P: Read pending item
+  D->>C: Send using event_id:action_index
+  C-->>D: DeliveryReceipt.accepted_at
+  D->>P: TX3: record sent + receipt, arm configured follow-up
+  D-->>W: Activity complete
+  W->>W: Read next snapshot, wait or process more work
 ```
 
 No transaction stays open while a model thinks. Applicable approved actions, the run record
@@ -160,28 +163,27 @@ validated yet.
 
 ```mermaid
 flowchart TD
-  start(["event claimed, context read"]) --> prefilter
-  prefilter["prefilter: code checks"]
-  prefilter -- "duplicate, stale timer, empty message" --> skipped(["skipped: no model call"])
-  prefilter -- "sender is not a load contact" --> unknown(["escalated: Hero task, no model call"])
-  prefilter --> gate
-  gate["gate: intent from code for system events; for a message, the decision model's probabilities, then a rule in code"]
-  gate -- "a quiet intent and P(act) under 0.2" --> noop1(["noop: one model call"])
-  gate --> knowledge
-  knowledge["knowledge: SOP sections for the intent and stage, procedures in progress, list of the rest"]
-  knowledge --> agent
-  agent["agent: one model round"]
-  agent -- "tool calls" --> tools
-  agent -- "text instead of a tool call: asked to finish" --> agent
-  agent -- "finish" --> validate
-  tools["tools: read tools answer; action tools propose, checked by the rules at once"]
-  tools -- "answers" --> agent
-  tools -- "finish in the same round, or too many refused calls" --> validate
-  validate["validate: the rules over every proposed action"]
-  validate -- "approved actions" --> acted(["acted: the commit applies them"])
-  validate -- "nothing approved" --> noop2(["noop"])
-  validate -- "serious violation, or too many refused calls" --> blocked(["escalated: blocked task; approved actions still run"])
-  validate -- "no procedure and nothing approved" --> gap(["escalated: SOP gap task"])
+  start(["Claimed event + RunContext"]) --> prefilter
+  prefilter["prefilter<br/>Deterministic input checks"]
+  prefilter -->|Duplicate, stale timer, empty message| skipped(["skipped"])
+  prefilter -->|Unknown sender| unknown(["escalated: Hero"])
+  prefilter -->|Continue| gate
+  gate["gate<br/>System intent from code; message intent from model"]
+  gate -->|Quiet intent and low action probability| quiet(["noop"])
+  gate -->|Act| knowledge
+  knowledge["knowledge<br/>SOP selection + facility notes"] --> agent
+  agent["agent<br/>One model round"]
+  agent -->|Tool calls| tools
+  agent -->|Prose: request finish| agent
+  agent -->|Finish| validate
+  tools["tools<br/>Read context or stage checked actions"]
+  tools -->|Tool results| agent
+  tools -->|Finish already supplied or rejection budget exceeded| validate
+  validate["validate<br/>Check the complete plan"]
+  validate -->|Approved actions| acted(["acted"])
+  validate -->|No action| noop(["noop"])
+  validate -->|Serious violation or excess refusals| blocked(["escalated + allowed actions"])
+  validate -->|No procedure and no approved action| gap(["escalated: SOP gap"])
 ```
 
 | Node | Code | Model call | Can end the run as |
@@ -202,30 +204,51 @@ flowchart TD
 | Run deadline | 240 s | `RuntimeConfig.run_deadline_s` | The run escalates with one urgent Hero task; the event is done |
 | Model failure | after the retries and the fallbacks | `adapters/llm/resilient.py` | The run escalates with one urgent Hero task; the event is done |
 
-The graph is `application/graph/build.py`. The platform draws the same graph from
-`GET /api/graph`, and LangGraph Studio shows it inside its scenario graph.
+The graph is `application/graph/build.py`. This is a bounded ReAct-style tool loop:
+model rounds consume tool results; action tools only stage proposals. The executor and
+outbox apply approved actions after validation. `GET /api/graph` exposes the graph for
+compatibility tooling, and LangGraph Studio nests it in its scenario graph. The current
+live workspace shows run decisions and tool trajectories rather than that graph viewer.
 
 ## 5. Memory
 
 ```mermaid
 erDiagram
-  LOAD ||--o{ EVENT : "event log, append-only"
+  BROKER_PROFILE ||..o{ LOAD : "snapshot source at start"
+  LOAD ||--o{ EVENT : "append-only history"
   LOAD ||--o{ OBLIGATION : "ledger"
-  OBLIGATION ||--o{ TIMER : "follow-up timers"
-  LOAD ||--o{ DOCUMENT : "attachments read"
-  EVENT ||--o| RUN_RECORD : "one run per event"
-  RUN_RECORD ||--o{ OUTBOX_ITEM : "approved actions"
-  OUTBOX_ITEM ||--|| EVENT : "logged back as agent_action"
-  TIMER ||--o| EVENT : "fires as timer_due"
-  DOCUMENT ||--o| EVENT : "announced as document_processed"
+  LOAD ||--o{ DOCUMENT : "attachments"
+  EVENT ||--o| QUEUED_EVENT : "pending work"
+  EVENT ||--o| RUN_RECORD : "terminal record"
+  OBLIGATION ||--o{ TIMER : "follow-ups"
+  RUN_RECORD ||--o{ OUTBOX_ITEM : "approved external actions"
+  OUTBOX_ITEM ||--|| EVENT : "agent_action at commit"
+  TIMER ||--o| EVENT : "timer_due"
+  DOCUMENT ||--o| EVENT : "document_processed"
 
-  EVENT {
-    string event_id "message id, risk:ping, timer:id, doc:id, act:key"
-    string type "inbound_message, risk_changed, timer_due, document_processed, agent_action"
-    datetime occurred_at
+  BROKER_PROFILE {
+    string broker_id
+    int revision
+    json profile "catalog and layered SOP sections"
+  }
+  LOAD {
+    string load_id
+    string broker_id
+    string stage
+    int current_stop_sequence "optional explicit stop"
+    json sop_snapshot "embedded catalog, sections, revision and hash"
+    datetime automation_stop_requested_at
+    datetime automation_stopped_at
+  }
+  QUEUED_EVENT {
+    string event_id
+    string state "queued, in_flight, dead"
+    string claim_token
+    datetime claimed_at
+    int failures
   }
   OBLIGATION {
-    string kind "eta_request, pod, or a client kind"
+    string kind
     string status "open, satisfied, exhausted, cancelled"
     int attempts
     datetime deferred_until
@@ -236,21 +259,58 @@ erDiagram
     string status "pending, fired, superseded, cancelled"
   }
   OUTBOX_ITEM {
-    string idempotency_key "event_id:index"
-    string kind "sms, email, broker_slack, tms_note, hero_task, internal_slack, stage_update"
-    string status "pending, sent, failed"
+    string idempotency_key "event_id:action_index"
+    string status "pending, sent, failed, cancelled"
+    datetime accepted_at
   }
   RUN_RECORD {
-    string status "skipped, noop, acted, escalated, failed"
+    string status
     string intent
-    string trajectory "tool calls, accepted or refused"
+    string trajectory
+    string sop_version
     string prompts "template version per role"
   }
 ```
 
-Every run reads one snapshot of this memory (`application/context.py`) and keeps nothing in
-the process between runs. The agent's own actions come back as `agent_action` events, so the
-next run reads what was approved, to whom and when. The outbox status and `accepted_at`
+This is a logical view, not a list of SQL foreign keys. The SOP snapshot and stop fields
+are embedded in the load metadata; `QUEUED_EVENT` is the `event_queue` table. Profiles
+hold the latest editable revision, while each load retains its own frozen copy. Temporal's
+execution history is a separate store; it does not replace this business memory.
+
+### Context and the operational stop
+
+```mermaid
+flowchart LR
+  load["Load stage + stops<br/>Optional explicit stop sequence"]
+  current["Load.current_stop()<br/>Pickup or delivery for this stage"]
+  pg[("Load memory<br/>History, ledger, timers, documents")]
+  ctx["RunContext<br/>Consistent view for one event"]
+  event["Triggering event"]
+  policy["Pinned SOP index<br/>Catalog + applicable sections"]
+  notes["Facility notes<br/>Scoped to this broker; untrusted"]
+  prompt["Agent prompt<br/>Operational stop + stage meaning beside the event"]
+  read["Read tools<br/>get_load, get_history, read_document, get_ledger"]
+  loop["Model / tool loop"]
+
+  load --> current
+  load --> ctx
+  pg --> ctx
+  event --> ctx
+  current --> prompt
+  ctx --> prompt
+  policy --> prompt
+  notes --> prompt
+  ctx --> read
+  current --> read
+  prompt --> loop
+  loop <--> read
+```
+
+Every run rebuilds its context from this memory (`application/context.py`); the standalone
+run graph does not require a LangGraph conversation checkpointer. Temporal resumes the
+orchestration, while Postgres supplies business context for the next run. The agent's own
+actions come back as `agent_action` events, so the next run reads what was approved, to
+whom and when. The outbox status and `accepted_at`
 separately establish whether a gateway accepted the action.
 
 The load also carries its immutable `sop_snapshot`, the profile revision, and stop-requested
@@ -265,34 +325,33 @@ future arrival, an already reached facility and a completed delivery. This groun
 applies to local and Hub templates and to older pinned SOPs; it is prompt guidance,
 not a deterministic validator of every facility name in generated prose.
 
-`PERSISTENCE` chooses where the memory lives, behind the interfaces of
+`PERSISTENCE` chooses where the load memory lives, behind the interfaces of
 `interfaces/repositories.py`: in the process (`adapters/persistence/memory/`; the default,
 and in isolated eval/Studio plays), or in Postgres (`adapters/persistence/postgres/`;
-the Docker Compose services and database tests), one table per entity above, plus `risk_trackers` and
-`event_queue` (`migrations/`). Both stores pass the same contract tests. Transactions and
-locks are in [decisions.md, Storage](decisions.md#storage).
+the Docker Compose services and database tests). The SQL schema is in `migrations/`,
+including `event_queue` and `risk_trackers`. Both load-memory stores pass the same contract
+tests. Editable broker profiles use a separate Postgres workspace repository. Transactions
+and locks are in [decisions.md, Storage](decisions.md#storage).
 
 ### Facility memory, across loads
 
-The memory above ends with its load. Facility notes outlive it: what a driver says about a
-pickup or delivery place is kept for the next load of the same client there.
+The memory above is scoped to a load. Facility notes are reusable across loads: what a
+driver says about a pickup or delivery place is kept for the next load of the same client
+there.
 
 ```mermaid
-flowchart LR
-  subgraph run["A run"]
-    K["knowledge node: notes of the current and next stop"] --> P["agent prompt: Facility notes (untrusted)"]
-    T["recall_facility tool"]
-  end
-  subgraph store["LangGraph store: Postgres with pgvector, or in memory"]
-    N[("notes: per client and facility, text embedded")]
-    J[("jobs: one per delivered load")]
-  end
-  C["commit of the run that sets delivered"] -->|queue a job| J
-  X["Background extractor: relay maintenance or legacy tick"] -->|pending jobs| J
-  X -->|"one memory model call: add, update, delete, each citing a message"| G["checks in code (domain/memory.py)"]
-  G -->|"operations that pass, in one client's notes"| N
-  K -->|read by client and facility| N
-  T -->|search by meaning within the client| N
+flowchart TB
+  delivered["Load committed as delivered"] -->|Enqueue after commit| jobs
+  recovery["Startup repair<br/>queue_missed_extractions"] -.-> jobs
+  jobs[("Extraction jobs<br/>One per delivered load")]
+  jobs --> extractor["Relay maintenance<br/>Read source messages and existing notes"]
+  extractor --> model["Memory model<br/>Propose add, update, delete with source event IDs"]
+  model --> checks["Deterministic checks<br/>Valid source, facility, content and limits"]
+  checks -->|Accepted operations| notes[("LangGraph store<br/>Notes by broker + facility; vector index")]
+  notes -->|Current / next stop| knowledge["knowledge node<br/>Context marked as untrusted notes"]
+  notes -->|Semantic recall within broker| tool["recall_facility tool"]
+  knowledge --> agent["Agent context"]
+  tool --> agent
 ```
 
 - A note is one short text with a kind (`check_in`, `hours`, `requirement`, `access`,
@@ -320,6 +379,7 @@ sequenceDiagram
   participant P as Dispatcher
   participant H as Hero team
 
+  Note over T,H: Virtual-clock example, gateways record outbound actions
   T->>R: 07:00 ping, delay risk high
   Note over R: code confirms low to high, logs risk_changed (no model)
   R->>A: 07:01 run 1: intent delay_risk_high from code, Northline's delay_risk_high section
@@ -328,7 +388,7 @@ sequenceDiagram
   R->>D: SMS asking for the ETA
   D->>R: 07:12 "What's the PO number?"
   R->>G: 07:13 run 2: read the message
-  G-->>R: question (1.00), needs the agent now (0.97), so on to the agent
+  G-->>R: Question requiring action, continue to the agent
   R->>A: driver_questions in full, delay_risk_high as procedure in progress, ledger: 1 attempt, T1 at 07:31
   A-->>R: send_sms(driver, reply, "PO 55821"), finish
   Note over L: unchanged: a reply requests nothing, so 1 attempt and T1 stay
@@ -355,49 +415,76 @@ latency determine when the resulting action is actually accepted.
 ## 7. Documents
 
 ```mermaid
-flowchart LR
-  upload["message with an attachment, or POST /api/loads/ID/attachments"] --> blob[("blob store: named by sha256")]
-  upload --> pending["document saved as pending, with the message"]
-  pending --> tick["Temporal document Activity, or legacy tick"]
-  tick --> pages["pypdfium2: text per page; a page with little text becomes an image"]
-  pages --> extract["one extract call (Gemini 2.5 Flash): type and field values"]
-  extract --> checks["code checks against the load: PO, MC, stops, dates, seal, signature"]
-  checks --> status{"status"}
-  status -- "every check passed" --> processed["processed: closes the required document's obligation"]
-  status -- "failed check, missing field, low confidence, exceptions" --> review["needs_review"]
-  status -- "file or model error" --> failed["failed"]
-  processed --> event["one document_processed event, doc:ID"]
-  review --> event
-  failed --> event
-  event --> run["its run: the agent reads the document and follows sops/standard/documents.md"]
+flowchart TB
+  input["Inbound attachment<br/>Workspace sample input or durable message"]
+  blob[("Blob storage<br/>SHA-256 content key")]
+  pending[("Postgres<br/>Inbound event + pending document")]
+  input -->|Store bytes| blob
+  input -->|Commit message| pending
+  pending --> activity["process_load_documents Activity<br/>Before the next queued graph run"]
+  blob --> activity
+  catalog["Load SOP snapshot<br/>Broker document definitions"] --> activity
+  activity --> pages["PDF reader<br/>Text + images for sparse pages"]
+  pages --> extract["Extract model<br/>Type, confidence and fields"]
+  extract --> checks["Deterministic field checks<br/>PO, carrier, stops, dates, seal, signature"]
+  checks -->|Valid required fields; no exceptions| clean["processed"]
+  checks -->|Mismatch, missing field, low confidence, exceptions| review["needs_review"]
+  pages -->|File failure| failed["failed"]
+  extract -->|Model failure| failed
+  clean --> commit["Atomic commit<br/>Document status + document_processed in FIFO"]
+  review --> commit
+  failed --> commit
+  clean -->|Same commit| close["Satisfy matching document obligations<br/>Cancel their pending timers"]
+  commit --> runGraph["Later run_load_graph Activity<br/>Agent follows the pinned document SOP"]
 ```
 
-The message's own run never acts on the attachment; only the `document_processed` run does,
-so a document is handled once. Code: `application/documents.py`, `domain/documents.py`,
+The document SOP directs the message's run to defer attachment handling to the
+`document_processed` event. Persistence makes that event idempotent; a database failure
+can retry processing. A file/model failure is recorded as `failed` and announced to the
+agent for escalation. The legacy virtual-clock runtime runs the same pipeline in `tick()`. Code: `application/documents.py`, `domain/documents.py`,
 `adapters/documents/pdfium.py`.
 
 ## 8. SOP layers and selection
 
 ```mermaid
 flowchart TB
-  subgraph tree["sops/ (Markdown, one section per file)"]
-    standard["standard/: 11 sections every client reads"]
-    client["clients/ID/: replace or extend a standard section by id"]
-    loadtype["clients/ID/types/TYPE/: replace or extend for one load type"]
-    catalog["clients/ID/broker.yaml: the client's intents, obligations, documents, limits"]
-  end
+  files["sops/<br/>Standard + client + load type + broker.yaml"]
+  editor["Broker SOP editor<br/>Client / load-type replace or extend"]
+  profiles[("broker_profiles<br/>Latest saved revision")]
+  start["Start scenario<br/>Validate requested profile revision"]
+  freeze["freeze_profile<br/>Render placeholders + hash catalog and sections"]
+  snapshot[("Load.sop_snapshot<br/>Immutable policy for this execution")]
+  live["pinned_index<br/>Graph and document Activities"]
+  offline["File-backed SOP index<br/>CLI evals, Studio, compatibility runtime"]
 
-  standard --> merge
-  client --> merge
-  loadtype --> merge
-  merge["merge by section id: standard, then client, then load type"] --> visible["the sections this client and load type can see"]
+  files -->|Seed only when profile is absent| profiles
+  editor -->|Validate + compare-and-swap revision| profiles
+  profiles --> start --> freeze --> snapshot --> live
+  files --> offline
+```
 
-  event["the event's intent and the load's stage"] --> select
-  visible --> select["select: section intents include the intent, or are empty; same for stages"]
-  select --> prompt["agent prompt: matching sections in full, the procedure of each open obligation, one line per other section"]
-  visible --> tools["agent tools: search_sop (word search), read_sop_section"]
-  catalog --> rendered["catalog: in the gate and agent prompts, and the rules' limits"]
-  rendered --> prompt
+The editor's standard layer is read-only. Saving a profile affects future executions;
+changing a seed file does not overwrite an existing profile. CLI evals take the file path
+shown above, so they do not automatically test a draft or saved workspace profile.
+
+```mermaid
+flowchart TB
+  source["SOP index for this execution<br/>Pinned snapshot or file-backed index"]
+  merge["Layer merge by section ID<br/>Standard, then client, then load type"]
+  visible["Visible sections<br/>Restricted to broker and load types"]
+  event["Intent + load stage"]
+  selection["Select matching sections<br/>Include procedures of open obligations"]
+  prompt["Agent context<br/>Full selected text + index of other sections"]
+  tools["SOP tools<br/>search_sop: word search<br/>read_sop_section: full text"]
+  catalog["Broker catalog<br/>Intents, obligations, documents, limits"]
+  consumers["Gate, agent, validator<br/>Document extraction and checks"]
+
+  source --> merge --> visible
+  visible --> selection
+  event --> selection
+  selection --> prompt
+  visible --> tools
+  source --> catalog --> consumers
 ```
 
 A client folder holds only what the client changes. Another client's sections are never
@@ -414,41 +501,53 @@ Changing a seed file also does not overwrite a profile already saved in Postgres
 ## 9. Evals and prompt versions
 
 ```mermaid
+flowchart TB
+  scenarios["Versioned YAML scenarios<br/>core, agent, docs, memory, grounding"]
+  files["File-backed SOPs + model and prompt versions"]
+  player["Scenario player<br/>Fresh runtime + virtual clock + live models"]
+  graders["facts + trajectory + invariants + judge"]
+  results["Per-step scores, pass@k and pass^k<br/>Cost and version metadata"]
+  langsmith["LangSmith experiment<br/>When running agent eval run"]
+  control["Negative-control tests<br/>Wrong, missing and ambiguous stop references"]
+  temporaltests["Temporal integration tests<br/>Real test server + scripted model"]
+  durable["Scheduling evidence<br/>Restarts, retries, waits and stop"]
+
+  scenarios --> player
+  files --> player
+  player --> graders --> results
+  results --> langsmith
+  control -->|Prove graders reject regressions| graders
+  temporaltests --> durable
+```
+
+The seven grounding scenarios cover all six load stages plus pickup departure. They
+require the operational facility, reject the other facility and judge whether the wording
+matches an upcoming, current or completed stop. Temporal tests cover orchestration rather
+than model wording. The workspace reuses scenario inputs, with manual replies and real
+time; it does not run these graders.
+
+```mermaid
 flowchart LR
-  subgraph git["Git"]
-    scenarios["evals/scenarios/SUITE/*.yaml"]
-    copy["prompts/ROLE.yaml: reviewable copy"]
-    pins["config/prompts.yaml: each ROLE pinned to freight-agent-ROLE:prod"]
-  end
+  local["prompts/ROLE.yaml<br/>Reviewable templates"]
+  hub["LangSmith Prompt Hub<br/>Versioned commits; candidate and prod tags"]
+  pins["config/prompts.yaml<br/>Configured role references"]
+  resolve["Resolve templates<br/>At process startup"]
+  runtime["Runtime / evals<br/>Record resolved versions per run"]
 
-  subgraph ls["LangSmith"]
-    dataset["dataset freight-agent-SUITE: one example per scenario"]
-    hub["Prompt Hub: one prompt per role (gate, agent, extract, judge, gate_decision, memory); commits, tags prod and candidate"]
-    experiment["experiment: rows, evaluator scores, pass^k, metadata"]
-  end
-
-  scenarios -- "agent eval run syncs: an example is rewritten when its scenario changes" --> dataset
-  copy -- "agent prompts push --tag candidate" --> hub
-  hub -- "agent prompts pull" --> copy
-  pins --> resolve["read once at process start; recorded per run"]
-  hub --> resolve
-  dataset --> run["k repetitions, each a fresh runtime on a virtual clock, live models"]
-  resolve --> run
-  run --> experiment
+  local -->|prompts push --tag candidate| hub
+  hub -->|prompts pull| local
+  pins --> resolve
+  hub -->|Hub source| resolve
+  local -->|Local source| resolve
+  resolve --> runtime
 ```
 
 An experiment's metadata names the git commit, the model of each role, the prompt version of
 each role and the SOP hash. To promote a prompt: edit it, `push --tag candidate`,
 `agent eval run --prompt-tag candidate`, compare in LangSmith, `push --tag prod`, restart.
 
-The `grounding` suite adds seven scenarios: all six stages and a pickup-to-delivery
-transition whose history still mentions the pickup. Deterministic action matchers require
-the relevant facility and forbid the other one; step rubrics judge whether the text
-correctly describes an upcoming, current or completed stop. Negative controls in
-`tests/evalkit/test_stop_grounding.py` reject wrong, missing and ambiguous stop references.
-`tests/temporal/` separately verifies orchestration with a real Temporal test server and
-scripted model responses. The live UI uses scenario inputs but does not run the automated
-eval graders or advance virtual time.
+Code: `evalkit/` and `tests/evalkit/test_stop_grounding.py`; scheduling tests are in
+`tests/temporal/`. See [the grounding eval](stop-grounding.md) for assertions and results.
 
 ## 10. Durable execution and production at 10x
 
@@ -458,23 +557,32 @@ workflow progress and durable waits. Model calls, SQL and sends run in Activitie
 the deterministic Workflow code.
 
 ```mermaid
-flowchart LR
-  ui["Broker workspace"] --> ingress["Durable ingress: commit, then notify"]
-  ingress --> pg[("Postgres: loads, profiles, events, ledger, timers, outbox")]
-  ingress --> workflow["LoadWorkflow: load/broker/load-id"]
-  pg --> relay["Relay: repair missed notifications; memory maintenance"]
-  relay --> workflow
-  workflow --> activities["Activities: snapshot, graph, documents, delivery, timer, stop"]
-  activities <--> pg
-  activities --> graph["Existing LangGraph runtime"]
-  graph --> models["OpenRouter"]
-  activities --> gateways["Recording gateways"]
-  workflow --> wait["Temporal durable wait: deadline or wake signal"]
-  wait --> workflow
+flowchart TD
+  turn["New turn<br/>Continue as new when required"]
+  snapshot["load_snapshot Activity<br/>Read current business state"]
+  stop{"Stop requested?"}
+  stopact["stop_load_execution<br/>Cancel pending work; preserve history"]
+  work{"Pending work?"}
+  priority["Choose first applicable item<br/>Outbox, due timer, document, queued event"]
+  activity["Execute one corresponding Activity<br/>Delivery, timer, documents or LangGraph"]
+  finished{"Delivered and resolved?<br/>No new wake signal"}
+  wait["Wait for wake or earliest deadline<br/>Skip the wait if a wake is already pending"]
+  done(["Workflow complete"])
+
+  turn --> snapshot --> stop
+  stop -->|Yes| stopact --> done
+  stop -->|No| work
+  work -->|Yes| priority --> activity --> turn
+  work -->|No| finished
+  finished -->|Yes| done
+  finished -->|No| wait --> turn
 ```
 
 `LoadWorkflow` handles pending delivery, due timers, documents and queued graph events in
-that order, then waits until a signal or the next deadline. It rereads state before firing,
+that order, then waits until a signal or the next deadline. Each Activity completes before
+the next starts for this load. Snapshot errors for a dead-letter event or failed delivery
+surface as non-retryable Activity failures; operator intervention is required.
+It rereads state before firing,
 so an ETA can cancel a pending follow-up. Signals coalesce; the persistent queue preserves
 events. The relay repairs the commit-to-notification gap after a Temporal outage. Workflows
 continue as new after 100 turns or when Temporal recommends it, rereading absolute
@@ -482,7 +590,9 @@ deadlines from Postgres.
 
 Stop is cooperative: persist the request, let the current Activity settle, then cancel
 pending timers, open obligations and unsent outbox items, preserve history and complete
-the workflow. It cannot retract an already accepted send. New inputs to a stopping or
+the workflow. It cannot retract an already accepted send. The
+[30-minute timer sequence](temporal.md#timer-lifecycle-30-minute-eta-follow-up) shows
+receipt persistence, wakeups and cancellation in detail. New inputs to a stopping or
 stopped load are rejected; continuing requires a new execution.
 
 The local Temporal service is `start-dev` with a persistent SQLite volume, not a production

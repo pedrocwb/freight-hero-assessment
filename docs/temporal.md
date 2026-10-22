@@ -7,20 +7,105 @@ Postgres keeps the business state; Temporal keeps the orchestration history and 
 The broker workspace UI uses these real-clock services for every scenario. The eval
 CLI, Studio and compatibility simulator API retain their virtual-clock behavior.
 
+## Local service topology
+
+The two Compose projects use separate application databases. The diagram shows the local
+demo deployment; `worker` executes both Workflow tasks and Activities. Temporal's own
+SQLite volume stores orchestration history, independently of the business Postgres data.
+
 ```mermaid
-flowchart LR
-  Input[Messages / location pings] --> API[Durable ingress API]
-  API --> DB[(Postgres event FIFO)]
-  API -->|Signal with start| WF[LoadWorkflow]
-  DB --> Relay[Recovery relay]
-  Relay -->|Missed notification| WF
-  WF -->|Activity: exact event ID| Graph[Existing LangGraph runtime]
-  Graph -->|Atomic commit| State[(Run + ledger + outbox)]
-  WF -->|Activity: stable action ID| Send[Gateway]
-  Send -->|Receipt + timer, one transaction| State
-  WF --> Wait[Durable wait until due_at]
-  Wait -->|Recheck timer / enqueue event| DB
+flowchart TB
+  browser["Browser<br/>Broker workspace"]
+  subgraph platform["Main Compose project"]
+    app["app :8000<br/>UI + /api/durable bridge"]
+    legacy[("Postgres :5432<br/>Compatibility simulator")]
+    app -->|Legacy simulator API| legacy
+  end
+  subgraph durable["compose.temporal.yml"]
+    subgraph services["Application processes"]
+      ingress["ingress :8001<br/>Workspace and durable API"]
+      worker["worker<br/>Workflows and Activities"]
+      relay["relay<br/>Recovery and facility memory"]
+    end
+    db[("Postgres :5433<br/>Business state + profiles + vector memory")]
+    blobs[("Shared blobs volume<br/>Attachment bytes")]
+    temporal["Temporal start-dev<br/>gRPC :7233 / UI :8233"]
+    history[("Temporal volume<br/>SQLite execution history")]
+    migrate["migrate<br/>One-shot schema setup"]
+    services <--> db
+    services --> blobs
+    services <-->|Signal, poll, report results| temporal
+    temporal --> history
+    migrate --> db
+  end
+  browser -->|HTTP| app
+  app -->|/api/durable proxy| ingress
 ```
+
+The main API uses `host.docker.internal:8001` in Docker to reach the durable ingress.
+The ports above are host ports; both Postgres containers listen on 5432 internally.
+The API and relay notify Temporal after business commits. Model calls and channel sends
+are Activity work; the relay separately runs the facility-memory extraction pipeline.
+The detailed [workflow loop](architecture.md#10-durable-execution-and-production-at-10x)
+shows task priority and cooperative stop.
+
+## Timer lifecycle: 30-minute ETA follow-up
+
+This sequence follows Northline's seeded 30-minute cadence without a deferral. A saved
+broker profile can set a different interval. Each arrow from the Workflow to business
+storage goes through an Activity.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Operator / workspace
+  participant I as Durable ingress
+  participant W as LoadWorkflow
+  participant A as Activities / Runtime
+  participant P as Application Postgres
+  participant G as Recording gateway
+
+  W->>A: run_load_graph(exact event ID)
+  A->>P: Commit ETA obligation + pending SMS outbox
+  A-->>W: Complete
+  W->>A: deliver_load_item(stable outbox ID)
+  A->>G: Send SMS with stable idempotency key
+  G-->>A: accepted_at
+  A->>P: Atomic: sent receipt + timer due_at = accepted_at + 30 min
+  A-->>W: Complete
+  W->>A: load_snapshot
+  A-->>W: Next absolute deadline
+  Note over W: Durable wait, no sleeping Activity or model call
+  alt Input arrives before the deadline
+    U->>I: Driver message or operator stop
+    I->>P: Persist input or stop request
+    I->>W: Signal with Start: wake
+    Note over I,W: Relay repairs a lost notification
+    W->>A: Reread snapshot, process selected work
+    alt Driver supplies an ETA and agent satisfies the obligation
+      A->>P: Close obligation + cancel pending timer
+    else Driver asks for PO information
+      A->>P: Commit reply, preserve existing ETA deadline
+      Note over W: Send reply, then wait for the original deadline
+    else Operator requests stop
+      A->>P: Cancel pending work, mark automation stopped
+      Note over W: Complete after the current Activity settles
+    end
+  else Deadline expires
+    W->>A: load_snapshot, then fire_load_timer if still due
+    A->>P: Recheck active obligation, atomically mark fired + queue timer_due
+    Note over P: Existing events retain their FIFO position
+    W->>A: run_load_graph when timer event reaches FIFO head
+    A->>P: Commit retry or escalation according to pinned SOP
+  end
+```
+
+A message is not automatically an ETA: the agent must interpret it and satisfy the
+obligation. Timer validity is rechecked both at firing and before the event acts. A
+worker outage delays execution but does not erase the deadline. A gateway retry can
+repeat the external call; a real provider must persistently deduplicate the key. The
+recording adapter deduplicates only within its process. For stop semantics, a delivery
+already running may complete before the stop is confirmed.
 
 ## What changed
 
