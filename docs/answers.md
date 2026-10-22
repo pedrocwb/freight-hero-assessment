@@ -1,3 +1,4 @@
+<!-- generated-by: gsd-doc-writer -->
 # Answers to the assignment's questions
 
 Each answer starts with a short answer; details and trade-offs follow. Diagrams are in
@@ -10,7 +11,8 @@ the code.
 
 ## Words used here
 
-- **SOP**: the client's written procedure; here, Markdown files in `sops/`, one section each.
+- **SOP**: the client's written procedure; Markdown sections in `sops/` seed the file-backed
+  runtime and the editable broker profiles. Live loads pin their own execution snapshot.
 - **Event**: anything that happens on a load: a message, a delay-risk change, a follow-up
   timer that is due, a document that was read. A **run** is one pass of the agent over one event.
 - **Intent**: what an event means, from a fixed list per client (`question`, `eta_provided`,
@@ -24,25 +26,31 @@ the code.
 - **Rule**: a check in code on every action the agent proposes ("the recipient is a contact
   of the load").
 - **Outbox**: the messages a run decided to send, written when the run commits and delivered
-  afterwards. Each carries an **idempotency key**, a unique id, so a message sent twice
-  arrives once.
+  afterwards. Each carries an **idempotency key**, a stable id the gateway must use to
+  deduplicate repeated send attempts.
 - **Catalog**: a client's intents, obligation kinds, document types and limits
   (`broker.yaml`, on top of a standard one).
-- **Tick**: one pass of the work loop: fire due timers, read new documents, run queued
-  events, deliver the outbox.
+- **Tick**: one pass of the legacy simulation/eval work loop: fire due timers, read new
+  documents, run queued events, deliver the outbox. Live operations use Temporal Activities
+  and durable waits instead of browser-driven ticks.
 - **pass^k**: a scenario passes only if all k repetitions pass (k = 3 here).
 - **Prompt Hub**: LangSmith's store of prompt versions. The runtime reads its templates
   there, with a reviewable copy in `prompts/`.
 
 ## What is built
 
-Everything described here is built, except the parts marked **designed, not built**: an
-always-on worker and timer scheduler (3.3, 5.2), real integrations (the gateways record what
-they would send), an SOP editor with review and approval and SOP versions with a canary and
-rollback (2.3), hybrid search over SOPs (2.2), metrics and alerts (4.1), the per-load cost cap
-and a rolling summary of old events (5.3). An earlier build of several of these (pgvector
-search over SOPs, SOP onboarding from a PDF, client config versions with a canary, metrics)
-is at the git tag `full-platform`.
+Built: the bounded LangGraph agent, PostgreSQL load memory, a Temporal workflow per load,
+worker and relay, real follow-up timers, the broker workspace with editable SOPs, immutable
+per-execution policy snapshots, manual contact inputs and cooperative stop. The workspace
+starts every operation with a location ping. Evals and Studio retain a separate virtual
+clock for fast repeatable checks. “Live” means real models and elapsed time: the outbound
+gateways record simulated deliveries.
+
+**Designed, not built:** production SMS/email/Slack/TMS integrations; SOP review/approval,
+canary rollout and one-step rollback; hybrid SOP search; operational metrics and alerts;
+per-load cost enforcement and a rolling summary of older events. The local Temporal server
+is a persisted `start-dev` instance, not a production deployment. An earlier implementation
+of SOP onboarding, hybrid search, rollout controls and metrics is at git tag `full-platform`.
 
 ## 1. Agent architecture
 
@@ -53,7 +61,8 @@ afterwards. Each load has its own first-in, first-out (FIFO) queue: one event at
 load, loads in parallel. Code does every step that needs no judgment: it reads the load's
 memory, drops events that need no thought, gives system events their intent, picks the SOP
 sections and checks every action, so the same context gives the same prompt, byte for byte.
-A model is used in two places:
+The per-event decision path uses models in two places (document extraction, facility-memory
+extraction and eval judging have separate roles):
 
 - **The gate** reads each inbound message once. The decision model gives the intent and the
   probability that the message needs the agent now. Code decides from those numbers; a
@@ -71,6 +80,18 @@ reads its context; the graph **thinks** outside any transaction, with a 240-seco
 a second transaction **commits** the approved actions (ledger, timers, stage, outbox), the
 run record and the event's completion. Delivery follows from the outbox, with the
 idempotency key `{event_id}:{index}`.
+
+In live operation, `LoadWorkflow` orchestrates that runtime through the `run_load_graph`
+Activity. It does not put model calls inside Workflow replay. PostgreSQL owns the event
+FIFO, obligations and outbox; Temporal owns the durable wait and Activity lifecycle. A
+relay repairs a database commit whose wake signal failed. Claim tokens fence late attempts
+from committing after another worker reclaimed an event.
+
+This is a bounded ReAct-style tool loop inside a deterministic orchestration shell:
+the agent observes tool results and can revise a rejected proposal, while side effects
+remain deferred until commit. It is one agent, not a supervisor handing work to specialist
+agents. SOP retrieval is metadata selection plus lexical search; semantic retrieval is
+used separately for facility memory.
 
 **The agent's tools** (`application/agent_tools.py`):
 
@@ -90,7 +111,8 @@ idempotency key `{event_id}:{index}`.
 - **The model cannot act.** Action tools only propose; the executor applies the approved
   actions in the commit. The rules (`domain/rules.py`, full list in
   [decisions.md](decisions.md#run-graph-and-budgets)): the recipient is a contact of the
-  load, on a channel that contact has; at most 3 SMS per contact per hour; an attempt cap per
+  load, on a channel that contact has; a per-client SMS rate limit (3 per contact per hour
+  by default; custom live profiles reserve capacity for their ETA attempts and a reply); an attempt cap per
   obligation kind; obligation kinds from the client's catalog only; one deferral of at most
   15 minutes; the stage only moves forward; no duplicate action; no phone number or email
   address in outgoing text. A rule refuses an action and never edits it, so the next round
@@ -99,9 +121,15 @@ idempotency key `{event_id}:{index}`.
 - **Budgets per client** (`BrokerLimits`): 8 rounds and $0.05 of model cost per run; then
   the next round must call `finish`. More than 3 refused action calls stop the run and hand
   it to a Hero; the accepted actions still run.
-- **No event is lost.** A model failure after the fallbacks, a run past its deadline, a
+- **Failures have explicit paths.** A model failure after the fallbacks, a run past its deadline, a
   blocked action, or "no procedure" with nothing accepted: code creates a Hero task
   (`application/escalation.py`) and completes the event.
+
+These rules enforce the listed structural constraints, not the truth of every sentence.
+An incorrect facility name can pass recipient and channel checks. Stop grounding therefore
+supplies the resolved operational stop in the prompt and `get_load`, and the `grounding`
+eval suite checks the resulting wording across stages (4.4). No deterministic outbound
+facility-name blocker has been added.
 
 **Trade-offs.** The loop sends its prompt again every round: an agent run reads about 16,200
 input tokens over 2.7 rounds on average ([RESULTS](../evals/RESULTS.md#the-k--3-round)),
@@ -117,7 +145,7 @@ run, pass^3).
 | The whole SOP and history in every prompt | A 100-page SOP is about 50,000 to 70,000 tokens. At about 45 runs per load that is 2 to 3 million tokens per load: over $1 on any model above about $0.40 per million, and the model pays less attention to the rule that matters. |
 | The SOP compiled into a state machine | Every SOP change needs an engineer. A state machine is kept only where it pays: obligations and timers. |
 | Several agents (per stage, per channel, a supervisor) | Each handoff adds a model call and loses context. The stage already selects the SOP sections. |
-| A durable workflow per load (Temporal) | A way to run this pipeline at scale (5.2), not a different agent design. |
+| A durable workflow per load (Temporal) | Adopted for live operations: it schedules and retries this pipeline while the LangGraph tool loop remains inside an Activity. |
 
 ### 1.2 How does the agent read documents, find their type and get their key values?
 
@@ -131,7 +159,8 @@ The flow ([architecture.md section 7](architecture.md#7-documents)):
 
 1. Each attachment is saved as a `pending` document in the message's transaction; the bytes
    go to a blob store, named by their SHA-256 hash (`adapters/documents/fs_blobs.py`).
-2. The next tick reads it before it runs the queue (`application/documents.py`): the text
+2. The document Activity (or the next tick in the virtual player) reads it before running
+   the queued agent events (`application/documents.py`): the text
    of each page, or a PNG image of a page with little text, such as a scan or a phone photo
    (`adapters/documents/pdfium.py`, pypdfium2).
 3. One `extract` call, page images included, answers the type, a confidence and the fields
@@ -198,6 +227,7 @@ inherited header.
 | Northline (Client A, load 481207) | `delay_risk_high` (replace) | After two SMS with no ETA: email the dispatcher, then a Hero task |
 | Keystone (Client B) | `delay_risk_high` (replace); `types/reefer/driver_departed` (extend) | One SMS, then the broker's Slack, never the dispatcher; reefer loads also ask for the trailer temperature and seal |
 | Acme | five sections and a `broker.yaml` | Its own `detention_request` situation, ETA every 20 minutes up to 3 times, a POD due 120 minutes after arrival |
+| Aurora | an extreme ETA procedure and its own catalog | Ten SMS, one minute apart, then a Hero task after the final unanswered wait |
 | Any other client | nothing | The standard layer and catalog |
 
 The catalog (`domain/broker.py`; format in [decisions.md](decisions.md#client-catalog)) is
@@ -210,7 +240,15 @@ intents, the `eta_request` obligation (30 minutes, 2 attempts, then the dispatch
 a Hero task) and four document types. What all clients share is written once, and one
 client's change cannot reach another client.
 
-**A 100-page SOP** becomes about 100 to 150 sections of 10 to 40 lines each; only the
+For live operations, those files seed a persisted broker profile. The workspace exposes
+client and load-type replacements/extensions, cadence and attempt settings, with the
+standard layer inherited read-only. Saving increments a revision; starting a load renders
+the parameters and freezes the catalog and sections. Graph and document Activities use
+that snapshot for the execution's lifetime. Editing the profile starts a new policy only
+on subsequent loads. Editing seed files does not overwrite an already saved profile.
+
+**A 100-page SOP** could be split into about 100 to 150 sections of 10 to 40 lines each;
+the current workspace limits a profile to 100 sections. Only the
 matching ones reach the prompt (2.2). **Designed, not built:** onboarding from the client's
 own document: upload the PDF, turn it into draft sections whose text is the document's own
 words, with proposed intents and stages, review, publish. An earlier build is at tag
@@ -235,8 +273,10 @@ nothing covers it, the agent answers `no_procedure` and the run goes to a Hero.
 4. **No procedure:** `finish(no_procedure=true)` with nothing accepted escalates with "No SOP
    for this situation" (`t2_gap_hero_without_promise`, `d4_lumper_no_sop`).
 
-The run record keeps the sections chosen by rules, those the agent searched or read, and the
-SOP version (a hash of the SOP folder), so every action traces back to the text it followed.
+The run record keeps the sections chosen by rules, those the agent searched or read, and
+the SOP version: a folder hash in file-backed plays, or the pinned profile hash in live
+operations. This records what context was provided and consulted, not proof that a model
+followed every instruction.
 
 | Advantages | Disadvantages |
 |---|---|
@@ -247,11 +287,12 @@ SOP version (a hash of the SOP folder), so every action traces back to the text 
 
 ### 2.3 Non-technical people write and change the SOPs: how does the design make this safe?
 
-**Short answer.** The editor writes plain English in a small fixed format, and every safety
-property that matters is in code, not in the text. A change is checked by the lint (messages
-written for an editor), tested by the live evals that name the section, reviewed by a person
-who knows the client, and recorded as a version every run names. A client's change cannot
-reach another client. The editor screen and the versioned rollout are designed, not built.
+**Short answer.** The broker workspace has an editor for plain-English sections and catalog
+settings, with validation and an effective-SOP preview. Saves use revision checks to avoid
+lost edits; each new execution pins the policy it started with. Recipient, channel, attempt
+and other structural constraints remain in code. Semantic correctness still needs evals
+and human review. Review/approval and staged rollout are proposed controls, not enforced
+by the current editor.
 
 | Safeguard | State |
 |---|---|
@@ -259,11 +300,11 @@ reach another client. The editor screen and the versioned rollout are designed, 
 | Lint (`agent sop lint`, a CI step, `adapters/sop/lint.py`): unreadable header, unknown setting, intent or stage, duplicate id, an `extend` with nothing to extend, a catalog that cannot work, a file outside the layout; a warning for a section no scenario covers | Built |
 | Layers: a client's file cannot change the standard or another client | Built |
 | Guardrails in code (1.1): only the load's contacts, attempt caps, SMS rate, no contact details in text, budgets. A badly written SOP cannot make the agent text a stranger or loop | Built |
-| Evals: scenarios tag the sections they cover (`sop:<id>`); every suite runs live before a change ships (4.2) | Built |
-| Versions: the SOP folder's hash is recorded with every run, trace and experiment; reverting a change in git restores the old text and version | Built |
-| An editor in the platform: edit a section in a form, see the lint and a preview of the sections an event would get (`GET /api/sops/preview` exists), submit for review | Designed, not built; the SOP screen is read-only |
+| Evals: scenarios tag the sections they cover (`sop:<id>`); CLI and manual workflow run live suites | Built; saving a UI profile does not automatically run or gate on evals |
+| Versions: file-backed runs record the folder hash; live loads record an immutable rendered profile snapshot, hash and revision | Built; rollback of an active execution's snapshot is not exposed |
+| Broker editor: edit client/load-type sections, choose replace/extend, preview the effective SOP, save with a revision check | Built (`web/src/screens/BrokerSops.tsx`); inherited standard sections are read-only |
 | Review and approval: one approver who knows the client; two for the standard layer, which reaches every client | Designed, not built |
-| Published versions per client, a canary on a share of its loads (a load always gets the same version), a comparison of escalation, no-op and block rates with the previous version, one-step rollback | Designed, not built (built earlier at tag `full-platform`) |
+| Canary allocation, comparison of escalation/no-op/block rates, one-step profile rollback | Designed, not built (an earlier implementation is at tag `full-platform`) |
 
 ## 3. Memory
 
@@ -286,7 +327,8 @@ snapshot of all this is read per run (`application/context.py`).
 
 - **Actions are memory.** For each outgoing message the executor adds an `agent_action`
   event in the same transaction (`application/executor.py`), so the next run sees what was
-  sent, to whom, when and why.
+  approved, to whom, when and why. Outbox status and `accepted_at` separately record
+  gateway acceptance; an action event alone is not delivery confirmation.
 - **History stops at the current event.** Messages queued behind it are left out, so a run
   never acts on an ETA that has not arrived for it. Agent actions are always kept.
 - **The ledger holds only facts**, never a pointer into the SOP text. Nothing stays in the
@@ -297,11 +339,22 @@ snapshot of all this is read per run (`application/context.py`).
   and ledger. Both stores pass the same contract tests (`tests/contract/`), and the
   assignment's scenario leaves the same state on both ([decisions.md](decisions.md#storage)).
 
-**Facility memory** is the one memory that outlives a load: what a driver says about a place
-("check in at gate 4") is still true at the next load that stops there.
+**Stop context** is resolved before prompting, not inferred from itinerary order alone.
+`Load.current_stop()` selects pickup for `dispatched`, `to_pickup`, `at_pickup`, and delivery
+for `to_delivery`, `at_delivery`, `delivered`, unless an explicit sequence selects a stop.
+The prompt and `get_load` label that operational stop and distinguish heading to, already
+at, and completed at the facility. A reminder beside the event prevents an earlier pickup
+message from becoming the destination after departure. The full itinerary remains
+available for questions explicitly about another stop. Automatic multi-stop advancement
+is not implemented; see [stop-grounding.md](stop-grounding.md).
 
-- **Written after delivery.** When a run sets a load to `delivered`, a later step of the tick
-  makes one `memory` model call. It proposes notes to add, update or delete, each citing the
+**Facility memory** outlives a load: what a driver says about a place ("check in at gate 4")
+can be recalled for the next load there. These are dated source-backed notes, not a
+guarantee that the facility's instructions have remained unchanged.
+
+- **Written after delivery.** When a run sets a load to `delivered`, background processing
+  makes one `memory` model call. This runs in relay maintenance for live operations, or a
+  later tick for virtual plays. It proposes notes to add, update or delete, each citing the
   inbound message it comes from.
 - **Checked in code** before any write (`domain/memory.py`): the cited message is an inbound
   message of this load about that stop, and the text is short, with no phone number, email
@@ -317,11 +370,11 @@ snapshot of all this is read per run (`application/context.py`).
   searches such vectors), which `recall_facility` searches. Tests, evals and Studio use
   LangGraph's in-memory store; one contract suite runs on both.
 - **A lost extraction is found again.** The job is queued after the run's commit, so a crash
-  in between would lose it. When the platform starts on Postgres, it queues every delivered
+  in between would miss it. When the platform or durable relay starts on Postgres, it queues every delivered
   load with no job (`AgentRuntime.queue_missed_extractions`). This is simpler than putting
   the job in the run's transaction (no new table, no change to the unit of work), and a crash
-  means a restart, so the restart is the time to look. A load has at most one job, so it is
-  never extracted twice.
+  makes startup a recovery point. A load has at most one job; failed extraction attempts
+  may retry, so this is job deduplication rather than a promise of one model invocation.
 
 **Designed, not built:** a rolling summary of the events older than the last 30. Today the
 agent pages back with `get_history`.
@@ -378,14 +431,18 @@ the active timer of an open obligation; a stale timer ends its run with no model
 Otherwise the agent sees the timer event, the ledger with the attempt count, the transcript
 and the procedure, and does the next step.
 
-1. **Set.** The agent proposes `schedule_timer(kind=eta_request, due_in_minutes=30)`. The
-   executor computes the due time in real minutes (`domain/timers.py`, safe across a
-   daylight-saving change), never earlier than a contact's promised time plus 2 minutes. The
-   new timer becomes the obligation's active timer; older pending ones become `superseded`.
-   A document requirement sets a timer too (Acme's POD, 120 minutes after arrival).
-2. **Fire.** `AgentRuntime.fire_due_timers` turns each due timer into the event
-   `timer:{timer_id}`, marks it `fired` and queues it behind the load's earlier events, in
-   one transaction.
+1. **Set.** In live operation, the outgoing request carries the pinned catalog's cadence.
+   After gateway acceptance, the outbox confirmation and timer commit together, due at
+   `accepted_at + follow_up_minutes`, never earlier than a deferral plus 2 minutes. An
+   explicit `schedule_timer` in that same plan cannot start the wait before the send.
+   The virtual player uses the base executor's commit-time timer semantics. Time arithmetic
+   uses real minutes across daylight-saving changes (`domain/timers.py`). Older pending
+   timers become `superseded`. Document requirements also set timers (Acme's POD, 120
+   minutes after arrival).
+2. **Fire.** `LoadWorkflow` waits durably until a deadline or an inbound wake signal. It
+   rereads state, then `fire_load_timer` calls `AgentRuntime.fire_timer` to create
+   `timer:{timer_id}`, mark the timer fired and queue it behind earlier events atomically.
+   The virtual player uses `AgentRuntime.fire_due_timers` for the same domain transition.
 3. **Stale check** (prefilter): superseded, cancelled, obligation closed, or no longer the
    active timer: `skipped`, no model call (`g1_deferral_stale_timer`).
 4. **Intent from code:** the obligation kind's follow-up intent (`eta_follow_up_due`,
@@ -411,25 +468,35 @@ Closing an obligation cancels its timers (`b_eta_received_cancels_follow_up`). "
 you in 5 minutes" at 07:30 replaces the 07:31 timer with one at 07:37, and the old timer's
 event is skipped as stale (`g1_deferral_stale_timer`).
 
-**Designed, not built:** an always-on scheduler. Here `tick()` fires the due timers (the
-platform, the evals and Studio call it on a virtual clock). In production several workers
-would claim due timers with `FOR UPDATE SKIP LOCKED` (a Postgres lock that lets each worker
-skip rows another holds), or EventBridge Scheduler or Temporal timers would fire them (5.2).
+**Built:** the always-on Temporal worker and relay (`agent temporal worker`,
+`agent temporal relay`). The browser can close and the timer remains durable. A worker
+outage delays execution but does not erase the deadline. Due work runs after recovery;
+this is not an exact-time delivery guarantee during an outage or backlog. The live UI
+cannot advance time. CLI evals, Studio and the legacy simulator still use virtual ticks.
+
+The operator can stop a live load. Stop waits for the current Activity to settle, then
+cancels pending timers, open obligations and unsent outbox items while preserving the
+history. It cannot retract an already accepted send. Further inputs are refused, and
+continuing requires a new execution. See [temporal.md](temporal.md) for the implementation
+and local deployment.
 
 ## 4. Evals
 
 ### 4.1 How do you make sure the system works correctly in production?
 
-**Short answer.** Three layers. Before a release: fixed tests and live scenario evals. At
-run time: guardrails in code, so a wrong model answer cannot do damage and every failure
-reaches a person. After a release: monitoring; the traces are built, the metrics and alerts
-are designed.
+**Short answer.** Three layers. Before a release: deterministic tests and live model evals.
+At run time: code enforces structural constraints, budgets and explicit failure paths.
+After a release: tracing for diagnosis, with operational metrics and alerts still to be
+built. Semantic mistakes such as naming the wrong facility require separate grounding and
+eval coverage; the action rules alone do not prevent them.
 
 **Before a release:**
 
-- `make ci`: lint, strict types, layer rules, 2,000 tests (unit, contract, property,
-  integration, eval harness; 90 Postgres tests skip without a database) with 99.4% coverage
-  of `domain` and `application`, branches included (the minimum is 90%), and the SOP lint.
+- `make ci`: lint, strict types, layer rules, unit/contract/property/integration tests,
+  eval-harness tests, coverage of `domain` and `application` including branches (minimum
+  90%), and SOP lint. Database tests need a configured test database; the explicit
+  `make temporal-test` target enables the Temporal server tests. Test counts and coverage
+  vary with the checkout, so CI output is the current evidence.
   The tests run the real graph, rules and executor with a fake model (`tests/fakes.py`),
   including an agent that falls for an injected email
   (`tests/unit/application/test_graph_guardrails.py`).
@@ -441,6 +508,9 @@ are designed.
   checks, and prints each step in plain words: what came in, what the agent did and why,
   what is still open, and which checks passed or failed. A failure can be read in the
   terminal, without opening LangSmith.
+- `tests/temporal/` verifies restarts, retries, durable waits and stop with a real Temporal
+  test server and scripted model outputs. It complements the live model evals, which
+  exercise decisions with fast virtual time rather than proving wall-clock scheduling.
 
 | Evaluator | Checks |
 |---|---|
@@ -456,13 +526,15 @@ recipient, a missing timer, an extra SMS, a skipped tool, a low judge score, a r
 idempotency key) and asserts that exactly that evaluator fails.
 
 **At run time:** the rules at the call and again in `validate`, the budgets, `must_act`
-intents the gate cannot end, the prefilter, the escalation paths, delivery that a retry
-cannot duplicate.
+intents the gate cannot end, the prefilter, escalation paths, fenced commits and stable
+delivery keys. Production delivery deduplication remains a contract for the provider
+adapter, not a property Temporal can supply by itself.
 
-**After a release.** Built: every run has a LangSmith trace (each node and model round, with
-the prompt version of each role), linked from the run record. The platform's conversation
-explains each run (what it understood, followed, did and left open), with its path, tool
-calls and trace under Details. **Designed, not built:**
+**After a release.** Built: when tracing is configured, runs have a LangSmith trace (each node and model round, with
+the prompt version of each role), linked from the run record. The live operation shows
+the conversation and pending obligations; **Ver decisão do agente** exposes the rationale,
+tool trajectory and trace link. **Todas as decisões** lists the run history.
+**Designed, not built:**
 
 | Signal | Alert |
 |---|---|
@@ -478,11 +550,14 @@ corrections turned into new scenarios.
 
 ### 4.2 A client changes its procedure: how do you make sure other behavior does not break?
 
-**Short answer.** The change is a file in that client's folder, so it cannot change the
-sections another client reads. It must pass the lint, and every suite runs live on it at
-k = 3 before it ships: the scenarios tagged with the changed section show whether the new
-behavior is right, and the rest show that nothing else moved. A change to the standard layer
-reaches every client, so the same full run is required.
+**Short answer.** File-backed SOP changes are scoped to a client's folder, linted and
+checked with regression suites before release. A live broker profile is separately
+validated, revisioned and pinned only for new executions. The CLI eval player reads the
+repository's SOP files; it does not import `broker_profiles` from the UI. Saving a profile
+does not automatically evaluate or approve its behavior. To reproduce an edited profile
+in automated evals, encode the same catalog/procedure in file-backed fixtures first;
+otherwise verify that revision through a new live execution. Changes to shared standard
+sections need cross-client regression coverage.
 
 1. **Layers.** `clients/northline/delay_risk_high.md` is visible only to Northline loads;
    sections are filtered by client before anything else.
@@ -491,12 +566,12 @@ reaches every client, so the same full run is required.
 3. **Client variants of the same scenarios.** A scenario can run on another client with
    `load_overrides` (`d1_keystone_high_risk`, `p1_pod_clean_delivers` on Acme), so a
    client's change is tested on its own loads and the other clients' scenarios stay as they are.
-4. **Compare.** Each experiment records the SOP hash, the git commit, the models and the
+4. **Compare.** Each experiment records its file-backed SOP hash, the git commit, the models and the
    prompt versions. Regression scenarios must stay at pass^3 = 100%; LangSmith's comparison
    view shows, per scenario, which repetitions changed.
-5. **Designed, not built:** published versions per client, with a canary on a share of the
-   client's loads and one-step rollback (2.3), so a change that passed the evals still meets
-   real traffic gradually.
+5. **Pin live executions.** Each load stores the rendered profile and its revision/hash.
+   A later save cannot change a running load's procedure. **Designed, not built:** a canary
+   on a share of loads, automatic eval gating of UI saves and one-step rollback (2.3).
 
 ### 4.3 You change the LLM: how do you make sure the system does not break?
 
@@ -552,6 +627,7 @@ run on its catalog, and adds its own only for what it changes.
 | `agent` (`freight-agent-agent`) | `t2_gap_hero_without_promise` | A request no SOP covers reaches a Hero with the driver's words and no promise, judged on the outcome |
 | `docs` (`freight-agent-docs`) | `p1`, `p2`, `p3` | The document pipeline with real PDFs on Acme: a clean POD, a POD with exceptions, an overdue POD |
 | `memory` (`freight-agent-memory`) | `m1`, `m2`, `m3` | The facility memory: a note answers a question, an injected note changes nothing, a delivered load leaves clean notes |
+| `grounding` (`freight-agent-grounding`) | Seven: six stages and pickup-to-delivery transition | Correct operational stop in SMS and Slack, no other-stop substitution, no pending arrival after arrival/delivery |
 
 | Core group | Scenarios | Checks |
 |---|---|---|
@@ -567,12 +643,18 @@ run on its catalog, and adds its own only for what it changes.
   to regression once they pass reliably.
 - **Doing nothing is tested** in group B (an "ok", a broker's thanks, a medium risk): each
   asserts no outgoing message and no agent call where none is needed.
+- **Stop grounding.** The regression combines action regexes/forbidden facility names with
+  semantic rubrics. The transition case preserves a pickup message in history before
+  checking a delivery ETA and Slack escalation. Negative controls run the actual YAML
+  matchers against the original wrong-stop alert, a missing stop and both-stop ambiguity.
+  See [stop-grounding.md](stop-grounding.md); a finite pass rate is evidence, not proof that
+  the model can never name a wrong stop.
 - **Code guardrails are tests, not evals.** What must hold whatever the model does (an
   outside address refused, the limit on refused calls, the SOP-gap path) is tested with the
   fake model in `test_graph_guardrails.py`; evals measure what the model does.
 - **When each runs.** Tests on every pull request (`.github/workflows/ci.yml`). Live evals by
-  hand (`evals-live.yml`, `make eval`) with a cost cap, and required before a prompt, SOP or
-  model change ships. **Designed, not built:** a suite per client folder
+  hand (`evals-live.yml`, `make eval`) with a cost cap, including `grounding`. They are a
+  release practice, not an automatic gate on broker-profile edits. **Designed, not built:** a suite per client folder
   (`evals/scenarios/<client>/`) once a client has more than a few scenarios of its own, run
   on every change to that client's folder.
 
@@ -601,16 +683,20 @@ deadline. Eight rounds at the 60-second timeout could pass 240 s, which is why t
 not the round count, is the limit. The deadline leaves 60 seconds of the 5 minutes for the
 queue wait and the delivery.
 
-**Designed, not built:** workers that scale on the age of the oldest queued event, an
-always-on outbox sender (today the tick delivers), and priority for risk changes and timers
-over chatter.
+**Built:** an always-on Temporal worker with up to 20 concurrent Activities, serialized
+delivery per load, and due-timer insertion before draining more queued messages. Existing
+events keep FIFO order. **Designed, not built:** automatic scaling on queue age and a
+broader priority policy. The 240-second thinking deadline bounds one run, not total
+end-to-end latency through an outage or an overloaded queue; the five-minute target still
+needs operational monitoring and capacity validation.
 
 ### 5.2 Volume x10: what must change?
 
-**Short answer.** The logic, the prompts and the cost per load stay. The adapters behind the
-interfaces change: a durable queue partitioned by load, a timer scheduler, Postgres, an
-object store, worker pools that scale on queue age, and higher model rate limits. The first
-limit this design meets is the model providers' rate limits, not compute.
+**Short answer.** The current live path already has durable per-load workflows, workers,
+Postgres business state and timers. At 10x it needs a supported Temporal deployment,
+capacity-tested worker/database pools, provider capacity and operational controls.
+The architecture permits scaling loads independently; provider limits are a likely
+bottleneck, not a measured conclusion about the deployed stack.
 
 **Volume.** 100,000 loads a month with 50 to 100 messages each is 5 to 10 million messages a
 month: about 10 per second over 22 business days of 10 hours. At 10x: about 100 messages per
@@ -620,26 +706,26 @@ that is about 50 agent runs per second. At 7 s each, about 350 runs are in fligh
 
 | Part | Today | At 10x (designed) |
 |---|---|---|
-| Queue | Per-load FIFO in the store (a Postgres table on the platform) | SQS FIFO with `MessageGroupId = load_id` (order per load, parallel across loads), or Temporal with a workflow per load |
-| Workers | `tick()` in one process | Stateless async workers, about 30 runs in flight each, scaled on queue age |
-| Timers | Rows fired by `tick()` | A scheduler that claims due timers with `FOR UPDATE SKIP LOCKED`, or EventBridge Scheduler |
+| Queue | Postgres FIFO per load, with one Temporal workflow per broker/load and a repair relay | Capacity-tested Temporal cluster and task queues; monitor FIFO age and database contention |
+| Workers | Temporal worker, maximum 20 concurrent Activities; model calls inside the graph Activity | Scale worker pools from measured Activity/queue latency and provider limits |
+| Timers | Persisted deadlines and Temporal waits; follow-ups start at gateway acceptance | Preserve that contract; monitor timer lag and recovery under outages |
 | Pings | One transaction per ping | A stream partitioned by load keeps the risk state; only changes reach the queue |
 | Storage | Postgres (one instance in Docker Compose) or the in-memory store, behind the repository interfaces | The same schema with the events table partitioned by month, closed loads archived to object storage, a connection pooler (the adapter keeps no session state), a read replica for the platform and metrics |
-| SOP index | Files read per run | Published versions in Postgres, cached per client by hash; hybrid search with pgvector |
-| Facility memory | LangGraph's Postgres store in the load memory's database; up to 5 delivered loads extracted at the end of each tick, in the same process | The same store on its own connection pool or database; extraction workers scaled on pending jobs; the startup check for lost jobs runs on a schedule |
-| Documents | Files on disk, read in the tick | An object store behind `BlobStore`; document workers scaled on pending documents |
+| SOP index | File-backed evals; saved live broker profiles and per-load immutable snapshots | Controlled publication/approval, canaries, rollback and optional hybrid retrieval |
+| Facility memory | LangGraph Postgres store in the load database; relay maintenance processes extraction jobs | Separate pools or database; extraction workers scaled on jobs; scheduled lost-job reconciliation |
+| Documents | Shared blob volume, read by a per-load Temporal Activity | Object storage behind `BlobStore`; independently sized document Activity workers |
 | Models | One OpenRouter key; a rate limit is retried on the same model; OpenRouter may serve it from another provider that takes the same parameters (the gate: OpenAI, then Azure); then a fallback model that passes the suite | Higher rate limits or reserved capacity, concurrency limits per client |
-| Tracing | Every run | Sampling: every escalation and failure, a share of the rest |
-| Cost | About $0.04 per load | The same per load; the total grows in line with volume |
+| Tracing | Run traces when configured | Sampling: every escalation and failure, a share of the rest |
+| Cost | Historical estimate about $0.04 per typical load | Re-measure on current models, prompts, retries and traffic; no load-scale spend guarantee |
 
 The layer rules (import-linter contracts in `pyproject.toml`) keep storage, queues, blobs and
 providers behind interfaces, so the run graph, the rules, the ledger and the eval suites do
-not change. The Postgres adapter already passes the in-memory store's contract tests, and its
+need not change merely to add workers. The Postgres adapter passes the in-memory store's contract tests, and its
 queue claim and due-timer read skip rows another worker holds, so several workers can share them.
 
 ### 5.3 How do you keep LLM cost at about $1 or less per load?
 
-**Short answer.** Most events never reach a model. The gate keeps chatter away from the
+**Short answer.** Most tracking pings never reach a model. The gate keeps chatter away from the
 agent. The agent runs a cheap model chosen by a bake-off, its prompt holds only the matching
 SOP sections, and each run has a round budget and a cost budget. Measured: about $0.00005 per
 gate call and $0.0007 per agent run, so about **$0.04 for a typical load and $0.06 for a

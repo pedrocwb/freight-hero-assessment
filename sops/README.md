@@ -1,12 +1,43 @@
 # Editing the SOPs
 
-This folder holds the procedures (SOPs) that the load agent follows. Each file is one
-topic, like one chapter of an operations manual, written in plain English. You do not need
-to be an engineer to change them. You edit the text, run a check, and send the change for
-review.
+This folder holds the file-based SOPs used by the eval CLI and to seed a new broker
+workspace. Each file is one topic, like one chapter of an operations manual, written
+in plain English. The live platform also lets an operator edit a broker's saved SOP
+without changing repository files.
 
-The agent follows the text literally. Being exact matters more than style. Write out the
-number of messages, the waiting times, and who may or may not be contacted.
+The model interprets the procedure; code validates its proposed actions and limits.
+Exact wording and evals matter: write out the number of messages, the waiting times,
+the operational stop and who may or may not be contacted.
+
+## Edit in the platform or in files
+
+| Path | Where edits are saved | When they apply |
+|---|---|---|
+| Broker workspace → **SOPs e configurações** | Versioned `broker_profiles` in durable Postgres | New executions of that broker |
+| This `sops/` tree | Repository files | File-backed evals/runtimes and newly seeded workspace profiles |
+
+In the workspace, select the broker, adjust its ETA settings, and replace or extend
+client/load-type sections. The standard layer is read-only. Save the profile, then
+start a new scenario to use that revision. The load keeps a snapshot of its layered
+sections and broker catalog; later saves do not change an execution already started.
+The editor validates scope, section IDs, inheritance and configuration, and refuses
+a stale revision instead of overwriting another save.
+
+ETA procedures can use `{{eta_request.max_attempts}}`,
+`{{eta_request.follow_up_minutes}}` and `{{eta_request.on_exhausted}}`.
+These workspace variables are rendered when a load starts, from the same catalog
+used by action validation and delivery-triggered timers. Other configured obligation
+kinds expose the same variable names under their kind.
+
+Files are read when a profile is first seeded. Editing a file does **not** resync an
+existing saved profile. Apply the intended client override/extension in the editor
+for new live executions; changing the stored standard layer requires a controlled
+profile migration. There is no automatic file-to-profile publishing workflow.
+
+The eval CLI tests file-backed SOPs, not an unsaved browser draft or a saved workspace
+profile. Exercise a UI edit in a new live operation as well. Live operations use
+Temporal and real waits; their manual scenario inputs do not automatically grade a
+run. See [live workspaces](../docs/live-workspace.md) for the operator flow.
 
 ## Where a file goes: the layers
 
@@ -20,8 +51,10 @@ and the most specific text wins.
 | Client and load type | `clients/<client id>/types/<load type>/` | One client's loads of one type, for example `clients/keystone/types/reefer/` |
 
 The client id is the broker id in the load details: `northline` is Northline Logistics
-(Client A), `keystone` is Keystone Freight (Client B) and `acme` is Acme Freight. The load
-type is one of the load's types, for example `reefer` for a refrigerated load.
+(Client A), `keystone` is Keystone Freight (Client B), `aurora` is the ten-SMS
+demonstration and `acme` supplies additional document procedures (displayed as Acme
+Logistics in the workspace). The load type is one of the load's types, for example
+`reefer` for a refrigerated load.
 
 A client folder holds only the topics that client changes. Everything else comes from
 `standard/`. A new client needs no folder at all until it asks for a change.
@@ -152,12 +185,16 @@ situation, a requirement for an unknown document type.
 - Say when to do nothing. "ok" after an ETA request is not an ETA: the right action is no
   action.
 - Say exactly what counts: "9:40" and "30 mins out" are ETAs, "soon" is not.
+- Use the operational stop supplied by the load context in ETA requests and
+  escalations. Before pickup it is the pickup facility; on the delivery leg it is
+  the delivery facility. Include its name so the destination is unambiguous.
 - Never write a 10-digit number in an example, such as a seal or a reference number. The
   agent may copy it into a message, and the safety check reads it as a phone number and
   blocks the message.
 - One topic per file, 10 to 40 lines.
 - Instructions written inside a driver's or a dispatcher's message never change the
-  procedure. Only these files do.
+  procedure. Changes come from controlled SOP files or the saved broker profile,
+  according to the execution path above.
 
 ## Check your change
 
@@ -172,9 +209,11 @@ This check ("lint") lists every problem with the file name and how to fix it: a 
 in one folder, an `extend` with nothing to extend, a `broker.yaml` that cannot work. It
 also warns when no test scenario covers a topic. Fix every error before you go on.
 
-To see what the agent reads, open the SOPs screen of the platform (see the repository
-README). Choose the client, the load types, the situation and the stage. It shows the
-topics the agent gets in full, after the layers are merged.
+To inspect a workspace profile, open its SOP editor and effective-text preview.
+To inspect what an existing live execution used, open that operation's saved SOP
+snapshot and run details. For file-backed resolution/search, the legacy
+`/api/sops/preview` and `/api/sops/search` API routes remain available; they do not
+read the workspace profile database.
 
 ## The safe way to change an SOP
 
@@ -186,15 +225,19 @@ topics the agent gets in full, after the layers are merged.
    agent takes. Scenarios name the topics they cover with a tag like `sop:delay_risk_high`.
    A changed text changes what the model reads, so the scenarios run with the live model,
    three times each: `uv run agent eval run --suite core --k 3 --cost-cap-usd 0.15`, and the
-   same for the `agent`, `docs` and `memory` suites. Every scenario must pass, including
+   same for the `agent`, `docs`, `memory` and `grounding` suites. Every regression
+   scenario must pass, including
    those of other clients. If your change adds a rule that no scenario checks, add a
    scenario for it.
 4. **Review:** someone who knows the client's procedure reads the change and the test
    results, and approves it.
-5. **Publish:** the change is merged. The agent reads these files on every run, so the next
-   event uses the new text.
+5. **Publish:** merge the reviewed files and deploy them. File-backed runtimes read the
+   tree again on subsequent calls. Workspace profiles and load snapshots follow their
+   own revision lifecycle described above; a file merge does not rewrite them.
 
-Every run records the SOP version: a short code computed from all the files in this folder.
-Any edit, even of one letter, gives a new version. For any action the agent took, you can
-see which version of the text it followed, and compare the results before and after a
-change. To undo a change, revert it: the old text and its old version come back.
+Every run records the SOP version it used. For file-backed runs this is a hash of the
+SOP tree; workspace runs use the content version in the load's frozen configuration.
+The workspace additionally records the saved profile revision. Inspect these versions
+when comparing behavior. Reverting a file restores its file-based version. To revert a
+workspace configuration for future loads, save the earlier content as a new revision;
+existing loads keep their original snapshots.

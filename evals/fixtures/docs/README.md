@@ -4,7 +4,10 @@ Paperwork for the load in `../load_481207.json`: PO 55821, carrier Prairie Haul 
 (MC 778120), shipper Riverbend Foods, pickup at the Riverbend plant in Stockton, CA
 (window 2026-10-13 06:00 to 14:00), delivery at Valley DC in Reno, NV (fixed appointment
 2026-10-14 09:30), canned tomato sauce, 38,000 lb. Used by the document pipeline's tests,
-the `docs` eval suite and the platform (attach one to a load in the Load inspector).
+the `docs` eval suite. In the live workspace, use the scenario's sample-document
+input button. The clean and exception PODs are generated for the live load ID and
+receipt time by `orchestration/live_inputs.py`; the original fixtures stay unchanged.
+The other attachments retain their fixture bytes.
 
 | File | Type | Pages | Text layer | Expected status | What it tests |
 |---|---|---|---|---|---|
@@ -38,8 +41,9 @@ each file in strict mode, and pypdfium2 extracts 1,235 characters from `pod_clea
 
 ## Field names
 
-The names are those of the standard document types in C0's `standard_broker()`
-(`src/freight_agent/domain/broker.py`, from `docs/answers.md` 1.2):
+The names below reflect the current standard document types in `standard_broker()`
+(`src/freight_agent/domain/broker.py`). A workspace run uses the document catalog
+frozen in that load's SOP snapshot:
 
 | Type | Field | Kind | Check |
 |---|---|---|---|
@@ -51,11 +55,11 @@ The names are those of the standard document types in C0's `standard_broker()`
 | | `weight` | number | none |
 | | `pickup_date` | date | `date_in_window` |
 | | `signed` | bool | `signature` |
-| `pod` | `receiver` | text | `stop_name` |
+| `pod` | `receiver` | text | `stop_name`; receiving facility, not the signer's name |
 | | `signed` | bool | `signature` |
 | | `delivered_at` | datetime | `date_in_window` |
-| | `exceptions` | text (empty when none) | none |
-| | `po_numbers` | text | `po_number`: **not in C0's `pod` type**, see below |
+| | `exceptions` | text (empty when none) | Non-empty exceptions produce a domain review reason |
+| | `po_numbers` | text | `po_number` |
 
 ## The expected files
 
@@ -64,11 +68,11 @@ The names are those of the standard document types in C0's `standard_broker()`
 | `type_id` | The type a correct classification returns |
 | `text_layer`, `vision_path` | Whether the page has text, and whether the pipeline must send the page image to the model |
 | `extracted` | The values a correct extraction returns, in the field's kind: dates as `YYYY-MM-DD`, datetimes as local `YYYY-MM-DDTHH:MM` (the stops are in America/Los_Angeles), numbers without separators, `exceptions` as `""` when the POD says NONE |
-| `not_in_standard_type` | Keys of `extracted` that the standard type does not ask for yet. A grader that follows the broker's `DocumentTypeDef` skips them |
+| `not_in_standard_type` | Historical fixture annotation, not the current catalog contract. The POD metadata/generator still list `po_numbers` here, although it is now a standard checked field; do not use this list to skip the runtime's PO check |
 | `also_on_document` | Other values printed on the page (receiver's printed name, load and trailer numbers...), for graders that read more fields. Not required |
 | `checks` | One entry per checked field: `field`, `check` (the `FieldDef.check`), `expected` (from the load), `found` (from the document), `ok`. Compare `field` and `ok`; `expected` and `found` are there for a person reading the result |
 | `exceptions_noted` | The POD lists an exception |
-| `status`, `review_reasons` | The document status after the checks, and why it needs review |
+| `status`, `review_reasons` | Fixture expectations written by the generator. Current runtime validation also records a reason for non-empty exceptions; this reason is not enumerated in the legacy generator's list |
 
 ## Expected values
 
@@ -112,17 +116,21 @@ The names are those of the standard document types in C0's `standard_broker()`
   line ("Signed by Dana Whitfield, 10/14/2026 09:42"), and the drawn signature is there
   for the vision path.
 
-## Open points for the owning cards
+## Current runtime checks and legacy metadata
 
-- **The `pod` type has no PO field** in C0's `standard_broker()`. Without
-  `FieldDef(name="po_numbers", description="The PO numbers listed", check="po_number")` on
-  `pod`, the PO typo in `pod_exceptions.pdf` goes unchecked. The pipeline would then
-  return `processed`, unless it also treats a non-empty `exceptions` as a reason for
-  review. That field is why `not_in_standard_type` lists `po_numbers`.
-- **`receiver` is ambiguous.** The POD prints the facility ("Receiver (consignee): Valley
-  DC") and the person who signed ("Print name: Dana Whitfield"). The `stop_name` check
-  needs the facility, so the field description should say "the receiving facility
-  (consignee)", not "the receiver's name".
-- **No check covers exceptions.** `exceptions` has `check: none`. The status of
-  `pod_exceptions.pdf` comes from the PO check. The exceptions are acted on by the
-  `document_processed` run (Acme SOP section 3, step 6: a Hero task with the values).
+The previously noted catalog gaps are implemented:
+
+- The standard POD type includes `po_numbers` with `check="po_number"`; the typo
+  55812 fails against the load's PO 55821.
+- The `receiver` field explicitly asks for the receiving facility (consignee), not
+  the person who signed. Valley DC is the expected facility; Dana Whitfield is the
+  signer printed on the page.
+- `domain/documents.py::read_extraction` adds a review reason for a non-empty
+  exception value even though that field has no comparison-style `FieldCheck`.
+  Damage/shortage can therefore require review even when the PO matches.
+
+The fixture generator and its JSON annotations retain the earlier
+`not_in_standard_type` marker and PO-only `review_reasons` list. Those annotations
+describe the fixture's original expectations; the current broker catalog and domain
+validator determine runtime behavior. The `document_processed` SOP then decides how
+to handle the checked document, including the Acme Hero escalation.
