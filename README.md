@@ -21,10 +21,10 @@ with a saved SOP version. Models run live; channel gateways record test deliveri
 
 ## 2. Set up
 
-This guide describes the current `feature/temporal-orchestration` branch:
+Clone the repository and configure the local environment:
 
 ```bash
-git clone --branch feature/temporal-orchestration https://github.com/pedrocwb/freight-hero-assessment.git
+git clone https://github.com/pedrocwb/freight-hero-assessment.git
 cd freight-hero-assessment
 cp .env.example .env        # set OPENROUTER_API_KEY; LANGSMITH_API_KEY is optional
 ```
