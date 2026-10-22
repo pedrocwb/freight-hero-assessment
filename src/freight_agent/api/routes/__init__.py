@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from freight_agent.api.routes import (
     documents,
+    durable,
     graph,
     ingress,
     loads,
@@ -22,4 +23,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     graph.router,
     ops.router,
     documents.router,
+    durable.router,
 )

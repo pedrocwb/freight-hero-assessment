@@ -11,6 +11,7 @@ from freight_agent.application.contracts import InboundMessage, LocationPing
 from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
 from freight_agent.orchestration.contracts import LoadKey
+from freight_agent.orchestration.demo import start_extreme_demo
 from freight_agent.orchestration.worker import services
 from freight_agent.settings import Settings
 
@@ -36,7 +37,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok", "mode": "temporal", "gateways": "recording"}
+        return {
+            "status": "ok",
+            "mode": "temporal",
+            "gateways": "recording",
+            "model_ready": settings.model_ready,
+        }
+
+    @app.post("/demos/aurora/{load_id}", status_code=202)
+    async def extreme_demo(load_id: str, request: Request) -> dict:
+        import re
+
+        if not re.fullmatch(r"aurora-[a-z0-9-]{1,64}", load_id):
+            raise HTTPException(422, "invalid demo load id")
+        if not settings.model_ready:
+            raise HTTPException(
+                503, "Configure OPENROUTER_API_KEY and restart the durable services"
+            )
+        return await start_extreme_demo(request.app.state.ingress, settings.evals_dir, load_id)
 
     @app.post("/loads", status_code=201)
     async def register(body: Registration, request: Request) -> dict:

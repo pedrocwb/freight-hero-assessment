@@ -1,0 +1,23 @@
+{
+  "load_id": "aurora-extreme",
+  "broker": {"id": "aurora", "name": "Aurora Transportes"},
+  "shipper": "Alimentos Serra Verde",
+  "carrier": {"name": "Rota Sul Cargas", "mc_number": "778120"},
+  "commodity": "18 toneladas de alimentos embalados, carga seca",
+  "stage": "to_delivery",
+  "delay_risk": "low",
+  "contacts": [
+    {"id": "drv_aurora", "role": "driver", "channels": ["sms"]},
+    {"id": "dsp_aurora", "role": "dispatcher", "channels": ["email"]},
+    {"id": "brk_aurora", "role": "broker", "channels": ["email", "slack"]}
+  ],
+  "stops": [
+    {"sequence": 1, "type": "pickup", "name": "Alimentos Serra Verde",
+     "address": "Curitiba, PR", "timezone": "America/Sao_Paulo",
+     "appointment": {"type": "fixed", "time": "2026-10-21T08:00"}},
+    {"sequence": 2, "type": "delivery", "name": "CD Aurora São Paulo",
+     "address": "São Paulo, SP", "timezone": "America/Sao_Paulo",
+     "appointment": {"type": "fixed", "time": "2026-10-21T18:00"}}
+  ],
+  "instructions": "Carga de demonstração. PO 90410. Comunicar em português brasileiro."
+}

@@ -8,6 +8,7 @@ import { href, parseHash, type Route, type ScreenId } from "./lib/route";
 import { Conversation } from "./screens/Conversation";
 import { Scenarios } from "./screens/Scenarios";
 import { SopViewer } from "./screens/SopViewer";
+import { Durable } from "./screens/Durable";
 import { SimProvider, useSim } from "./state/sim";
 import { ToastProvider } from "./state/toasts";
 
@@ -15,6 +16,7 @@ const SCREENS: { id: ScreenId; label: string }[] = [
   { id: "load", label: "Conversation" },
   { id: "scenarios", label: "Scenarios" },
   { id: "sops", label: "SOPs" },
+  { id: "durable", label: "Operação ao vivo" },
 ];
 
 function useRoute(): Route {
@@ -72,16 +74,16 @@ function Shell() {
             </a>
           ))}
         </nav>
-        <Clock />
+        {screen === "durable" ? <span className="clock">Tempo real</span> : <Clock />}
       </header>
 
       <main className={clsx("main", screen === "load" && "main--chat")} id="main" tabIndex={-1}>
-        {sim.stateError && !sim.state ? (
+        {screen !== "durable" && sim.stateError && !sim.state ? (
           <p className="banner banner--alert" role="alert">
             The API is not answering: {sim.stateError}. Start it with <code>uv run agent serve</code>; this page retries every 5 seconds.
           </p>
         ) : null}
-        {sim.state && !modelReady(sim.state) ? (
+        {screen !== "durable" && sim.state && !modelReady(sim.state) ? (
           <p className="banner banner--warn" role="status">
             No model key: set <code>OPENROUTER_API_KEY</code> and restart the API, or every run escalates to a Hero.
           </p>
@@ -89,6 +91,7 @@ function Shell() {
         {screen === "load" && <Conversation params={params} />}
         {screen === "scenarios" && <Scenarios />}
         {screen === "sops" && <SopViewer />}
+        {screen === "durable" && <Durable key={params.get("load") || "new"} params={params} />}
       </main>
       <Toasts />
     </div>

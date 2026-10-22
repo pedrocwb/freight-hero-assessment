@@ -88,3 +88,9 @@ Run `docker compose -f compose.temporal.yml up --build` for the isolated local s
 See [the Temporal guide](docs/temporal.md) for ingress examples, restart/retry behavior,
 provider idempotency requirements and production limits. `make temporal-test` validates
 the real Workflow and LangGraph with time skipping and a scripted model.
+
+The platform's **Operação ao vivo** tab (`http://localhost:8000/#/durable`) starts
+Aurora Transportes' extreme scenario: ten driver SMS with one-minute durable waits,
+then an urgent Hero task after the final wait. It shows confirmed contacts, deadlines
+and agent decisions as they happen. See the guide above to update both local stacks.
+The model is live; channel gateways record test deliveries.

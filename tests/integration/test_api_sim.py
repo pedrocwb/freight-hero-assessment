@@ -160,15 +160,21 @@ async def test_reset_with_an_unknown_timezone_is_a_400(api: Api) -> None:
 async def test_fixtures_are_the_eval_fixture_and_the_keystone_variants(api: Api) -> None:
     fixtures = {f["name"]: f["metadata"] for f in await api.get("/api/fixtures")}
 
-    assert set(fixtures) == {"load_481207", "load_481207_keystone", "load_481207_keystone_reefer"}
+    assert set(fixtures) == {
+        "load_481207",
+        "load_481207_keystone",
+        "load_481207_keystone_reefer",
+        "load_aurora_extreme",
+    }
+    assert fixtures["load_aurora_extreme"]["broker"]["id"] == "aurora"
     assert fixtures["load_481207"]["broker"]["id"] == "northline"
     keystone = fixtures["load_481207_keystone"]
     assert keystone["broker"] == {"id": "keystone", "name": "Keystone Freight"}
     reefer = fixtures["load_481207_keystone_reefer"]
     assert reefer["broker"]["id"] == "keystone"
     assert (reefer["load_types"], reefer["stage"]) == (["reefer"], "at_pickup")
-    # Distinct ids, so the three loads can run side by side in one simulation.
-    assert len({m["load_id"] for m in fixtures.values()}) == 3
+    # Distinct ids, so all loads can run side by side in one simulation.
+    assert len({m["load_id"] for m in fixtures.values()}) == 4
 
 
 async def test_create_a_load_from_the_fixture(api: Api) -> None:

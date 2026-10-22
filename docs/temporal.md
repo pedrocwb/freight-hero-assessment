@@ -109,6 +109,68 @@ local and unauthenticated; broker validation is data isolation, not caller authe
 
 ## Drive the assignment scenario
 
+### Aurora: ten SMS and a Hero, visible in the platform
+
+The platform now has an **Operação ao vivo** tab at
+<http://localhost:8000/#/durable>. It reads the separate durable API through the
+platform's `/api/durable` bridge. The simulator's advance/reset controls never
+touch the durable database or its clock.
+
+1. Configure `OPENROUTER_API_KEY` in the local `.env`. Optional LangSmith tracing
+   uses the existing settings. No credentials go into an image or browser response.
+2. Start the durable stack: `docker compose -f compose.temporal.yml up -d --build`.
+3. Update the platform and its schema (preserves existing simulator data):
+
+   ```sh
+   docker compose up -d postgres
+   docker compose build app
+   docker compose run --rm --no-deps migrate
+   docker compose up -d --no-deps app
+   ```
+
+4. Open **Operação ao vivo** and select **Iniciar cenário**. Each execution creates
+   a fresh Aurora load and injects one high-risk ping. Dates are relative to the
+   current day; retrying the same start ID is idempotent.
+5. Watch ten confirmed SMS, their timestamps, the next absolute deadline, each
+   agent decision/tool call and the final Hero task. The screen polls every two
+   seconds; its countdown is only a display. Close/reopen the load URL to prove the
+   browser does not drive execution. **Retomar a última execução** restores it in
+   the same browser, and **Nova execução** starts a fresh load after completion.
+
+The **Mensagem do motorista** field submits a real inbound SMS event through the
+durable ingress. Use “Chego ao CD em 20 minutos” in a separate execution to test ETA
+cancellation. The message appears beside the agent's contacts; the next graph run
+interprets it and closes the ETA obligation when appropriate. A retry after an
+uncertain HTTP response reuses the message ID. Leave the field empty for the
+ten-unanswered-SMS case.
+
+Aurora Transportes carries 18 tonnes of packaged food from Curitiba to the
+CD Aurora São Paulo. Its fictional driver never replies. The policy is in
+`sops/clients/aurora/broker.yaml` and `delay_risk_high.md`; the fixture is
+`evals/fixtures/load_aurora_extreme.json`.
+
+- First SMS immediately; requests 2–10 after each one-minute wait.
+- One final minute after SMS 10, then exactly one urgent Hero task and an exhausted
+  ETA obligation. No SMS 11, dispatcher email, or pending timer.
+- The broker's limit is ten requests and ten SMS/hour. The standard broker retains
+  its own limits. Only confirmed deliveries count in the screen's progress.
+- Each deadline is `accepted_at + 1 minute`. Model and queue latency occur after
+  expiry, so a live execution takes **more than ten minutes**, rather than promising
+  messages at exact wall-clock minute boundaries.
+- The platform uses the **live model**. The six automated Temporal tests use a
+  scripted model and a real time-skipping Temporal server, including the exact
+  ten-attempt path with the file-backed Aurora SOP, duplicate input, checks before
+  every deadline, the final wait and no extra action after completion.
+
+SMS and Hero gateways still **record** their deliveries. This demonstrates durable
+execution and model decisions, not delivery to a real handset or operations system.
+The page distinguishes infrastructure/model failures from a successful escalation.
+
+For a host-run UI API, `DURABLE_API_URL` defaults to `http://127.0.0.1:8001`.
+Docker sets it to `http://host.docker.internal:8001`, reaching the isolated stack.
+
+### Northline: the original assignment
+
 Register `evals/fixtures/load_481207.json` through `POST /loads` wrapped in a `metadata`
 object. Then send a high-risk ping with a current timestamp. This script uses the live
 model configured in the worker, so it may incur model cost:
@@ -123,11 +185,17 @@ api = httpx.Client(base_url="http://localhost:8001", timeout=20)
 metadata = json.loads(Path("evals/fixtures/load_481207.json").read_text())
 api.post("/loads", json={"metadata": metadata}).raise_for_status()
 path = "/brokers/northline/loads/481207"
-api.post(f"{path}/pings", json={
-    "ping_id": "presentation-risk-1", "load_id": "481207",
-    "lat": 37.95, "lon": -121.29, "delay_risk": "high",
-    "occurred_at": datetime.now(UTC).isoformat(),
-}).raise_for_status()
+api.post(
+    f"{path}/pings",
+    json={
+        "ping_id": "presentation-risk-1",
+        "load_id": "481207",
+        "lat": 37.95,
+        "lon": -121.29,
+        "delay_risk": "high",
+        "occurred_at": datetime.now(UTC).isoformat(),
+    },
+).raise_for_status()
 print(api.get(path).json())
 ```
 

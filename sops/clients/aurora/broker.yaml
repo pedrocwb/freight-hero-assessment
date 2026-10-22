@@ -1,0 +1,14 @@
+# Deliberately aggressive demonstration policy, scoped to this fictional broker.
+name: Aurora Transportes
+obligations:
+  - kind: eta_request
+    title: Previsão de chegada
+    description: Each SMS requesting the driver's ETA counts as one attempt. Ten requests, one minute apart, then a Hero calls the driver.
+    follow_up_minutes: 1
+    max_attempts: 10
+    follow_up_intent: eta_follow_up_due
+    on_exhausted: [hero_task]
+limits:
+  validation:
+    sms_max_per_window: 10
+    sms_window_minutes: 60
