@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[3]
 
 
-async def test_policy_is_frozen_and_both_text_and_limits_are_versioned(load: Load):
+async def test_policy_is_frozen_and_both_text_and_limits_are_versioned(load: Load, monkeypatch):
     knowledge = MemorySopIndex.from_files(ROOT / "sops")
     policy = DemoPolicy(
         max_attempts=2, interval_minutes=3, body=DEFAULT_BODY + "\nUse MARCADOR AZUL."
@@ -45,6 +45,16 @@ async def test_policy_is_frozen_and_both_text_and_limits_are_versioned(load: Loa
     world = await World(load, knowledge=knowledge).start()
     service = TemporalIngress(world.deps, cast(Client, ClientStub()), "policy-test")
     await start_extreme_demo(service, ROOT / "evals", "aurora-policy", policy)
+    original_visible = knowledge.visible
+
+    async def changed_base(broker_id, load_types):
+        return tuple(
+            s.model_copy(update={"description": "Updated base SOP"})
+            for s in await original_visible(broker_id, load_types)
+        )
+
+    monkeypatch.setattr(knowledge, "visible", changed_base)
+    assert (await freeze_policy(knowledge, policy))["version"] != frozen["version"]
     await start_extreme_demo(service, ROOT / "evals", "aurora-policy", policy)
     with pytest.raises(DomainError, match="outro SOP"):
         await start_extreme_demo(service, ROOT / "evals", "aurora-policy", DemoPolicy())

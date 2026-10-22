@@ -6,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from freight_agent.application.contracts import LocationPing
+from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import DelayRisk, Load
 from freight_agent.orchestration.policy import DemoPolicy, freeze_policy
 from freight_agent.orchestration.service import TemporalIngress
@@ -20,7 +21,16 @@ async def start_extreme_demo(
     local = now.astimezone(ZoneInfo("America/Sao_Paulo"))
     for stop, offset in zip(metadata["stops"], (-8, 1), strict=True):
         stop["appointment"]["time"] = (local + timedelta(hours=offset)).isoformat()
-    frozen = await freeze_policy(service.deps.knowledge, policy or DemoPolicy())
+    policy = policy or DemoPolicy()
+    async with service.deps.uow_factory() as uow:
+        existing = await uow.loads.get(load_id)
+    frozen = existing.sop_snapshot if existing else None
+    if frozen and frozen["policy"] != policy.model_dump():
+        raise DomainError("Este ID já usa outro SOP. Inicie uma nova execução.")
+    # Retry the accepted request with its original catalog even after a deployment
+    # changes the base SOP. Registration still fences concurrent different requests.
+    if frozen is None:
+        frozen = await freeze_policy(service.deps.knowledge, policy)
     load = Load.from_metadata(metadata).model_copy(update={"sop_snapshot": frozen})
     key = await service.register(load)
     # Retrying the same start request cannot create a second risk event/workflow.
