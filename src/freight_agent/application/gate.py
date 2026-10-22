@@ -154,6 +154,10 @@ def system_decision(ctx: RunContext) -> GateDecision | None:
             return GateDecision(
                 intent=Intent.OTHER, act=False, reason="a Hero update is handled by people"
             )
+        case EventType.EXECUTION_STOP_REQUESTED:
+            return GateDecision(
+                intent=Intent.OTHER, act=False, reason="execution stop is handled by orchestration"
+            )
         case EventType.AGENT_ACTION:
             return GateDecision(
                 intent=Intent.OTHER, act=False, reason="the agent's own action is memory only"

@@ -93,6 +93,11 @@ class Load(DomainModel):
     instructions: str = ""
     load_types: tuple[str, ...] = ()
     current_stop_sequence: int | None = None
+    # Serialized, validated SOP/catalog pinned by the durable composition root.
+    # JSON avoids a cycle: SOP sections and broker catalogs themselves refer to Stage.
+    sop_snapshot: dict[str, Any] | None = None
+    automation_stop_requested_at: datetime | None = None
+    automation_stopped_at: datetime | None = None
 
     def contact(self, contact_id: str) -> Contact | None:
         return next((c for c in self.contacts if c.id == contact_id), None)

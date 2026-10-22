@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from freight_agent.orchestration.policy import DemoPolicy
+
 router = APIRouter(prefix="/durable", tags=["durable"])
 DemoId = Annotated[str, Path(pattern=r"^aurora-[a-z0-9-]{1,64}$")]
 
@@ -40,8 +42,23 @@ async def health(request: Request) -> JSONResponse:
 
 
 @router.post("/demos/aurora/{load_id}")
-async def start(load_id: DemoId, request: Request) -> JSONResponse:
-    return await forward(request, "POST", f"/demos/aurora/{quote(load_id, safe='')}")
+async def start(load_id: DemoId, request: Request, body: DemoPolicy | None = None) -> JSONResponse:
+    return await forward(
+        request,
+        "POST",
+        f"/demos/aurora/{quote(load_id, safe='')}",
+        body.model_dump() if body else None,
+    )
+
+
+@router.get("/sop")
+async def sop(request: Request) -> JSONResponse:
+    return await forward(request, "GET", "/demos/aurora-policy")
+
+
+@router.post("/loads/{load_id}/stop")
+async def stop(load_id: DemoId, request: Request) -> JSONResponse:
+    return await forward(request, "POST", f"/brokers/aurora/loads/{quote(load_id, safe='')}/stop")
 
 
 @router.get("/loads/{load_id}")

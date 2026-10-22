@@ -135,7 +135,24 @@ touch the durable database or its clock.
    agent decision/tool call and the final Hero task. The screen polls every two
    seconds; its countdown is only a display. Close/reopen the load URL to prove the
    browser does not drive execution. **Retomar a última execução** restores it in
-   the same browser, and **Nova execução** starts a fresh load after completion.
+   the same browser, and **Executar novo SOP** starts a fresh load.
+
+**Editar SOP para nova execução** edits the high-risk/follow-up procedure, number
+of requests (1–10), and minutes between confirmed requests (1–60). The draft stays
+in this browser. The placeholders `{{max_attempts}}` and `{{interval_minutes}}` are
+expanded into the text, and the same values configure the broker's validated
+catalog. Starting creates a load with an immutable snapshot of all effective SOP
+sections and the catalog, with a content version. Its graph Activities use that
+snapshot, including after worker replacement. **SOP usado nesta execução** exposes
+the saved text/version; editing the draft cannot alter an existing load.
+
+**Parar execução** durably records an operator request. It wakes the workflow,
+settles its current Activity, cancels pending timers/outbox actions and open
+obligations, and completes the workflow. The UI distinguishes “Parando…” from
+“Execução parada”. A delivery already in progress may finish before confirmation;
+recorded sends remain in the history. No new contact starts after the confirmed
+stop. A queued control event repairs a lost Temporal notification; the relay and
+ingress cannot restart a stopped load. To continue, create a new execution.
 
 The **Mensagem do motorista** field submits a real inbound SMS event through the
 durable ingress. Use “Chego ao CD em 20 minutos” in a separate execution to test ETA
@@ -157,10 +174,12 @@ CD Aurora São Paulo. Its fictional driver never replies. The policy is in
 - Each deadline is `accepted_at + 1 minute`. Model and queue latency occur after
   expiry, so a live execution takes **more than ten minutes**, rather than promising
   messages at exact wall-clock minute boundaries.
-- The platform uses the **live model**. The six automated Temporal tests use a
+- The platform uses the **live model**. The eight automated Temporal tests use a
   scripted model and a real time-skipping Temporal server, including the exact
   ten-attempt path with the file-backed Aurora SOP, duplicate input, checks before
-  every deadline, the final wait and no extra action after completion.
+  every deadline, the final wait and no extra action after completion. Two cases
+  also stop during a timer wait or a graph Activity, then check no later delivery
+  or restart after an hour of simulated time.
 
 SMS and Hero gateways still **record** their deliveries. This demonstrates durable
 execution and model decisions, not delivery to a real handset or operations system.

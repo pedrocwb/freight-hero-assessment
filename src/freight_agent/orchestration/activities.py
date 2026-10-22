@@ -1,15 +1,19 @@
 """Activities call the existing runtime: claim → LangGraph → atomic state/outbox commit."""
 
+from dataclasses import replace
+
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from freight_agent.application.runtime import AgentRuntime, RuntimeDeps
 from freight_agent.domain.documents import DocumentStatus
 from freight_agent.domain.load import Stage
+from freight_agent.domain.obligations import ObligationStatus
 from freight_agent.domain.outbox import OutboxStatus
 from freight_agent.domain.runs import RunStatus
 from freight_agent.domain.timers import TimerStatus, is_stale
 from freight_agent.orchestration.contracts import LoadKey, TimerRef, WakeState, WorkItem
+from freight_agent.orchestration.policy import pinned_index
 
 
 class LoadActivities:
@@ -31,6 +35,10 @@ class LoadActivities:
             load = await uow.loads.get(key.load_id)
             if load is None or load.broker_id != key.broker_id:
                 raise ApplicationError("load/broker mismatch", non_retryable=True)
+            if load.automation_stopped_at:
+                return WakeState(finished=True)
+            if load.automation_stop_requested_at:
+                return WakeState(stop_requested=True)
             head = await uow.queue.head(key.load_id)
             if head and await uow.queue.is_dead(head.event_id):
                 raise ApplicationError(f"dead-letter event: {head.event_id}", non_retryable=True)
@@ -70,7 +78,14 @@ class LoadActivities:
         async with self.deps.uow_factory() as uow:
             if await uow.queue.is_dead(work.item_id):
                 raise ApplicationError(f"dead-letter event: {work.item_id}", non_retryable=True)
-        run = await self.runtime.process_event(work.load.load_id, work.item_id)
+            load = await uow.loads.get(work.load.load_id)
+            frozen = load.sop_snapshot if load else None
+        runtime = (
+            AgentRuntime(replace(self.deps, knowledge=pinned_index(frozen)))
+            if frozen
+            else self.runtime
+        )
+        run = await runtime.process_event(work.load.load_id, work.item_id)
         if run.status is RunStatus.FAILED:
             async with self.deps.uow_factory() as uow:
                 dead = await uow.queue.is_dead(work.item_id)
@@ -108,5 +123,36 @@ class LoadActivities:
         if pending:
             raise ApplicationError("pending documents remain; retry processing")
 
+    @activity.defn(name="stop_load_execution")
+    async def stop(self, key: LoadKey) -> None:
+        """Serialized after the current Activity: retain history, cancel future work."""
+        await self._check(key)
+        async with self.deps.uow_factory() as uow:
+            load = await uow.loads.get(key.load_id)
+            if load is None or load.automation_stopped_at:
+                return
+            for timer in await uow.timers.list_for_load(key.load_id):
+                if timer.status is TimerStatus.PENDING:
+                    await uow.timers.save(timer.mark(TimerStatus.CANCELLED))
+            for obligation in await uow.obligations.list_for_load(key.load_id):
+                if obligation.is_open:
+                    await uow.obligations.save(obligation.close(ObligationStatus.CANCELLED))
+            for item in await uow.outbox.list_for_load(key.load_id):
+                if item.status is OutboxStatus.PENDING:
+                    await uow.outbox.save(
+                        item.model_copy(update={"status": OutboxStatus.CANCELLED})
+                    )
+            await uow.loads.save(
+                load.model_copy(update={"automation_stopped_at": self.deps.clock.now()})
+            )
+            await uow.commit()
+
     def registered(self) -> list:
-        return [self.snapshot, self.run_graph, self.fire_timer, self.deliver, self.documents]
+        return [
+            self.snapshot,
+            self.run_graph,
+            self.fire_timer,
+            self.deliver,
+            self.documents,
+            self.stop,
+        ]

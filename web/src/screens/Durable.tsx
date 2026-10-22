@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import { conversation, durableRequest, progress, remaining, type DurableHealth, type DurableSnapshot } from "../lib/durable";
+import { conversation, durableRequest, progress, remaining, type DemoPolicy, type DurableHealth, type DurableSnapshot } from "../lib/durable";
 import { href } from "../lib/route";
 
 const time = (value: string) => new Date(value).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
@@ -20,6 +20,40 @@ export function Durable({ params }: { params: URLSearchParams }) {
   const [sendStatus, setSendStatus] = useState("");
   const [sendError, setSendError] = useState("");
   const pendingMessage = useRef<{ body: string; message_id: string } | null>(null);
+  const [policy, setPolicy] = useState<DemoPolicy | null>(null);
+  const [policyError, setPolicyError] = useState("");
+  const [stopBusy, setStopBusy] = useState(false);
+  const [stopError, setStopError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void durableRequest<DemoPolicy>("/sop", { signal: controller.signal }).then((defaults) => {
+      if (controller.signal.aborted) return;
+      try {
+        const saved = JSON.parse(localStorage.getItem("aurora-sop-draft") || "null");
+        setPolicy(saved && typeof saved.body === "string" && Number.isInteger(saved.max_attempts) && Number.isInteger(saved.interval_minutes) ? saved : defaults);
+      } catch { setPolicy(defaults); }
+    }).catch(() => { if (!controller.signal.aborted) setPolicyError("Não foi possível carregar o SOP. Recarregue a página."); });
+    return () => controller.abort();
+  }, []);
+
+  function editPolicy(change: Partial<DemoPolicy>) {
+    if (!policy) return;
+    const next = { ...policy, ...change };
+    setPolicy(next);
+    localStorage.setItem("aurora-sop-draft", JSON.stringify(next));
+  }
+
+  async function stopExecution() {
+    setStopBusy(true);
+    setStopError("");
+    try {
+      await durableRequest(`/loads/${encodeURIComponent(loadId)}/stop`, { method: "POST" });
+      setSnapshot(await durableRequest<DurableSnapshot>(`/loads/${encodeURIComponent(loadId)}`));
+    } catch (cause) {
+      setStopError(cause instanceof Error ? cause.message : "Não foi possível parar. Tente novamente.");
+    } finally { setStopBusy(false); }
+  }
 
   useEffect(() => {
     setMessage("");
@@ -69,14 +103,17 @@ export function Durable({ params }: { params: URLSearchParams }) {
   }, [loadId]);
 
   async function start() {
+    if (!policy) return;
     setStarting(true);
     setError("");
     // Retain the ID on an uncertain response: retrying cannot start another load.
-    const pending = sessionStorage.getItem("aurora-start-id") || `aurora-${crypto.randomUUID()}`;
-    sessionStorage.setItem("aurora-start-id", pending);
+    let saved: { load_id: string; policy: DemoPolicy } | null = null;
+    try { saved = JSON.parse(sessionStorage.getItem("aurora-start-request") || "null"); } catch { /* replace invalid draft */ }
+    const pending = saved && JSON.stringify(saved.policy) === JSON.stringify(policy) ? saved : { load_id: `aurora-${crypto.randomUUID()}`, policy };
+    sessionStorage.setItem("aurora-start-request", JSON.stringify(pending));
     try {
-      const result = await durableRequest<{ load_id: string }>(`/demos/aurora/${pending}`, { method: "POST" });
-      sessionStorage.removeItem("aurora-start-id");
+      const result = await durableRequest<{ load_id: string }>(`/demos/aurora/${pending.load_id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pending.policy) });
+      sessionStorage.removeItem("aurora-start-request");
       localStorage.setItem("aurora-last-load", result.load_id);
       window.location.hash = href("durable", { load: result.load_id });
     } catch (cause) {
@@ -112,9 +149,13 @@ export function Durable({ params }: { params: URLSearchParams }) {
   }
 
   const state = snapshot ? progress(snapshot) : null;
+  const halted = !!snapshot?.load.automation_stopped_at;
+  const stopping = !!snapshot?.load.automation_stop_requested_at && !halted;
+  const maxAttempts = state?.maxAttempts ?? policy?.max_attempts ?? 10;
+  const intervalMinutes = state?.intervalMinutes ?? policy?.interval_minutes ?? 1;
+  const validPolicy = policy && policy.body.trim().length >= 20 && policy.body.length <= 12000 && Number.isInteger(policy.max_attempts) && policy.max_attempts >= 1 && policy.max_attempts <= 10 && Number.isInteger(policy.interval_minutes) && policy.interval_minutes >= 1 && policy.interval_minutes <= 60;
   const stopped = state?.obligation && ["satisfied", "cancelled"].includes(state.obligation.status);
-  const active = !!loadId && !state?.complete && !state?.failed && !stopped;
-  const status = error ? "Conexão interrompida" : state?.failed ? "A execução precisa de atenção" : state?.complete ? "Escalado para um hero" : stopped ? "Acompanhamento encerrado" : state?.timer ? "Aguardando o motorista" : loadId ? "Agente processando" : "Pronto para iniciar";
+  const status = error ? "Conexão interrompida" : halted ? "Execução parada" : stopping ? "Parando execução…" : state?.failed ? "A execução precisa de atenção" : state?.complete ? "Escalado para um hero" : stopped ? "Acompanhamento encerrado" : state?.timer ? "Aguardando o motorista" : loadId ? "Agente processando" : "Pronto para iniciar";
   const deliveries = [...(snapshot?.outbox || [])].sort((a, b) => a.created_at.localeCompare(b.created_at));
   const rows = snapshot ? conversation(snapshot) : [];
   const driverReplied = rows.some((row) => row.kind === "driver");
@@ -126,32 +167,51 @@ export function Durable({ params }: { params: URLSearchParams }) {
           <h1>Aurora Transportes</h1>
           <p className="muted">Alimentos Serra Verde · Curitiba → São Paulo · 18 toneladas</p>
         </div>
-        <button className="button button--primary" onClick={() => void start()} disabled={starting || active || !health?.model_ready || !!error}>
-          {starting ? "Iniciando…" : loadId ? "Nova execução" : "Iniciar cenário"}
-        </button>
+        <div className="durable-controls">
+          {loadId && <button className="button" onClick={() => void stopExecution()} disabled={!snapshot || stopBusy || stopping || halted || !!error}>{stopping || stopBusy ? "Parando…" : "Parar execução"}</button>}
+          <button className="button button--primary" onClick={() => void start()} disabled={starting || !validPolicy || !health?.model_ready || !!error}>
+            {starting ? "Iniciando…" : loadId ? "Executar novo SOP" : "Iniciar cenário"}
+          </button>
+        </div>
       </div>
 
       <p className="durable-mode">IA ao vivo · Relógio real · SMS e tarefas registrados em ambiente de teste</p>
+      {stopError && <p className="banner banner--alert" role="alert">{stopError}</p>}
+      {policyError && <p className="banner banner--alert" role="alert">{policyError}</p>}
+      <details className="durable-editor">
+        <summary>Editar SOP para nova execução</summary>
+        <p>Este rascunho vale para uma nova carga. A execução atual mantém o SOP com que começou.</p>
+        {policy && <fieldset disabled={starting}>
+          <div className="durable-policy-fields">
+            <label>Tentativas de SMS<input type="number" min={1} max={10} value={policy.max_attempts} onChange={(e) => editPolicy({ max_attempts: Number(e.target.value) })} /></label>
+            <label>Intervalo em minutos<input type="number" min={1} max={60} value={policy.interval_minutes} onChange={(e) => editPolicy({ interval_minutes: Number(e.target.value) })} /></label>
+          </div>
+          <label htmlFor="sop-body">SOP de risco alto e acompanhamento</label>
+          <textarea id="sop-body" rows={12} maxLength={12000} value={policy.body} onChange={(e) => editPolicy({ body: e.target.value })} />
+          <small>Use {"{{max_attempts}}"} e {"{{interval_minutes}}"} no texto para acompanhar os valores acima. Limites: 1–10 tentativas e 1–60 minutos. As outras seções do SOP são preservadas.</small>
+          {!validPolicy && <p role="alert">Confira os limites e escreva pelo menos 20 caracteres no SOP.</p>}
+        </fieldset>}
+      </details>
       {error && <p className="banner banner--alert" role="alert">{error} Os dados abaixo são da última atualização; a tela tenta reconectar automaticamente.</p>}
       {health && !health.model_ready && <p className="banner banner--warn">A IA ainda não está configurada no serviço da operação ao vivo.</p>}
       {!loadId && lastLoad && <a href={href("durable", { load: lastLoad })}>Retomar a última execução</a>}
 
       <div className="durable-status" role="status">
         <div><span className="durable-status-dot" /><strong>{status}</strong>
-          <p>{state?.complete ? "O limite de tentativas foi atingido. O hero deve ligar para confirmar a chegada." : stopped ? "A obrigação foi encerrada e os próximos pedidos foram cancelados." : driverReplied ? "O motorista respondeu. O agente avalia a mensagem conforme o SOP." : "Risco alto de atraso na entrega. O motorista não responde aos pedidos de previsão."}</p>
+          <p>{halted ? "Parada confirmada. Timers e ações pendentes foram cancelados; o histórico foi preservado." : stopping ? "Aguardando a etapa em andamento terminar. Nenhum novo contato será iniciado após a confirmação da parada." : state?.complete ? "O limite de tentativas foi atingido. O hero deve ligar para confirmar a chegada." : stopped ? "A obrigação foi encerrada e os próximos pedidos foram cancelados." : driverReplied ? "O motorista respondeu. O agente avalia a mensagem conforme o SOP." : "Risco alto de atraso na entrega. O motorista não responde aos pedidos de previsão."}</p>
         </div>
         <div className="durable-countdown">
-          <span>{state?.timer ? (state.sms.length === 10 ? "Escalada em" : "Próximo contato em") : "Contatos confirmados"}</span>
-          <strong>{state?.timer && !error ? remaining(state.timer.due_at, now) : `${state?.sms.length || 0}/10`}</strong>
+          <span>{state?.timer ? (state.sms.length === maxAttempts ? "Escalada em" : "Próximo contato em") : "Contatos confirmados"}</span>
+          <strong>{state?.timer && !error ? remaining(state.timer.due_at, now) : `${state?.sms.length || 0}/${maxAttempts}`}</strong>
           {state?.timer && <small>{time(state.timer.due_at)} · horário de Brasília{Date.parse(state.timer.due_at) <= now ? " · aguardando processamento" : ""}</small>}
         </div>
       </div>
 
-      <ol className="durable-attempts" aria-label="Dez tentativas de contato">
-        {Array.from({ length: 10 }, (_, i) => {
+      <ol className="durable-attempts" aria-label="Tentativas de contato">
+        {Array.from({ length: maxAttempts }, (_, i) => {
           const sms = state?.sms[i];
           return <li key={i} className={sms ? "is-sent" : ""}>
-            <span>SMS {i + 1}</span><strong>{sms ? "Registrado" : "Aguardando"}</strong>
+            <span>SMS {i + 1}</span><strong>{sms ? "Registrado" : halted || stopped ? "Cancelado" : "Aguardando"}</strong>
             <time>{sms?.accepted_at ? time(sms.accepted_at) : "—"}</time>
           </li>;
         })}
@@ -164,10 +224,10 @@ export function Durable({ params }: { params: URLSearchParams }) {
             <label htmlFor="driver-message">Mensagem do motorista</label>
             <textarea id="driver-message" rows={3} maxLength={2000} value={message}
               placeholder="Ex.: Chego ao CD em 20 minutos."
-              onChange={(event) => setMessage(event.target.value)} disabled={!snapshot || sending}
+              onChange={(event) => setMessage(event.target.value)} disabled={!snapshot || sending || stopping || halted}
               aria-describedby="driver-message-hint" />
             <div><small id="driver-message-hint">Simula um SMS recebido nesta carga. Uma previsão de chegada pode encerrar os pedidos.</small>
-              <button className="button button--primary" type="submit" disabled={!snapshot || !message.trim() || sending || !!error}>{sending ? "Enviando…" : "Enviar como motorista"}</button>
+              <button className="button button--primary" type="submit" disabled={!snapshot || !message.trim() || sending || !!error || stopping || halted}>{sending ? "Enviando…" : "Enviar como motorista"}</button>
             </div>
             {sendStatus && <p role="status">{sendStatus}</p>}
             {sendError && <p className="banner banner--alert" role="alert">{sendError}</p>}
@@ -183,8 +243,8 @@ export function Durable({ params }: { params: URLSearchParams }) {
             const run = snapshot?.runs.find((r) => r.run_id === item.run_id);
             return (
             <article className={`durable-entry ${item.kind === "hero_task" ? "durable-entry--hero" : ""}`} key={item.outbox_id}>
-              <div className="durable-entry-meta"><strong>{labels[item.kind] || item.kind}</strong><span>{item.status === "sent" ? "Registrado" : item.status === "failed" ? "Falhou" : "Pendente"} · {time(item.accepted_at || item.created_at)}</span></div>
-              {item.kind === "sms" && item.payload.purpose === "eta_request" && <small>Tentativa {deliveries.slice(0, i + 1).filter((d) => d.kind === "sms" && d.payload.purpose === "eta_request").length} de 10</small>}
+              <div className="durable-entry-meta"><strong>{labels[item.kind] || item.kind}</strong><span>{item.status === "sent" ? "Registrado" : item.status === "failed" ? "Falhou" : item.status === "cancelled" ? "Cancelado" : "Pendente"} · {time(item.accepted_at || item.created_at)}</span></div>
+              {item.kind === "sms" && item.payload.purpose === "eta_request" && <small>Tentativa {deliveries.slice(0, i + 1).filter((d) => d.kind === "sms" && d.payload.purpose === "eta_request").length} de {maxAttempts}</small>}
               {typeof item.payload.title === "string" && <h3>{item.payload.title}</h3>}
               <p>{String(item.payload.text || item.payload.description || item.payload.body || "")}</p>
               {run && <details>
@@ -199,15 +259,11 @@ export function Durable({ params }: { params: URLSearchParams }) {
         </section>
 
         <aside className="durable-policy">
-          <h2>SOP deste cenário</h2>
-          <ol>
-            <li>Risco alto: pedir a previsão de chegada imediatamente por SMS.</li>
-            <li>Sem resposta: repetir a cada minuto, até completar dez SMS.</li>
-            <li>Esperar um minuto após o décimo SMS.</li>
-            <li>Abrir uma tarefa urgente para o hero ligar para o motorista e encerrar os pedidos.</li>
-          </ol>
+          <h2>SOP desta execução</h2>
+          <p>Até <strong>{maxAttempts} SMS</strong>, com espera de <strong>{intervalMinutes} minuto(s)</strong> após cada confirmação. O texto do SOP define as decisões e a escalada.</p>
           <p>O intervalo começa na confirmação de cada SMS. O processamento da IA pode acrescentar alguns segundos.</p>
           <p>Fechar esta página não interrompe a carga. Reabra o mesmo link para acompanhar.</p>
+          {snapshot?.load.sop_snapshot && <details><summary>SOP usado nesta execução · {snapshot.load.sop_snapshot.version}</summary><pre className="durable-sop-text">{snapshot.load.sop_snapshot.policy.body.replaceAll("{{max_attempts}}", String(maxAttempts)).replaceAll("{{interval_minutes}}", String(intervalMinutes))}</pre></details>}
           {loadId && <dl><dt>Carga</dt><dd>{loadId}</dd><dt>Execuções do agente</dt><dd>{snapshot?.runs.length || 0}</dd><dt>Timers disparados</dt><dd>{snapshot?.timers.filter((t) => t.status === "fired").length || 0}</dd><dt>Última atualização</dt><dd>{updated ? time(new Date(updated).toISOString()) : "—"}</dd></dl>}
           {state?.failed && <p className="banner banner--alert">Há uma falha registrada. Confira a decisão do agente e o histórico antes de iniciar outra execução.</p>}
         </aside>

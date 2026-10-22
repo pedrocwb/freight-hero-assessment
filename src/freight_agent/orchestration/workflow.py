@@ -38,6 +38,15 @@ class LoadWorkflow:
                 retry_policy=RETRY,
             )
             timer = min(state.timers, key=lambda t: (t.due_at, t.timer_id), default=None)
+            if state.stop_requested:
+                # The current Activity settles first; no new graph or send starts.
+                await workflow.execute_activity(
+                    "stop_load_execution",
+                    key,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RETRY,
+                )
+                return
             if state.outbox_id:
                 await workflow.execute_activity(
                     "deliver_load_item",

@@ -33,3 +33,4 @@ class WakeState:
     timers: list[TimerRef] = field(default_factory=list)
     finished: bool = False
     documents_pending: bool = False
+    stop_requested: bool = False

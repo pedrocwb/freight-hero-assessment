@@ -16,6 +16,16 @@ function completed(): Pick<DurableSnapshot, "outbox" | "obligations" | "timers" 
 }
 
 describe("durable operation", () => {
+  it("uses the SOP pinned to the load for its progress, including custom attempt limits", () => {
+    const state = completed();
+    state.outbox = [state.outbox[0]!, state.outbox[1]!, state.outbox[10]!];
+    const load = { sop_snapshot: { version: "v2", policy: { max_attempts: 2, interval_minutes: 3, body: "custom" } } } as DurableSnapshot["load"];
+    expect(progress({ ...state, load })).toMatchObject({ complete: true, maxAttempts: 2, intervalMinutes: 3 });
+    expect(progress(state).complete).toBe(false);
+    state.outbox[1]!.status = "cancelled";
+    expect(progress({ ...state, load }).sms).toHaveLength(1);
+    expect(progress({ ...state, load }).complete).toBe(false);
+  });
   it("interleaves a driver's message with confirmed outgoing SMS", () => {
     const rows = conversation({
       outbox: [{ ...outbox({ outbox_id: "sms-1", run_id: "run-1", kind: "sms", created_at: "2026-10-21T12:00:00Z" }), accepted_at: "2026-10-21T12:00:03Z" }],

@@ -11,7 +11,8 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from freight_agent.application.contracts import InboundMessage, IngestResult, LocationPing
 from freight_agent.application.runtime import AgentRuntime, RuntimeDeps
 from freight_agent.domain.errors import DomainError
-from freight_agent.domain.load import Load
+from freight_agent.domain.events import Event, EventType
+from freight_agent.domain.load import Channel, Load
 from freight_agent.domain.ping_filter import RiskTracker
 from freight_agent.orchestration.contracts import LoadKey
 from freight_agent.orchestration.workflow import LoadWorkflow
@@ -25,6 +26,10 @@ class TemporalIngress:
         self.runtime = AgentRuntime(deps)
 
     async def notify(self, key: LoadKey) -> None:
+        async with self.deps.uow_factory() as uow:
+            load = await uow.loads.get(key.load_id)
+            if load and load.automation_stopped_at:
+                return
         await self.client.start_workflow(
             LoadWorkflow.run,
             key,
@@ -56,18 +61,46 @@ class TemporalIngress:
                 existing = await uow.loads.get(load.load_id)
                 if existing is None or existing.broker_id != load.broker_id:
                     raise DomainError("load_id is globally unique and belongs to another broker")
+                if existing.sop_snapshot != load.sop_snapshot:
+                    raise DomainError("Este ID já usa outro SOP. Inicie uma nova execução.")
             await uow.commit()
         await self._best_effort_notify(key)
         return key
 
-    async def _check(self, key: LoadKey) -> None:
+    async def _check(self, key: LoadKey, *, running: bool = False) -> None:
         async with self.deps.uow_factory() as uow:
             load = await uow.loads.get(key.load_id)
             if load is None or load.broker_id != key.broker_id:
                 raise DomainError("load/broker mismatch")
+            if running and load.automation_stop_requested_at:
+                raise DomainError("Execução parada. Inicie uma nova carga para continuar.")
+
+    async def stop(self, key: LoadKey) -> dict:
+        await self._check(key)
+        async with self.deps.uow_factory() as uow:
+            load = await uow.loads.get(key.load_id)
+            assert load is not None
+            if load.automation_stopped_at:
+                return {"status": "stopped"}
+            if not load.automation_stop_requested_at:
+                now = self.deps.clock.now()
+                await uow.loads.save(load.model_copy(update={"automation_stop_requested_at": now}))
+                event = Event(
+                    event_id=f"stop:{key.workflow_id}",
+                    load_id=key.load_id,
+                    type=EventType.EXECUTION_STOP_REQUESTED,
+                    occurred_at=now,
+                    channel=Channel.SYSTEM,
+                    body="Parada solicitada pelo operador.",
+                )
+                if await uow.events.append(event):
+                    await uow.queue.enqueue(event)
+            await uow.commit()
+        await self._best_effort_notify(key)
+        return {"status": "stopping"}
 
     async def message(self, key: LoadKey, message: InboundMessage) -> IngestResult:
-        await self._check(key)
+        await self._check(key, running=True)
         if message.load_id != key.load_id:
             raise DomainError("message/load mismatch")
         # Provider ids are scoped: two brokers may both receive message '1'.
@@ -82,7 +115,7 @@ class TemporalIngress:
         return result
 
     async def ping(self, key: LoadKey, ping: LocationPing) -> IngestResult:
-        await self._check(key)
+        await self._check(key, running=True)
         if ping.load_id != key.load_id:
             raise DomainError("ping/load mismatch")
         ping = ping.model_copy(
@@ -99,7 +132,7 @@ class TemporalIngress:
             keys = []
             for load_id in ids:
                 load = await uow.loads.get(load_id)
-                if load is not None:
+                if load is not None and not load.automation_stopped_at:
                     keys.append(LoadKey(load.broker_id, load_id))
         slots = asyncio.Semaphore(32)
 

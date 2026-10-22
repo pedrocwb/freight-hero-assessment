@@ -58,6 +58,29 @@ def test_demo_start_uses_one_load_and_one_risk_event(load: Load, monkeypatch, re
         assert state["load"]["broker_id"] == "aurora"
         assert state["load"]["delay_risk"] == "high"
         assert state["load"]["stage"] == "to_delivery"
+        assert state["load"]["sop_snapshot"]["policy"]["max_attempts"] == 10
+        policy = client.get("/demos/aurora-policy").json()
+        assert "{{max_attempts}}" in policy["body"]
+        assert (
+            client.post(
+                "/demos/aurora/aurora-custom", json={**policy, "max_attempts": 0}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/demos/aurora/aurora-custom", json={**policy, "interval_minutes": -1}
+            ).status_code
+            == 422
+        )
+        custom = {**policy, "max_attempts": 2, "interval_minutes": 3}
+        assert client.post("/demos/aurora/aurora-custom", json=custom).status_code == 202
+        custom_state = client.get("/brokers/aurora/loads/aurora-custom").json()
+        assert custom_state["load"]["sop_snapshot"]["policy"] == custom
+        assert (
+            client.post("/brokers/aurora/loads/aurora-custom/stop").json()["status"] == "stopping"
+        )
+        assert client.get("/brokers/aurora/loads/aurora-custom").status_code == 200
         assert client.post("/demos/aurora/not-a-demo").status_code == 422
 
 

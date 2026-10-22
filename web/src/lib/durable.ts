@@ -1,12 +1,22 @@
 import type { Load, LoadEvent, Obligation, OutboxItem, RunRecord, Timer } from "../api";
 
 export interface DurableSnapshot {
-  load: Load;
+  load: Load & {
+    sop_snapshot?: { version: string; policy: DemoPolicy } | null;
+    automation_stop_requested_at?: string | null;
+    automation_stopped_at?: string | null;
+  };
   events: LoadEvent[];
   obligations: Obligation[];
-  outbox: (OutboxItem & { accepted_at: string | null })[];
+  outbox: (Omit<OutboxItem, "status"> & { status: OutboxItem["status"] | "cancelled"; accepted_at: string | null })[];
   timers: Timer[];
   runs: RunRecord[];
+}
+
+export interface DemoPolicy {
+  max_attempts: number;
+  interval_minutes: number;
+  body: string;
 }
 
 export interface DurableHealth {
@@ -21,7 +31,9 @@ export async function durableRequest<T>(path: string, options: RequestInit = {})
   return data as T;
 }
 
-export function progress(snapshot: Pick<DurableSnapshot, "outbox" | "obligations" | "timers" | "runs">) {
+export function progress(snapshot: Pick<DurableSnapshot, "outbox" | "obligations" | "timers" | "runs"> & { load?: DurableSnapshot["load"] }) {
+  const maxAttempts = snapshot.load?.sop_snapshot?.policy.max_attempts ?? 10;
+  const intervalMinutes = snapshot.load?.sop_snapshot?.policy.interval_minutes ?? 1;
   const sent = snapshot.outbox.filter((o) => o.status === "sent");
   const sms = sent.filter((o) => o.kind === "sms" && o.payload.purpose === "eta_request");
   const heroes = sent.filter((o) => o.kind === "hero_task");
@@ -30,10 +42,10 @@ export function progress(snapshot: Pick<DurableSnapshot, "outbox" | "obligations
   const timer = snapshot.timers.filter((t) => t.status === "pending").sort((a, b) => a.due_at.localeCompare(b.due_at))[0];
   const failed = snapshot.runs.find((r) => r.error || r.status === "failed")
     || snapshot.outbox.find((o) => o.status === "failed");
-  const complete = !failed && sms.length === 10 && heroes.length === 1
+  const complete = !failed && sms.length === maxAttempts && heroes.length === 1
     && obligation?.status === "exhausted" && !timer
     && !snapshot.outbox.some((o) => o.status === "pending");
-  return { sms, hero, obligation, timer, failed, complete };
+  return { sms, hero, obligation, timer, failed, complete, maxAttempts, intervalMinutes };
 }
 
 export function remaining(due: string, now: number): string {

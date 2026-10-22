@@ -664,7 +664,7 @@ def _event_lines(view: _View) -> list[str]:
             lines.append(f"timer: {_timer_due(view, event)}")
         case EventType.AGENT_ACTION:
             lines.append(f"action: {_describe(view, event, None)}")
-        case EventType.HERO_UPDATE:
+        case EventType.HERO_UPDATE | EventType.EXECUTION_STOP_REQUESTED:
             lines.append(f"text: {_quote(event.body)}")
         case EventType.DOCUMENT_PROCESSED:
             lines.append(f"document: {_document_processed(event)}")
@@ -714,6 +714,8 @@ def _describe(view: _View, event: Event, limit: int | None) -> str:
             return f"system: follow-up timer due for {_kind_of(event)}"
         case EventType.HERO_UPDATE:
             return f"in hero update: {_quote(event.body, limit)}"
+        case EventType.EXECUTION_STOP_REQUESTED:
+            return f"system: execution stop requested: {_quote(event.body, limit)}"
         case EventType.DOCUMENT_PROCESSED:
             summary = f": {_quote(event.body.strip(), limit)}" if event.body.strip() else ""
             return f"system: {_document_processed(event)}{summary}"

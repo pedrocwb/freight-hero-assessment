@@ -51,7 +51,7 @@
 .durable-countdown { display: flex; flex-direction: column; text-align: right; min-width: 185px; }
 .durable-countdown > strong { font: 42px/1.2 var(--font-sign); }
 .durable-countdown small { color: var(--ink-2); }
-.durable-attempts { display: grid; grid-template-columns: repeat(10, 1fr); margin: 24px 0; gap: 6px; }
+.durable-attempts { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); margin: 24px 0; gap: 6px; }
 .durable-attempts li { display: flex; flex-direction: column; gap: 5px; padding: 12px 6px; text-align: center; border-top: 3px solid var(--line-2); background: var(--surface); font-size: 12px; color: var(--ink-2); }
 .durable-attempts .is-sent { border-color: var(--accent); background: var(--agent); color: var(--ink); }
 .durable-attempts time { font-variant-numeric: tabular-nums; }
@@ -1952,3 +1952,15 @@ summary.step-line::-webkit-details-marker {
     margin-inline: 16px;
   }
 }
+
+.durable-controls { display: flex; gap: 12px; flex-wrap: wrap; }
+.durable-editor { margin: 20px 0; padding: 18px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.durable-editor summary { cursor: pointer; font-weight: 600; }
+.durable-editor p { margin: 12px 0; color: var(--ink-2); }
+.durable-editor fieldset { border: 0; padding: 0; margin: 16px 0 0; }
+.durable-editor label { display: block; margin-bottom: 8px; font-weight: 600; }
+.durable-editor textarea, .durable-editor input { display: block; width: 100%; margin-top: 8px; padding: 10px 12px; background: var(--page); border: 1px solid var(--line-2); border-radius: var(--radius-sm); }
+.durable-editor textarea { resize: vertical; line-height: 1.5; }
+.durable-editor small { display: block; margin-top: 12px; color: var(--ink-2); }
+.durable-policy-fields { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
+.durable-sop-text { white-space: pre-wrap; font-family: inherit; font-size: 13px; margin-top: 12px; }

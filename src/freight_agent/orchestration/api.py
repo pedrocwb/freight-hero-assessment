@@ -12,6 +12,7 @@ from freight_agent.domain.errors import DomainError
 from freight_agent.domain.load import Load
 from freight_agent.orchestration.contracts import LoadKey
 from freight_agent.orchestration.demo import start_extreme_demo
+from freight_agent.orchestration.policy import DemoPolicy
 from freight_agent.orchestration.worker import services
 from freight_agent.settings import Settings
 
@@ -45,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.post("/demos/aurora/{load_id}", status_code=202)
-    async def extreme_demo(load_id: str, request: Request) -> dict:
+    async def extreme_demo(load_id: str, request: Request, body: DemoPolicy | None = None) -> dict:
         import re
 
         if not re.fullmatch(r"aurora-[a-z0-9-]{1,64}", load_id):
@@ -54,7 +55,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 503, "Configure OPENROUTER_API_KEY and restart the durable services"
             )
-        return await start_extreme_demo(request.app.state.ingress, settings.evals_dir, load_id)
+        return await start_extreme_demo(
+            request.app.state.ingress, settings.evals_dir, load_id, body
+        )
+
+    @app.get("/demos/aurora-policy")
+    async def demo_policy() -> DemoPolicy:
+        return DemoPolicy()
+
+    @app.post("/brokers/{broker_id}/loads/{load_id}/stop", status_code=202)
+    async def stop(broker_id: str, load_id: str, request: Request) -> dict:
+        return await request.app.state.ingress.stop(LoadKey(broker_id, load_id))
 
     @app.post("/loads", status_code=201)
     async def register(body: Registration, request: Request) -> dict:

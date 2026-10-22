@@ -7,17 +7,22 @@ from zoneinfo import ZoneInfo
 
 from freight_agent.application.contracts import LocationPing
 from freight_agent.domain.load import DelayRisk, Load
+from freight_agent.orchestration.policy import DemoPolicy, freeze_policy
 from freight_agent.orchestration.service import TemporalIngress
 
 
-async def start_extreme_demo(service: TemporalIngress, evals_dir: Path, load_id: str) -> dict:
+async def start_extreme_demo(
+    service: TemporalIngress, evals_dir: Path, load_id: str, policy: DemoPolicy | None = None
+) -> dict:
     metadata = json.loads((evals_dir / "fixtures/load_aurora_extreme.json").read_text())
     metadata["load_id"] = load_id
     now = datetime.now(UTC)
     local = now.astimezone(ZoneInfo("America/Sao_Paulo"))
     for stop, offset in zip(metadata["stops"], (-8, 1), strict=True):
         stop["appointment"]["time"] = (local + timedelta(hours=offset)).isoformat()
-    key = await service.register(Load.from_metadata(metadata))
+    frozen = await freeze_policy(service.deps.knowledge, policy or DemoPolicy())
+    load = Load.from_metadata(metadata).model_copy(update={"sop_snapshot": frozen})
+    key = await service.register(load)
     # Retrying the same start request cannot create a second risk event/workflow.
     await service.ping(
         key,
