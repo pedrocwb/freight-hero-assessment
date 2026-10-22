@@ -55,8 +55,8 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
-from typing import cast
+from datetime import datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from freight_agent.application import escalation
@@ -96,11 +96,11 @@ from freight_agent.domain.ping_filter import (
     observe,
 )
 from freight_agent.domain.runs import RunRecord, RunStatus
-from freight_agent.domain.timers import Timer, TimerStatus
+from freight_agent.domain.timers import Timer, TimerStatus, follow_up_due_at, is_stale, later
 from freight_agent.interfaces.clock import Clock, IdGenerator
 from freight_agent.interfaces.decisions import DecisionModel
 from freight_agent.interfaces.documents import BlobStore, DocumentProcessor
-from freight_agent.interfaces.gateways import DeliveryError, Gateways
+from freight_agent.interfaces.gateways import DeliveryError, DeliveryReceipt, Gateways
 from freight_agent.interfaces.knowledge import SopIndex
 from freight_agent.interfaces.llm import LanguageModel, LlmError
 from freight_agent.interfaces.memory import ExtractionQueue, FacilityMemory, MemoryProcessor
@@ -123,6 +123,7 @@ class RuntimeConfig:
     # How long a claimed event may stay in flight before `process_all` takes it back;
     # None: `run_deadline_s` plus a minute, so a run that is still thinking keeps it.
     claim_lease_s: float | None = None
+    delivery_followups: bool = False  # durable mode: arm request timers on delivery
     max_delivery_attempts: int = 5
     llm_timeout_s: float = 60.0  # per model call (one round); the adapter enforces it
     outbox_batch_size: int = 100  # items one `dispatch_outbox` call sends at most
@@ -192,6 +193,7 @@ class _Attempt:
     started_at: datetime
     state: RunState | None = None
     error: Exception | None = None
+    claim_token: str = field(default_factory=lambda: uuid4().hex)
     trace_id: UUID = field(default_factory=uuid4)  # the root span of the run's trace
 
 
@@ -238,7 +240,9 @@ class AgentRuntime:
         services = graph_deps(deps)
         self._gate, self._agent = services.gate, services.agent
         self._graph = build_graph(services)
-        self._executor = Executor(deps.clock, deps.ids)
+        self._executor = Executor(
+            deps.clock, deps.ids, delivery_followups=deps.config.delivery_followups
+        )
 
     @property
     def graph(self) -> RunGraph:
@@ -364,6 +368,25 @@ class AgentRuntime:
             await uow.commit()
         return len(due)
 
+    async def fire_timer(self, load_id: str, timer_id: str) -> None:
+        """Temporal's timeout is a hint; recheck the current ledger atomically."""
+        now = self._deps.clock.now()
+        async with self._uow() as uow:
+            await uow.loads.get(load_id)  # serialize with closing/rescheduling the obligation
+            timer = await uow.timers.get(timer_id)
+            if timer is None or timer.load_id != load_id:
+                raise DomainError("timer does not belong to this load")
+            obligation = await uow.obligations.get(timer.obligation_id)
+            if timer.status is not TimerStatus.PENDING or is_stale(timer, obligation):
+                return
+            if timer.due_at > now:
+                raise DomainError("timer is not due yet")
+            await uow.timers.save(timer.mark(TimerStatus.FIRED))
+            event = await self._timer_event(uow, timer, fired_at=now)
+            if await uow.events.append(event):
+                await uow.queue.enqueue(event)
+            await uow.commit()
+
     @staticmethod
     async def _timer_event(uow: UnitOfWork, timer: Timer, *, fired_at: datetime) -> Event:
         """Stamped with the firing time; `data.due_at` keeps the due time, so timer lag
@@ -389,6 +412,25 @@ class AgentRuntime:
 
     # --- runs -------------------------------------------------------------------------------
 
+    async def process_event(self, load_id: str, event_id: str) -> RunRecord:
+        """Run exactly this event, or return its committed result after an Activity retry.
+
+        A busy/expired claim never makes the caller consume a different event. Fencing
+        also prevents a timed-out Activity from committing after its replacement.
+        """
+        async with self._uow() as uow:
+            event = await uow.events.get(event_id)
+            if event is None or event.load_id != load_id:
+                raise DomainError("event does not belong to this load")
+            done = await uow.runs.for_event(event_id)
+            if done is not None:
+                return done
+        await self._reclaim_expired()
+        attempt = await self._claim(load_id=load_id, event_id=event_id)
+        if attempt is None:
+            raise RuntimeError("event is busy, out of order, or dead-lettered")
+        return await self._process(attempt)
+
     async def process_next(self) -> RunRecord | None:
         """Claim the next queued event and run the agent graph on it.
 
@@ -406,6 +448,9 @@ class AgentRuntime:
         attempt = await self._claim()
         if attempt is None:
             return None
+        return await self._process(attempt)
+
+    async def _process(self, attempt: _Attempt) -> RunRecord:
         try:
             if attempt.error is not None:
                 raise attempt.error
@@ -429,9 +474,8 @@ class AgentRuntime:
     async def _reclaim_expired(self) -> None:
         """Release the events whose claim outlived the lease: their worker died.
 
-        A run that is only slow and commits after this finds its event back in the queue:
-        its completion leaves the queued event alone, and the event's next run is skipped
-        as already processed. The lease is longer than the run deadline, so that is rare.
+        A late attempt cannot commit or release a replacement's claim: its token no
+        longer owns the queue row. The lease is longer than the run deadline.
         """
         lease_s = self._deps.config.effective_claim_lease_s
         async with self._uow() as uow:
@@ -440,14 +484,22 @@ class AgentRuntime:
         if reclaimed:
             logger.warning("reclaimed %d event(s) in flight for more than %g s", reclaimed, lease_s)
 
-    async def _claim(self) -> _Attempt | None:
+    async def _claim(
+        self,
+        *,
+        load_id: str | None = None,
+        event_id: str | None = None,
+    ) -> _Attempt | None:
         deps = self._deps
         async with self._uow() as uow:
             now = deps.clock.now()
-            event = await uow.queue.claim_next(now)
+            token = uuid4().hex
+            event = await uow.queue.claim_next(now, load_id=load_id, event_id=event_id, token=token)
             if event is None:
                 return None
-            attempt = _Attempt(event=event, run_id=deps.ids.new("run"), started_at=now)
+            attempt = _Attempt(
+                event=event, run_id=deps.ids.new("run"), started_at=now, claim_token=token
+            )
             try:
                 ctx = await load_run_context(
                     uow,
@@ -485,6 +537,8 @@ class AgentRuntime:
         state = need(attempt.state, "a run state")
         event_id = attempt.event.event_id
         async with self._uow() as uow:
+            if not await uow.queue.owns_claim(event_id, attempt.claim_token):
+                raise RuntimeError("event claim was lost; stale attempt cannot commit")
             done = await uow.runs.for_event(event_id) is not None
             if done and verdict.status is not RunStatus.SKIPPED:
                 # Another worker finished the event while this run was thinking.
@@ -554,6 +608,8 @@ class AgentRuntime:
         record = self._record(attempt, Verdict(status=RunStatus.FAILED, error=error))
         event_id = attempt.event.event_id
         async with self._uow() as uow:
+            if not await uow.queue.owns_claim(event_id, attempt.claim_token):
+                return _Finished(record, stored=False)
             await uow.queue.release(event_id, error)
             dead = any(e.event_id == event_id for e in await uow.queue.dead_letters())
             if dead:
@@ -637,13 +693,65 @@ class AgentRuntime:
             pending = await uow.outbox.pending(self._deps.config.outbox_batch_size)
         sent = 0
         for item in pending:
-            updated = await self._deliver(item)
-            async with self._uow() as uow:
-                await uow.outbox.save(updated)
-                await uow.commit()
+            updated = await self.deliver_item(item.load_id, item.outbox_id)
             if updated.status is OutboxStatus.SENT:
                 sent += 1
         return sent
+
+    async def deliver_item(self, load_id: str, outbox_id: str) -> OutboxItem:
+        """Deliver one stable action. Confirmation and its follow-up timer commit together.
+
+        The gateway must honor the idempotency key across processes. A retry can repeat
+        the external call, but cannot reset a timer whose confirmation already committed.
+        """
+        async with self._uow() as uow:
+            items = await uow.outbox.list_for_load(load_id)
+            item = next((i for i in items if i.outbox_id == outbox_id), None)
+            if item is None:
+                raise DomainError("outbox item does not belong to this load")
+            if item.status is not OutboxStatus.PENDING:
+                return item
+        updated = await self._deliver(item)
+        async with self._uow() as uow:
+            await uow.loads.get(load_id)
+            current = next(
+                i for i in await uow.outbox.list_for_load(load_id) if i.outbox_id == outbox_id
+            )
+            if current.status is not OutboxStatus.PENDING:
+                return current
+            await uow.outbox.save(updated)
+            if updated.status is OutboxStatus.SENT:
+                await self._delivery_timer(uow, updated)
+            await uow.commit()
+        return updated
+
+    async def _delivery_timer(self, uow: UnitOfWork, item: OutboxItem) -> None:
+        followup = item.payload.get("follow_up")
+        if not self._deps.config.delivery_followups or not isinstance(followup, dict):
+            return
+        followup = cast(dict[str, Any], followup)
+        obligation_id = str(followup["obligation_id"])
+        obligation = await uow.obligations.get(obligation_id)
+        if obligation is None or not obligation.is_open:
+            return
+        now = self._deps.clock.now()
+        due_at = follow_up_due_at(
+            requested=later(item.accepted_at or now, timedelta(minutes=int(followup["minutes"]))),
+            deferred_until=obligation.deferred_until,
+            grace=timedelta(minutes=int(followup["grace_minutes"])),
+        )
+        for pending in await uow.timers.pending_for_obligation(obligation_id):
+            await uow.timers.save(pending.mark(TimerStatus.SUPERSEDED))
+        timer = Timer(
+            timer_id=f"delivery:{item.outbox_id}",
+            load_id=item.load_id,
+            obligation_id=obligation_id,
+            due_at=due_at,
+            created_at=now,
+            reason="confirmed delivery follow-up",
+        )
+        await uow.timers.save(timer)
+        await uow.obligations.save(obligation.attach_timer(timer.timer_id))
 
     async def _deliver(self, item: OutboxItem) -> OutboxItem:
         attempts = item.attempts + 1
@@ -657,7 +765,7 @@ class AgentRuntime:
             }
             return item.model_copy(update=update)
         try:
-            await send(self._deps.gateways)
+            receipt = await send(self._deps.gateways)
         except Exception as exc:  # the payload is sound, so the failure may pass: retry
             error = str(exc) if isinstance(exc, DeliveryError) else f"{type(exc).__name__}: {exc}"
             final = attempts >= self._deps.config.max_delivery_attempts
@@ -672,7 +780,15 @@ class AgentRuntime:
             status = OutboxStatus.FAILED if final else OutboxStatus.PENDING
             update = {"attempts": attempts, "last_error": error, "status": status}
             return item.model_copy(update=update)
-        return item.model_copy(update={"attempts": attempts, "status": OutboxStatus.SENT})
+        accepted_at = receipt.accepted_at if receipt else self._deps.clock.now()
+        return item.model_copy(
+            update={
+                "attempts": attempts,
+                "status": OutboxStatus.SENT,
+                "accepted_at": accepted_at,
+                "last_error": None,
+            }
+        )
 
     async def tick(self) -> list[RunRecord]:
         """queue_due_events, then process_all, then dispatch_outbox, then
@@ -753,7 +869,7 @@ def _unknown_load(load_id: str) -> IngestResult:
 
 
 # One outbox item's gateway call, its payload already read.
-_Send = Callable[[Gateways], Awaitable[None]]
+_Send = Callable[[Gateways], Awaitable[DeliveryReceipt | None]]
 
 
 def _delivery(item: OutboxItem) -> _Send:

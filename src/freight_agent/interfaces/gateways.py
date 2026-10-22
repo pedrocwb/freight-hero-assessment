@@ -6,6 +6,7 @@ the message service's job.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from freight_agent.domain.load import Stage
@@ -15,10 +16,21 @@ class DeliveryError(Exception):
     """The integration service rejected or failed the call. The outbox will retry."""
 
 
+@dataclass(frozen=True)
+class DeliveryReceipt:
+    """Provider acceptance time, stable when the same idempotency key is retried."""
+
+    accepted_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.accepted_at.tzinfo is None:
+            raise ValueError("delivery acceptance must have a timezone")
+
+
 class SmsGateway(Protocol):
     async def send(
         self, *, load_id: str, contact_id: str, text: str, idempotency_key: str
-    ) -> None: ...
+    ) -> DeliveryReceipt | None: ...
 
 
 class EmailGateway(Protocol):
@@ -30,8 +42,8 @@ class EmailGateway(Protocol):
         subject: str | None,
         body: str,
         idempotency_key: str,
-    ) -> None:
-        """Send in the load's main email thread."""
+    ) -> DeliveryReceipt | None:
+        """Send in the load's main email thread. None: acceptance time is not supplied."""
         ...
 
 

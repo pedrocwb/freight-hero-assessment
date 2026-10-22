@@ -15,7 +15,7 @@ on:
       suites:
         description: Scenario suites, space-separated
         type: string
-        default: core agent docs
+        default: core agent docs memory grounding
       k:
         description: Repetitions per scenario
         type: number

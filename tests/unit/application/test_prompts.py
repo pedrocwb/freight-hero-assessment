@@ -22,6 +22,7 @@ from freight_agent.application.prompts import (
     render_agent_system_prompt,
     render_gate_prompt,
     render_gate_system_prompt,
+    render_load,
 )
 from freight_agent.domain.broker import (
     Broker,
@@ -274,6 +275,53 @@ def test_a2_prompt_has_load_contacts_and_stops(load: Load) -> None:
         "- brk_0087: broker; channels: email, slack",
     ):
         assert fragment in prompt
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stage", "sequence", "facility", "position"),
+    [
+        (Stage.DISPATCHED, 1, "Riverbend plant, Stockton, CA", "heading to"),
+        (Stage.TO_PICKUP, 1, "Riverbend plant, Stockton, CA", "heading to"),
+        (Stage.AT_PICKUP, 1, "Riverbend plant, Stockton, CA", "at"),
+        (Stage.TO_DELIVERY, 2, "Valley DC, Reno, NV", "heading to"),
+        (Stage.AT_DELIVERY, 2, "Valley DC, Reno, NV", "at"),
+        (Stage.DELIVERED, 2, "Valley DC, Reno, NV", "completed at"),
+    ],
+)
+def test_prompt_and_load_tool_ground_the_operational_stop_in_each_stage(
+    load: Load, stage: Stage, sequence: int, facility: str, position: str
+) -> None:
+    staged = load.model_copy(update={"stage": stage})
+    ctx = a2_context(staged)
+    event = agent_user_variables(ctx, QUESTION, resolved(QUESTIONS))["event"]
+    reminder = event.split("## Stop grounding for this decision")[1]
+    assert f"stage={stage.value}; operational stop=" in reminder
+    assert facility in reminder
+    for text in (a2_prompt(staged), render_load(ctx), render_load(ctx, "stops")):
+        target = text.split("Operational stop (resolved from load state): ")[1].split("\n")[0]
+        assert target.startswith(f"stop {sequence}, ")
+        assert facility in target
+        assert f"Position at stage {stage.value}: {position} this stop." in text
+        if stage == Stage.DELIVERED:
+            assert "no pending arrival or next ETA target" in text
+        else:
+            assert "NOT the following stop in the itinerary" in text
+
+
+@pytest.mark.unit
+def test_operational_context_respects_an_explicit_stop_within_a_multi_stop_leg(load: Load) -> None:
+    second_pickup = load.stops[0].model_copy(
+        update={"sequence": 3, "name": "Second warehouse", "address": "Modesto, CA"}
+    )
+    load = load.model_copy(
+        update={"stops": (*load.stops, second_pickup), "current_stop_sequence": 3}
+    )
+    for text in (a2_prompt(load), render_load(a2_context(load), "stops")):
+        target = text.split("Operational stop (resolved from load state): ")[1].split("\n")[0]
+        assert target == "stop 3, pickup: Second warehouse, Modesto, CA."
+        assert "Riverbend" not in target
+        assert "Valley" not in target
 
 
 @pytest.mark.unit

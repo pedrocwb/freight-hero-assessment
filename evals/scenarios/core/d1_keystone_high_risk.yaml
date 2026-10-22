@@ -34,26 +34,28 @@ steps:
     ping: {delay_risk: high}
     expect:
       actions:
-        - {kind: sms, to: drv_20931, purpose: eta_request, count: 1}
+        - {kind: sms, to: drv_20931, purpose: eta_request, regex: "(?i)(Riverbend|Stockton)", count: 1}
       obligations:
         eta_request: {status: open, attempts: 1}
       timers: {pending: 1, due_at: "07:31"}
       run_status: [acted]
       llm_calls: 1
     forbid:
+      - {kind: sms, regex: "(?i)(Valley|Reno)"}
       - {kind: email, to: dsp_4410}
 
   - at: "07:31"
     note: No ETA after 30 minutes; alert the broker's Slack channel and close the request.
     expect:
       actions:
-        - {kind: broker_slack, contains: ["481207"], count: 1}
+        - {kind: broker_slack, contains: ["481207"], regex: "(?i)(Riverbend|Stockton)", count: 1}
       obligations:
         eta_request: {status: exhausted, attempts: 1}
       timers: {pending: 0}
       run_status: [acted]
       llm_calls: 1
     forbid:
+      - {kind: broker_slack, regex: "(?i)(Valley|Reno)"}
       - {kind: sms}
       - {kind: email, to: dsp_4410}
 

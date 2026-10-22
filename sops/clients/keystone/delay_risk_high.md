@@ -15,15 +15,17 @@ dispatcher, at any step.
 
 When the delay risk changes to high:
 1. If an ETA request is already open, do nothing: its follow-up is already set.
-2. Otherwise, send the driver one SMS that asks for the ETA at the next stop, for
-   example "What time will you arrive at the pickup?". This is ETA request 1.
+2. Otherwise, send the driver one SMS that asks for the ETA at the operational
+   stop resolved in the load context. Name that facility (pickup while to_pickup,
+   delivery while to_delivery). This is ETA request 1.
 3. Set a follow-up timer for 30 minutes.
 
 When the follow-up timer is due and there is still no ETA:
 1. Do not send the driver a second SMS.
-2. Post an alert in the broker's Slack channel. Start with the load number, then
-   say there is no ETA from the driver 30 minutes after our SMS and the delay risk
-   is high.
+2. Post an alert in the broker's Slack channel. Start with the load number, name
+   the operational facility whose ETA is missing, then say there is no ETA from
+   the driver 30 minutes after our SMS and the delay risk is high. Use the stop
+   for the current stage, not a later stop in the itinerary.
 3. Close the ETA request as exhausted.
 
 In between, a question or a message without a time ("ok", "on my way") is not an

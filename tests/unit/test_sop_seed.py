@@ -64,6 +64,7 @@ ACME_ONLY = {"detention", "proof_of_delivery"}
 
 # Every file outside standard/, with the merge mode the table gives it.
 OVERRIDES: dict[str, MergeMode] = {
+    "clients/aurora/delay_risk_high.md": MergeMode.REPLACE,
     "clients/northline/delay_risk_high.md": MergeMode.REPLACE,
     "clients/keystone/delay_risk_high.md": MergeMode.REPLACE,
     "clients/keystone/types/reefer/driver_departed.md": MergeMode.EXTEND,

@@ -5,8 +5,9 @@ PY ?= /opt/homebrew/bin/python3.13
 
 # The scenario suites `make eval` runs, in this order: core (the assignment and the SOP
 # procedures), agent (the tool loop's outcomes), docs (the document pipeline) and memory
-# (the facility memory). A suite runs once its folder exists under evals/scenarios/.
-SUITES ?= core agent docs memory
+# (the facility memory), grounding (the operational stop at each load stage).
+# A suite runs once its folder exists under evals/scenarios/.
+SUITES ?= core agent docs memory grounding
 EVAL_SUITES := $(notdir $(wildcard $(addprefix evals/scenarios/,$(SUITES))))
 # Repetitions per scenario, and the most one suite's experiment may spend (USD).
 EVAL_K ?= 1
@@ -88,3 +89,11 @@ studio:
 ci: lint typecheck arch cov sop-lint
 
 all: lint typecheck arch cov
+
+# Downloads the Temporal time-skipping test server on first run; no LLM calls.
+.PHONY: temporal-test temporal-up
+temporal-test:
+	RUN_TEMPORAL_TESTS=1 uv run pytest tests/temporal -v
+
+temporal-up:
+	docker compose -f compose.temporal.yml up --build

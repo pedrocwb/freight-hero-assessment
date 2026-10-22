@@ -1,3 +1,4 @@
+<!-- generated-by: gsd-doc-writer -->
 # Design decisions and contracts
 
 The rules that the code, the SOP files and the eval scenarios all follow. When one changes,
@@ -12,6 +13,7 @@ this file changes in the same commit. The words used here are explained at the s
 | Client B | `keystone` | Keystone Freight | Scenarios set `load_overrides: {broker: {id: keystone, ...}}` |
 | Client B, refrigerated | `keystone` with load type `reefer` | | `load_overrides: {load_types: [reefer]}` |
 | A third client with its own catalog | `acme` | Acme Freight | The `docs` suite |
+| Extreme live test | `aurora` | Aurora Transportes | `evals/fixtures/load_aurora_extreme.json`: ten ETA SMS, one minute apart, then a Hero |
 
 The SOP client id is the load's `broker_id`. A client with no folder runs on the standard
 layer and the standard catalog.
@@ -50,10 +52,10 @@ mode: replace                  # replace (default) or extend; standard/ is alway
   load-type layers, never another client's.
 - **Intents in files:** `standard/` files name only standard intents; a client's files may
   name the intents of its catalog.
-- **Version:** a 12-hex-digit hash of the whole folder, recorded with every run as
-  `sop_version`. The folder is read on every run, so an edited file applies to the next
-  run. A file that cannot be read fails the runs of the clients that see it, never the
-  others.
+- **File-backed version:** a 12-hex-digit hash of the whole folder, recorded with every run
+  as `sop_version`. The file-backed runtime reads the folder on each run, so an edited file
+  applies to the next run. A file that cannot be read fails the runs of the clients that
+  see it, never the others. Live workspace loads use the immutable profile snapshot below.
 
 Sections, and the scenarios that cover them (tag `sop:<id>`):
 
@@ -83,6 +85,32 @@ High-risk procedures (the scenarios depend on these exact steps):
   contact the dispatcher.
 - **`acme`:** up to three SMS, 20 minutes apart; then email the dispatcher, an urgent Hero
   task, and close the request as exhausted.
+- **`aurora`:** ten SMS, one minute apart; wait one final minute after the tenth accepted
+  SMS, then create an urgent Hero task and close the request as exhausted.
+
+## Broker profiles and execution snapshots
+
+The workspace (`orchestration/profiles.py`, `orchestration/workspace.py`) seeds four broker
+profiles from the SOP files. `PostgresProfiles` stores the current profile and revision in
+`broker_profiles`; saving uses a revision compare-and-swap, so a stale browser cannot
+overwrite another edit. Profiles cannot edit the inherited standard layer or include a
+different broker's client sections. Client and load-type sections support `replace` and
+`extend`, subject to catalog, identifier and inheritance validation.
+
+Starting an execution validates the requested profile revision, creates a new load id,
+rebases scenario appointments to real time, freezes the catalog and layered sections into
+`Load.sop_snapshot`, and sends an initial location ping. Scenario messages are operator
+inputs; their scripted wait steps cannot advance the clock. Repeating an accepted start
+with the same load id, scenario and original revision keeps its original snapshot.
+
+`freeze_profile` renders obligation placeholders (`max_attempts`, `follow_up_minutes`,
+`on_exhausted`) and hashes the rendered data with the profile revision. It reserves SMS
+capacity of at least the ETA attempt count plus one reply in the rate window. Thus the
+three-SMS default is not a universal limit for live custom profiles. `pinned_index` supplies
+the snapshot to graph and document Activities. Subsequent profile edits affect only new
+executions. Existing profiles are stored data, not automatically migrated by later changes
+to seed files. CLI evals read file-backed SOPs and do not import these saved profiles.
+Approval, canaries and version-history rollback are not implemented.
 
 ## Client catalog
 
@@ -159,6 +187,17 @@ The tracker keeps the ids of the last 64 pings, so a ping delivered twice change
 The agent's read tools answer from this snapshot and the SOP index, so no tool opens a
 transaction.
 
+**Stop grounding.** `Load.current_stop()` honors an explicit `current_stop_sequence` when
+it matches a stop; otherwise it chooses a pickup for `dispatched`, `to_pickup`, `at_pickup`,
+and a delivery for `to_delivery`, `at_delivery`, `delivered` (falling back to the final stop
+if that type is absent). `application/prompts.py` renders the operational stop and its
+relation to the stage in the load block and `get_load`, and repeats the resolved fact beside
+the event. The SOP's generic “next stop” or “destination” means this stop for ETA work,
+not the subsequent itinerary stop. At a facility, arrival has already happened; after
+delivery there is no pending arrival. This shared context reaches local and pinned Hub
+prompts, including executions with older SOP snapshots. It guides model wording; it does
+not add a hard validator that rejects every wrong facility reference.
+
 ## Prefilter
 
 Code, before any model call, in this order; the first match decides:
@@ -195,8 +234,9 @@ The runtime runs the claim and the commit, the run's two transactions, around it
   completes the event, so a retry never creates a duplicate.
 - **Claim lease:** each pass over the queue first returns to it the events in flight for
   longer than the run deadline plus 60 s, each counted as a failed attempt. A slow run that
-  commits after its event was taken back changes nothing in the queue, and the event's next
-  run is skipped as `already_processed`.
+  finishes after its event was taken back cannot commit or release the replacement claim:
+  `owns_claim(event_id, claim_token)` is checked in the transaction. An event already
+  committed is skipped as `already_processed` on retry.
 
 The rules (`domain/rules.py`), high severity first: `recipient_is_contact` (high),
 `no_contact_details_in_text` (high: an email address or a phone number in outgoing text; a
@@ -226,10 +266,21 @@ commit transaction. "Now" is the clock's time when the run commits.
 An action that would break a domain invariant is skipped and reported in the run record; the
 rest of the plan runs. When every approved action was skipped, the run is `noop`.
 
+**Durable follow-ups.** The table describes the base executor. With
+`delivery_followups=True` (required by `LoadActivities`), an ETA request carries its
+follow-up configuration on the outbox item. Delivery records `accepted_at`, then arms
+the timer from that receipt plus the configured minutes, respecting a deferral. An explicit
+`schedule_timer` in the same plan does not start the wait ahead of that send. Document
+requirements and timers unrelated to an outgoing request retain their normal semantics.
+
 **Outbox.** The idempotency key is `{event_id}:{index}`, where index is the action's place
 in the approved list. Delivery checks the payload first (a malformed one fails at once). A
 gateway error keeps the item pending, with its attempts and last error, until 5 attempts
-make it `failed`; the rest of the batch is still sent. Gateways ignore a repeated key.
+make it `failed`; the legacy batch continues with other items. In Temporal, delivery is
+serialized per load and a failed item makes `load_snapshot` fail non-retryably, requiring
+operator intervention. Recording gateways ignore repeated keys within their process. A real provider adapter
+must persistently deduplicate or reconcile an ambiguous send; Temporal retry alone does
+not guarantee exactly-once external delivery.
 
 | Kind | Payload |
 |---|---|
@@ -251,9 +302,10 @@ start a run.
 ## Documents
 
 - A new message saves one pending document per attachment, in the message's transaction.
-- `tick()` runs, in order: fire due timers, read pending documents, run the queue, deliver
+- Legacy `tick()` runs, in order: fire due timers, read pending documents, run the queue, deliver
   the outbox, then the facility memory extraction. So a document is read before the queue
-  runs, and its event queues behind the message.
+  runs, and its event queues behind the message. Live operations use
+  `process_load_documents` before the queued graph event and use the load's pinned catalog.
 - The pipeline (`application/documents.py`): blob, pages (a page with little text becomes an
   image), one `extract` call answering `{type_id, confidence, fields, notes}`, checks in
   code, then a status: `processed`, `needs_review` (confidence under 0.7, unknown type,
@@ -308,8 +360,11 @@ start a run.
   on Postgres the offline hash is 1536 wide too, and an embedder of another width stops the
   start. On `memory`: an in-memory store with the same index. Evals and Studio always get a
   fresh in-memory one per play.
-- **Lifecycle:** one facility memory per platform process. A reset (and a scenario) forgets
-  every note and job with the load memory, so a scenario never reads another's notes.
+- **Lifecycle:** eval and Studio plays use a fresh facility memory. Legacy simulator reset
+  clears its own memory. The live worker and relay share durable Postgres memory; starting
+  a live scenario does not reset other loads. Memory-suite fixtures receive an isolated
+  facility address per live execution, preventing their seeded notes from contaminating
+  other test loads.
 
 ## Event ids
 
@@ -326,7 +381,8 @@ Ids of runs, obligations, timers, outbox items and documents have the prefixes `
 
 ## Eval timing
 
-The scenario player (`evalkit/runner.py`) is used by the experiments, the platform and Studio:
+The scenario player (`evalkit/runner.py`) is used by experiments, CLI plays, Studio and the
+legacy simulation API. The broker workspace uses Temporal and wall-clock time instead:
 
 - The virtual clock starts at the scenario's `date` and `start`, in its `timezone` (default
   `America/Los_Angeles`).
@@ -340,6 +396,44 @@ The scenario player (`evalkit/runner.py`) is used by the experiments, the platfo
 - Checks read the outbox items created during the step, and the ledger and timers at its
   end. `llm_calls` counts the gate, one per agent run whatever its rounds, and one per
   document read; the judge is not counted.
+
+The `grounding` suite covers the six load stages plus departure from pickup into the
+delivery leg. It checks the facility in SMS and Slack text, rejects the other stop and
+uses judge rubrics for stage-appropriate meaning. Its negative-control tests
+(`tests/evalkit/test_stop_grounding.py`) prove that the original wrong-stop Slack alert,
+a missing stop and a response naming both stops fail. Live workspace scenario controls
+reuse inputs, not these automated graders.
+
+## Temporal execution
+
+- **Identity:** `LoadKey.workflow_id` is `load/<broker_id>/<load_id>`. The load id remains
+  globally unique in Postgres. Inbound provider ids are scoped by workflow and channel;
+  location ping ids are scoped by workflow.
+- **Ingress:** commit business data, then signal-with-start using `wake`. A notification
+  failure does not undo the database commit. `TemporalIngress.relay` repeatedly discovers
+  loads with pending work and repairs the database-to-Temporal gap; startup also finds
+  existing timers.
+- **Workflow:** deterministic `LoadWorkflow` reads a snapshot, checks stop, then services
+  outbox, due timer, pending document, or queued event, in that order. Existing messages
+  remain ahead of a newly fired timer in the FIFO. It waits on `wake` or the next absolute
+  timer deadline, and rereads state before acting. After 100 turns, or Temporal's history
+  recommendation, it continues as new.
+- **Activities:** `run_load_graph` wraps the existing claim/think/commit runtime. Its
+  timeout is 280 seconds, surrounding the 240-second thinking deadline and inside the
+  300-second claim lease. Snapshot, timer and stop Activities have 30-second timeouts;
+  delivery has 60 seconds; documents have 280 seconds. Transient Activity errors retry
+  with backoff. Dead-letter events and exhausted delivery require operator intervention.
+- **Stop:** save the request and wake the workflow. The current Activity settles before
+  `stop_load_execution` cancels pending timers, open obligations and pending outbox items,
+  saves `automation_stopped_at` and completes the workflow. History and accepted sends
+  remain. Inputs after a stop request are refused; the relay does not restart a stopped
+  load. A new execution is required to continue.
+- **Completion:** a delivered load completes when no queued event, pending send or open
+  obligation remains. Other idle loads wait for inputs. The relay separately processes
+  facility extraction jobs and repairs missed jobs at startup.
+- **Guarantee boundary:** durable deadlines survive worker restarts; they are not exact
+  wall-clock delivery promises during outages, backlog or model latency. A real external
+  provider still needs an idempotent delivery adapter.
 
 ## Prompts and their versions
 
@@ -370,13 +464,15 @@ The scenario player (`evalkit/runner.py`) is used by the experiments, the platfo
 ## Storage
 
 - **Choice.** `PERSISTENCE=memory` (default) or `postgres` with `DATABASE_URL`, read only by
-  `bootstrap.py`. The platform API and its simulation run on it; Docker Compose sets
-  `postgres`. The evals and Studio build a fresh in-memory store per play, whatever the
-  setting: a play is a throwaway world.
+  the composition roots. The legacy platform API and simulation run on it; Docker Compose
+  sets `postgres`. Temporal requires Postgres and a real clock, with a separate database in
+  `compose.temporal.yml`. The main API proxies the broker workspace to durable ingress.
+  Evals and Studio build a fresh in-memory store per play, whatever the setting.
 - **Schema.** `migrations/NNNN_name.sql`, applied in order by `agent db migrate`, each in its
   own transaction and recorded in `schema_migrations`. An applied file that changed is
-  refused: add a new file instead. `0001` holds the tables; `0002` enables pgvector, which
-  the facility memory uses. Then the command sets up LangGraph's Postgres store. Ids are text
+  refused: add a new file instead. `0001` holds the tables; `0002` enables pgvector;
+  `0003` adds claim fencing and delivery receipts; `0004` adds broker profiles. Then the
+  command sets up LangGraph's Postgres store for facility memory. Ids are text
   in the `C` collation, and ties sort by natural id as in the memory store. Foreign keys are
   checked at commit, the event log refuses UPDATE and DELETE, and a load's metadata and a
   run record are JSONB.
@@ -385,10 +481,12 @@ The scenario player (`evalkit/runner.py`) is used by the experiments, the platfo
   `FOR UPDATE SKIP LOCKED` (each worker skips rows another holds), so several workers could
   share them. A partial unique index allows one event in flight per load. The claim time is
   the runtime's clock, for the claim lease.
-- **Lifecycle.** A reset (and a scenario) empties every domain table and the facility memory.
-  On start, the platform resumes a durable store: its virtual clock goes to the latest time
-  the loads hold, and delivered loads without an extraction job are queued again. Attachment
-  files go to `BLOBS_DIR` on Postgres, in memory otherwise.
+- **Lifecycle.** Legacy simulator reset empties its domain tables and facility memory, and
+  its startup restores the virtual clock from stored times. Broker profiles are outside
+  that reset list. The live workspace instead appends independent loads in the durable
+  database and never resets it on scenario start. Temporal resumes waits and the relay
+  repairs notifications and extraction jobs. Attachment files go to `BLOBS_DIR` on
+  Postgres, in memory otherwise.
 - **Tests.** `tests/contract/` runs every suite on both stores, the facility memory's
   included (Postgres when `TEST_DATABASE_URL` or `DATABASE_URL` is set, marked
   `integration`, each test in a schema of its own); `make integration` runs them with the

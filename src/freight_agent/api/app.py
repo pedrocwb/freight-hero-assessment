@@ -76,6 +76,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.service = service
+    app.state.durable_api_url = settings.durable_api_url
     app.state.scenarios = ScenarioRunner(app.state.service)
     app.state.heartbeat_s = heartbeat_s
     app.add_middleware(

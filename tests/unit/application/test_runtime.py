@@ -272,7 +272,7 @@ async def test_an_empty_message_is_skipped_without_a_model_call(load: Load) -> N
     assert world.model.calls == []
 
 
-async def test_an_event_queued_twice_is_skipped_the_second_time(load: Load) -> None:
+async def test_an_event_queued_twice_is_only_claimed_once(load: Load) -> None:
     world = await World(load).start()
     await world.message(at(7, 12), "What's the PO?", message_id="m-1")
     async with world.store.unit_of_work() as uow:  # a redelivery that bypassed ingest
@@ -287,7 +287,6 @@ async def test_an_event_queued_twice_is_skipped_the_second_time(load: Load) -> N
 
     assert [(r.status, r.skip_reason) for r in runs] == [
         (RunStatus.NOOP, None),
-        (RunStatus.SKIPPED, "already_processed"),
     ]
 
 
@@ -525,7 +524,7 @@ class _AnnouncingProcessor:
         self._world = world
         self.seen: list[tuple[int, int]] = []  # (queued events, runs) at each call
 
-    async def process_pending(self, limit: int = 10) -> list[Event]:
+    async def process_pending(self, limit: int = 10, *, load_id: str | None = None) -> list[Event]:
         announced: list[Event] = []
         async with self._world.store.unit_of_work() as uow:
             self.seen.append((await uow.queue.size(), len(await uow.runs.list_for_load(LOAD_ID))))

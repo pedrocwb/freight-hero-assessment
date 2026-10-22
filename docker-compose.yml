@@ -84,6 +84,9 @@ services:
       # Bytes of uploaded attachments, kept across restarts with the database rows that
       # point at them.
       BLOBS_DIR: /app/blobs
+      DURABLE_API_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - blobs:/app/blobs
     ports:

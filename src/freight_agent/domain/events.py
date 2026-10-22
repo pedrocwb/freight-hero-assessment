@@ -18,6 +18,7 @@ class EventType(StrEnum):
     HERO_UPDATE = "hero_update"
     AGENT_ACTION = "agent_action"  # the agent's own action, logged as memory; never starts a run
     DOCUMENT_PROCESSED = "document_processed"  # the document pipeline read an attachment
+    EXECUTION_STOP_REQUESTED = "execution_stop_requested"  # orchestration control, not an LLM run
 
 
 # Event types that are queued and start a run.

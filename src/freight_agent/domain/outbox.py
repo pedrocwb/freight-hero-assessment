@@ -23,6 +23,7 @@ class OutboxStatus(StrEnum):
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class OutboxItem(DomainModel):
@@ -38,3 +39,4 @@ class OutboxItem(DomainModel):
     status: OutboxStatus = OutboxStatus.PENDING
     attempts: int = 0
     last_error: str | None = None
+    accepted_at: datetime | None = None

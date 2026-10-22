@@ -35,6 +35,7 @@ TABLES = {
     "event_queue",
     "documents",
     "schema_migrations",
+    "broker_profiles",
 }
 
 
@@ -87,7 +88,8 @@ async def test_the_repo_migrations_create_every_table_and_a_rerun_changes_nothin
     first = await apply_migrations(DATABASE_URL, schema=schema)
     assert [m.version for m in first] == [m.version for m in discover(MIGRATIONS_DIR)]
     assert await _tables(schema) == TABLES
-    assert set(DOMAIN_TABLES) == TABLES - {"schema_migrations"}  # what `clear()` empties
+    # Clearing a simulator's loads must not discard saved broker configurations.
+    assert set(DOMAIN_TABLES) == TABLES - {"schema_migrations", "broker_profiles"}
 
     assert await apply_migrations(DATABASE_URL, schema=schema) == []
     assert await _versions(schema) == [m.version for m in first]

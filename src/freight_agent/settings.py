@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Studio always play in a fresh in-memory world, whatever this says.
     persistence: Literal["memory", "postgres"] = "memory"
 
+    # Durable orchestration entry points (`agent temporal ...`).
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "freight-loads"
+    temporal_reconcile_seconds: float = Field(default=10.0, ge=1.0)
+    # Fixed server-side bridge from the platform UI to the isolated durable API.
+    durable_api_url: str = "http://127.0.0.1:8001"
+
     # Tracing: LangSmith when on and the key is set, otherwise no tracing
     langsmith_tracing: bool = False
     langsmith_project: str = "freight-agent"

@@ -1,0 +1,37 @@
+id: stop_delivered
+title: Facility answer at delivered
+suite: grounding
+tags: [regression, stop-grounding, sop:delay_risk_high, sop:driver_questions]
+description: >
+  Ground the operational stop in the load stage. A correct route in the context
+  is not enough: outbound text must identify the facility relevant to this stage.
+load: fixtures/load_481207.json
+load_overrides:
+  broker: {id: keystone, name: Keystone Freight}
+  stage: delivered
+date: 2026-10-13
+start: "06:55"
+steps:
+  - at: "07:00"
+    message:
+      channel: sms
+      sender: drv_20931
+      body: For my records, what is the name and city of the facility where this load was delivered?
+    expect:
+      actions:
+        - {kind: sms, to: drv_20931, purpose: reply, regex: "(?i)(Valley|Reno)", count: 1}
+      timers: {pending: 0}
+      run_status: [acted]
+      intent: question
+      judge:
+        min_score: 1.0
+        rubric: >
+          The load stage is delivered. The reply must identify
+          Valley DC in Reno, the delivery
+          as the facility where delivery was completed.
+          It must not describe arrival at that facility as pending, ask for an ETA,
+          or identify the other facility as the answer.
+    forbid:
+      - {kind: sms, regex: "(?i)(Riverbend|Stockton)"}
+      - {kind: sms, purpose: eta_request}
+      - {kind: stage_update}

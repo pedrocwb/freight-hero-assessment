@@ -3,7 +3,7 @@
  * The old `#/inspector` links open the conversation too.
  */
 
-export const SCREENS = ["load", "scenarios", "sops"] as const;
+export const SCREENS = ["load", "scenarios", "sops", "durable"] as const;
 export type ScreenId = (typeof SCREENS)[number];
 const DEFAULT_SCREEN: ScreenId = "load";
 const ALIASES: Record<string, ScreenId> = { inspector: "load" };
